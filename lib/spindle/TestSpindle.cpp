@@ -39,12 +39,46 @@ void Spindle::setCurrentPosition(int position) {
 }
 
 void Spindle::incrementCurrentPosition(int amount) {
-  setCurrentPosition(getCurrentPosition() + amount);
+  // Mirror ESPSpindle::incrementCurrentPosition: keep the windowed
+  // last-revolution bookkeeping (m_lastRev*) so getEstimatedVelocityInPPS()
+  // reports a realistic, time-based velocity to the leadscrew feed-forward.
+  // The Axis base members (m_lastRev*, m_lastPulseTimestamp) are zero
+  // initialised, and micros() is the test virtual clock.
+  int64_t t = micros();
+  int pos = getCurrentPosition() + amount;
+  setCurrentPosition(pos);
+  int newpos = getCurrentPosition();
+  if (pos != newpos) {  // spindle position has wrapped
+    m_lastRevPosition -= pos - newpos;
+  }
+  if (amount != 0) {
+    m_lastPulseTimestamp = t;
+    int64_t diff = newpos - m_lastRevPosition;
+    if (diff < 0) {
+      diff = -diff;
+    }
+    if (diff > ELS_SPEED_COUNTS) {
+      // Update stats for the last "full revolution" window.
+      m_lastRevSize = newpos - m_lastRevPosition;
+      m_lastRevPosition = newpos;
+      m_lastRevMicros = t - m_lastRevTimestamp;
+      m_lastRevTimestamp = t;
+    }
+  }
 }
 
-float Spindle::getEstimatedVelocityInRPM() { return 0.0f; }
+float Spindle::getEstimatedVelocityInRPM() {
+  if (m_lastRevMicros == 0) return 0;
+  if (micros() - m_lastRevTimestamp > 1000000) return 0;
+  return -((m_lastRevSize * 60000000) /
+           (m_lastRevMicros * config->spindleEncoderPpr()));
+}
 
-float Spindle::getEstimatedVelocityInPPS() { return 0.0f; }
+float Spindle::getEstimatedVelocityInPPS() {
+  if (m_lastRevMicros == 0) return 0;
+  if (micros() - m_lastRevTimestamp > 1000000) return 0;
+  return (m_lastRevSize * US_PER_SECOND) / (m_lastRevMicros);
+}
 
 int Spindle::consumePosition() {
   int position = m_unconsumedPosition;
