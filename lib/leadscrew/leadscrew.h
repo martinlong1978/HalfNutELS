@@ -2,6 +2,7 @@
 #include <axis.h>
 #include <Arduino.h>
 #include "leadscrew_io.h"
+#include "leadscrew_stopsync.h"
 #include "globalstate.h"
 #include "latheconfig.h"
 #pragma once
@@ -13,26 +14,10 @@
 #endif
 
 /**
- * The state of the leadscrew stop position for either the left or right stop
- */
-enum class LeadscrewStopState { SET, UNSET };
-enum class LeadscrewStopPosition { LEFT, RIGHT };
-/**
  * The current direction of the leadscrew
  * We set numbers to use later when actually moving the position
  */
 enum class LeadscrewDirection { LEFT = -1, RIGHT = 1, UNKNOWN = 0 };
-
-/**
- * The state of the spindle sync position
- * The spindle sync position is a known position of the spindle that syncs with the current thread
- * Since the spindle is a "rotational" axis and the leadscrew is a "linear" axis, we need to know
- * an anchor point of where the spindle and the leadscrew are both in sync.
- *
- * We reuse the endstop states for this, since they are similar in nature and keep the first one that is set
- */
-
-enum class LeadscrewSpindleSyncPositionState { LEFT, RIGHT, UNSET };
 
 
 class Leadscrew : public LinearAxis, public DerivedAxis, public DrivenAxis {
@@ -64,16 +49,9 @@ private:
   const float m_leadscrewAccel;
   LeadscrewDirection m_currentDirection;
 
-  // we may want more sophisticated control over positions, but for now this is
-  // fine
-  LeadscrewStopState m_leftStopState;
-  int m_leftStopPosition;
-
-  LeadscrewStopState m_rightStopState;
-  int m_rightStopPosition;
-
-  LeadscrewSpindleSyncPositionState m_syncPositionState;
-  int m_spindleSyncPosition;
+  // Cold stop-position + spindle-sync state (button-event driven); update()
+  // still reads its plain fields / trivial inline predicates directly.
+  LeadscrewStopSync m_stopSync;
 
   /**
    * This gets the "unit" of the accumulator, i.e the amount the accumulator
