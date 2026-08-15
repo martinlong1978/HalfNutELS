@@ -6,6 +6,16 @@
 
 
 KeyArray::KeyArray(Leadscrew* leadscrew) : m_leadscrew(leadscrew) {
+    // KeyArray is heap-allocated (main.cpp `new KeyArray`), so members are NOT
+    // zero-initialised the way the previous static instance was. keycodeMillis in
+    // particular must start at 0 - otherwise garbage makes handle()'s
+    // `time < keycodeMillis + 10` debounce permanently true and every button
+    // press is swallowed.
+    keycodeMillis = 0;
+    buttonState.button = 0;
+    buttonState.buttonState = BS_NONE;
+    readindex = 0;
+    writeindex = 0;
 #ifdef ELS_UI_ENCODER
     ESP32Encoder::useInternalWeakPullResistors = puType::none;
     m_encoder.attachSingleEdge(ELS_UI_ENCODER_A, ELS_UI_ENCODER_B);

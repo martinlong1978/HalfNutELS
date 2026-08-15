@@ -27,6 +27,13 @@ public:
     m_lastPulseTimestamp = micros();
     m_lastFullPulseDurationMicros = 0;
     m_currentPosition = 0;
+    // These are relied upon to start at 0 (as they did when axes were static /
+    // zero-initialised); heap-allocated axes would otherwise start with garbage
+    // and report bogus velocity/RPM until the first full revolution self-corrects.
+    m_lastRevTimestamp = 0;
+    m_lastRevPosition = 0;
+    m_lastRevSize = 0;
+    m_lastRevMicros = 0;
   }
   virtual int getCurrentPosition() { return m_currentPosition; }
   virtual uint32_t getEstimatedVelocityInPulsesPerSecond() {
