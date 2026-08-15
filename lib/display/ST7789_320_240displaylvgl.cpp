@@ -236,6 +236,12 @@ void Display::init() {
   lv_image_set_src(enableObj, &pauseSymbol);
   lv_image_set_src(syncObj, &syncSymbol);
 
+  // "L"/"R" thread-hand indicator, sat over the thread mode icon.
+  threadHandLabel = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(threadHandLabel, &lv_font_montserrat_26, 0);
+  lv_obj_set_pos(threadHandLabel, 282, 140);  // above-right of the bolt glyph
+  lv_label_set_text(threadHandLabel, "");
+
 
 }
 
@@ -320,11 +326,18 @@ void Display::drawMode() {
   GlobalFeedMode mode = GlobalState::getInstance()->getFeedMode();
   if (mode == FM_JOG) {
     lv_image_set_src(feedSymbolObj, &jog);
+    lv_label_set_text(threadHandLabel, "");
   } else if (mode == GlobalFeedMode::FM_FEED) {
     lv_image_set_src(feedSymbolObj, &feedSymbol);
-  } else if (mode == GlobalFeedMode::FM_THREAD ||
-             mode == GlobalFeedMode::FM_THREAD_REVERSE) {
+    lv_label_set_text(threadHandLabel, "");
+  } else if (mode == GlobalFeedMode::FM_THREAD) {
+    // Right-hand thread: upright helix, marked "R".
     lv_image_set_src(feedSymbolObj, &threadSymbol);
+    lv_label_set_text(threadHandLabel, "R");
+  } else if (mode == GlobalFeedMode::FM_THREAD_REVERSE) {
+    // Left-hand / reverse thread: vertically-flipped helix, marked "L".
+    lv_image_set_src(feedSymbolObj, &threadSymbolReverse);
+    lv_label_set_text(threadHandLabel, "L");
   }
 }
 
@@ -334,9 +347,7 @@ void Display::drawPitch() {
   GlobalFeedMode mode = state->getFeedMode();
 
   int feedSelect = state->getFeedSelect();
-  char pitch[24];
-  // Reverse thread shows the same pitch as thread, prefixed with a reverse cue.
-  const char* rev = (mode == FM_THREAD_REVERSE) ? LV_SYMBOL_LOOP " " : "";
+  char pitch[10];
   if (mode == FM_JOG) {
     sprintf(pitch, "%d%s", (int)(state->getJogSpeed() * 100), "%");
     lv_slider_set_min_value(pitchSlider, 0);
@@ -344,7 +355,7 @@ void Display::drawPitch() {
     lv_slider_set_value(pitchSlider, state->getJogIndex() + 1, LV_ANIM_OFF);
   } else if (unit == GlobalUnitMode::METRIC) {
     if (mode == GlobalFeedMode::FM_THREAD || mode == GlobalFeedMode::FM_THREAD_REVERSE) {
-      sprintf(pitch, "%s%.2fmm", rev, threadPitchMetric[feedSelect]);
+      sprintf(pitch, "%.2fmm", threadPitchMetric[feedSelect]);
 
       lv_slider_set_min_value(pitchSlider, 0);
       lv_slider_set_max_value(pitchSlider, sizeof(threadPitchMetric) / sizeof(float));
@@ -358,7 +369,7 @@ void Display::drawPitch() {
     }
   } else {
     if (mode == GlobalFeedMode::FM_THREAD || mode == GlobalFeedMode::FM_THREAD_REVERSE) {
-      sprintf(pitch, "%s%dTPI", rev, (int)threadPitchImperial[feedSelect]);
+      sprintf(pitch, "%dTPI", (int)threadPitchImperial[feedSelect]);
 
       lv_slider_set_min_value(pitchSlider, 0);
       lv_slider_set_max_value(pitchSlider, sizeof(threadPitchImperial) / sizeof(float));

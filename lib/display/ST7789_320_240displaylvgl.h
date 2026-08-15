@@ -11,6 +11,7 @@
 
 LV_IMAGE_DECLARE(feedSymbol);
 LV_IMAGE_DECLARE(threadSymbol);
+LV_IMAGE_DECLARE(threadSymbolReverse);
 LV_IMAGE_DECLARE(leftstop);
 LV_IMAGE_DECLARE(rightstop);
 LV_IMAGE_DECLARE(unlocked);
@@ -42,6 +43,7 @@ private:
   lv_obj_t* rpmLabel;
   lv_obj_t* pitchLabel;
   lv_obj_t* feedSymbolObj;
+  lv_obj_t* threadHandLabel;  // "L"/"R" hand indicator over the thread icon
   lv_obj_t* leftStopObj;
   lv_obj_t* leftStopRectObj;
   lv_obj_t* rightStopObj;
