@@ -39,6 +39,12 @@ Leadscrew::Leadscrew(LatheConfigDerived *config, Spindle* spindle, LeadscrewIO* 
   m_lastFullPulseDurationMicros = 0;
   m_expectedPosition = 0;
   m_currentPosition = 0;
+  // Heap-allocated in main.cpp; these must not start from stale memory or
+  // setStopPosition()'s "sync only when UNSET" guard behaves non-deterministically.
+  m_syncPositionState = LeadscrewSpindleSyncPositionState::UNSET;
+  m_spindleSyncPosition = 0;
+  debugPulseCount = 0;
+  jogMicros = 0;
 }
 
 void Leadscrew::setTargetPitchMM(float pitch) {
@@ -216,7 +222,12 @@ void Leadscrew::update() {
   if (hitLeftEndstop || hitRightEndstop) {
     if ((m_motionMode == GlobalMotionMode::MM_JOG_LEFT && hitLeftEndstop)
       || (m_motionMode == GlobalMotionMode::MM_JOG_RIGHT && hitRightEndstop)
-      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitLeftEndstop)) {
+      // A synced thread arrests at whichever endstop it is travelling into: the
+      // left stop for a normal (right-hand) thread, the right stop for a reverse
+      // (left-hand) thread. Guard by direction so starting at the opposite stop
+      // does not immediately disable.
+      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitLeftEndstop && m_currentDirection == LeadscrewDirection::LEFT)
+      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitRightEndstop && m_currentDirection == LeadscrewDirection::RIGHT)) {
       m_motionMode = GlobalMotionMode::MM_DISABLED;
       m_globalState->setMotionMode(GlobalMotionMode::MM_DISABLED);
       m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
