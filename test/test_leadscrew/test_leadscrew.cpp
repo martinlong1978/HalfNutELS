@@ -196,6 +196,27 @@ TEST_F(LeadscrewTest, JogIntoRightEndstopStopsAndDisables) {
   EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED);
 }
 
+// Reverse thread = negated ratio: the same spindle motion drives the leadscrew
+// in the opposite direction (from the left stop toward the right). Mirrors
+// EnabledModeFollowsSpindleWhenSynced with a negated pitch.
+TEST_F(LeadscrewTest, NegativePitchReversesTravelDirection) {
+  ls->setStopPosition(LeadscrewStopPosition::LEFT);  // at current pos 0 -> SYNC
+  ls->unsetStopPosition(LeadscrewStopPosition::LEFT);  // clear the armed endstop
+
+  gs->setMotionMode(GlobalMotionMode::MM_ENABLED);
+
+  // Negate the target pitch, exactly as FM_THREAD_REVERSE does via
+  // getCurrentFeedPitch(). Same magnitude as the default forward test (0.25).
+  ls->setTargetPitchMM(-0.25f);
+  spindle->incrementCurrentPosition(3048);
+
+  pump(ls, 50);
+  // Opposite sign to the forward case: travels LEFT, one step per update.
+  EXPECT_EQ(ls->getCurrentPosition(), -50);
+  EXPECT_EQ(ls->getCurrentDirection(), LeadscrewDirection::LEFT);
+  EXPECT_EQ(io.m_dirPinState, derived->dirLeft());
+}
+
 }  // namespace
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.

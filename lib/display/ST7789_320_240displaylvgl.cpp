@@ -322,7 +322,8 @@ void Display::drawMode() {
     lv_image_set_src(feedSymbolObj, &jog);
   } else if (mode == GlobalFeedMode::FM_FEED) {
     lv_image_set_src(feedSymbolObj, &feedSymbol);
-  } else if (mode == GlobalFeedMode::FM_THREAD) {
+  } else if (mode == GlobalFeedMode::FM_THREAD ||
+             mode == GlobalFeedMode::FM_THREAD_REVERSE) {
     lv_image_set_src(feedSymbolObj, &threadSymbol);
   }
 }
@@ -333,15 +334,17 @@ void Display::drawPitch() {
   GlobalFeedMode mode = state->getFeedMode();
 
   int feedSelect = state->getFeedSelect();
-  char pitch[10];
+  char pitch[24];
+  // Reverse thread shows the same pitch as thread, prefixed with a reverse cue.
+  const char* rev = (mode == FM_THREAD_REVERSE) ? LV_SYMBOL_LOOP " " : "";
   if (mode == FM_JOG) {
     sprintf(pitch, "%d%s", (int)(state->getJogSpeed() * 100), "%");
     lv_slider_set_min_value(pitchSlider, 0);
     lv_slider_set_max_value(pitchSlider, sizeof(jogSpeeds) / sizeof(int));
     lv_slider_set_value(pitchSlider, state->getJogIndex() + 1, LV_ANIM_OFF);
   } else if (unit == GlobalUnitMode::METRIC) {
-    if (mode == GlobalFeedMode::FM_THREAD) {
-      sprintf(pitch, "%.2fmm", threadPitchMetric[feedSelect]);
+    if (mode == GlobalFeedMode::FM_THREAD || mode == GlobalFeedMode::FM_THREAD_REVERSE) {
+      sprintf(pitch, "%s%.2fmm", rev, threadPitchMetric[feedSelect]);
 
       lv_slider_set_min_value(pitchSlider, 0);
       lv_slider_set_max_value(pitchSlider, sizeof(threadPitchMetric) / sizeof(float));
@@ -354,8 +357,8 @@ void Display::drawPitch() {
       lv_slider_set_value(pitchSlider, feedSelect + 1, LV_ANIM_OFF);
     }
   } else {
-    if (mode == GlobalFeedMode::FM_THREAD) {
-      sprintf(pitch, "%dTPI", (int)threadPitchImperial[feedSelect]);
+    if (mode == GlobalFeedMode::FM_THREAD || mode == GlobalFeedMode::FM_THREAD_REVERSE) {
+      sprintf(pitch, "%s%dTPI", rev, (int)threadPitchImperial[feedSelect]);
 
       lv_slider_set_min_value(pitchSlider, 0);
       lv_slider_set_max_value(pitchSlider, sizeof(threadPitchImperial) / sizeof(float));
