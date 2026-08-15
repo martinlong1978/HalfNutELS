@@ -1,7 +1,14 @@
 #include "WebSettings.h"
 #include "WebServer.h"
+#include <WiFi.h>
+#include <DNSServer.h>
 
 WebServer* webServer;
+
+// Captive portal DNS: answers every query with the softAP IP so any host the
+// client looks up resolves to us.
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
 
 
 const uint32_t NVM_Offset = 0x9000;
@@ -160,17 +167,46 @@ void reset() {
     ESP.restart();
 }
 
+// Redirect any unexpected request to the portal root. Returning a 302 to the
+// softAP IP is what makes iOS/Android/Windows pop the "Sign in to network" sheet.
+void redirectToPortal() {
+    String portalUrl = String("http://") + WiFi.softAPIP().toString() + "/";
+    webServer->sendHeader("Location", portalUrl, true);
+    webServer->send(302, "text/plain", "");
+}
+
 void startWebServer() {
     webServer = new WebServer(80);
     webServer->on("/", HTTP_GET, showPage);
     webServer->on("/set", HTTP_POST, setValues);
     webServer->on("/reset", HTTP_GET, reset);
+
+    // OS captive-portal probe endpoints. Redirecting these (instead of returning
+    // the expected success payload) tells the OS the network is "captive" and
+    // triggers the sign-in popup.
+    webServer->on("/generate_204", HTTP_GET, redirectToPortal);            // Android
+    webServer->on("/gen_204", HTTP_GET, redirectToPortal);                 // Android
+    webServer->on("/hotspot-detect.html", HTTP_GET, redirectToPortal);     // Apple
+    webServer->on("/library/test/success.html", HTTP_GET, redirectToPortal); // Apple
+    webServer->on("/connecttest.txt", HTTP_GET, redirectToPortal);         // Windows
+    webServer->on("/ncsi.txt", HTTP_GET, redirectToPortal);               // Windows
+    webServer->on("/redirect", HTTP_GET, redirectToPortal);               // Windows
+    webServer->on("/fwlink", HTTP_GET, redirectToPortal);                 // Microsoft
+
+    // Any other host/path also shows the portal.
+    webServer->onNotFound(redirectToPortal);
+
     webServer->begin();
+
+    // Start the catch-all DNS server so every lookup resolves to the softAP IP.
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
     Serial.println("Server is running");
 
 }
 
 void wifiLoop() {
+    dnsServer.processNextRequest();
     webServer->handleClient();
 }
 
