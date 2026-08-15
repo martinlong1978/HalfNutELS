@@ -18,9 +18,22 @@ void Display::initvars() {
 
 }
 
+// Append src to a Wi-Fi QR payload, escaping the characters that are special in
+// the "WIFI:" URI scheme (\ ; , : ") with a leading backslash.
+static void appendWifiQrEscaped(String& out, const char* src) {
+  for (const char* p = src; *p != '\0'; ++p) {
+    char c = *p;
+    if (c == '\\' || c == ';' || c == ',' || c == ':' || c == '"') {
+      out += '\\';
+    }
+    out += c;
+  }
+}
+
 void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {
   initDisplay();
 
+  // Left column: credentials as text (fallback if the QR can't be scanned).
   lv_obj_t* ssidLabel = lv_label_create(lv_screen_active());
   lv_obj_t* passwordLabel = lv_label_create(lv_screen_active());
   lv_obj_t* ipLabel = lv_label_create(lv_screen_active());
@@ -29,30 +42,53 @@ void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {
   lv_obj_t* passwordText = lv_label_create(lv_screen_active());
   lv_obj_t* ipText = lv_label_create(lv_screen_active());
 
-  lv_obj_set_style_text_font(ssidLabel, &lv_font_montserrat_26, 0);
-  lv_obj_set_style_text_font(passwordLabel, &lv_font_montserrat_26, 0);
-  lv_obj_set_style_text_font(ipLabel, &lv_font_montserrat_26, 0);
+  lv_obj_set_style_text_font(ssidLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(passwordLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(ipLabel, &lv_font_montserrat_14, 0);
 
-  lv_obj_set_style_text_font(ssidText, &lv_font_montserrat_48, 0);
-  lv_obj_set_style_text_font(passwordText, &lv_font_montserrat_48, 0);
-  lv_obj_set_style_text_font(ipText, &lv_font_montserrat_48, 0);
+  lv_obj_set_style_text_font(ssidText, &lv_font_montserrat_26, 0);
+  lv_obj_set_style_text_font(passwordText, &lv_font_montserrat_26, 0);
+  lv_obj_set_style_text_font(ipText, &lv_font_montserrat_26, 0);
 
-  lv_obj_set_pos(ssidLabel, 10, 10);
-  lv_obj_set_pos(passwordLabel, 10, 80);
-  lv_obj_set_pos(ipLabel, 10, 150);
-
-  lv_obj_set_pos(ssidText, 10, 30);
-  lv_obj_set_pos(passwordText, 10, 100);
-  lv_obj_set_pos(ipText, 10, 170);
+  lv_obj_set_pos(ssidLabel, 10, 12);
+  lv_obj_set_pos(ssidText, 10, 28);
+  lv_obj_set_pos(passwordLabel, 10, 82);
+  lv_obj_set_pos(passwordText, 10, 98);
+  lv_obj_set_pos(ipLabel, 10, 152);
+  lv_obj_set_pos(ipText, 10, 168);
 
   lv_label_set_text(ssidLabel, "Wifi SSID");
   lv_label_set_text(passwordLabel, "Password");
   lv_label_set_text(ipLabel, "IP Address");
 
-
   lv_label_set_text(ssidText, ssid);
   lv_label_set_text(passwordText, password);
   lv_label_set_text(ipText, ip.toString().c_str());
+
+  // Right side: a Wi-Fi join QR code. Scanning it on a phone connects straight
+  // to the setup AP (the captive portal then opens the config page).
+  lv_obj_t* scanLabel = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(scanLabel, &lv_font_montserrat_14, 0);
+  lv_label_set_text(scanLabel, "Scan to join");
+  lv_obj_set_pos(scanLabel, 196, 24);
+
+  String qrPayload = "WIFI:S:";
+  appendWifiQrEscaped(qrPayload, ssid);
+  qrPayload += ";T:WPA;P:";
+  appendWifiQrEscaped(qrPayload, password);
+  qrPayload += ";;";
+
+  lv_obj_t* wifiQr = lv_qrcode_create(lv_screen_active());
+  lv_qrcode_set_size(wifiQr, 124);
+  lv_qrcode_set_dark_color(wifiQr, lv_color_black());
+  lv_qrcode_set_light_color(wifiQr, lv_color_white());
+  // White background + padding gives the quiet zone scanners need.
+  lv_obj_set_style_bg_color(wifiQr, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(wifiQr, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(wifiQr, 0, 0);
+  lv_obj_set_style_pad_all(wifiQr, 6, 0);
+  lv_qrcode_update(wifiQr, qrPayload.c_str(), qrPayload.length());
+  lv_obj_set_pos(wifiQr, 182, 46);
 
   lv_timer_handler();
 
