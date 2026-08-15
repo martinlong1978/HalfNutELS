@@ -21,6 +21,7 @@ threading and powered feeding — without swapping gears.
 - [Getting boards made (PCB)](#getting-boards-made-pcb)
 - [Building & flashing the firmware](#building--flashing-the-firmware)
 - [Connecting & configuring](#connecting--configuring)
+- [Operating the ELS — controls & display](#operating-the-els--controls--display)
 - [Settings reference](#settings-reference)
 - [Testing / development](#testing--development)
 - [License](#license)
@@ -33,6 +34,8 @@ threading and powered feeding — without swapping gears.
 
 - **Threading** — synchronise the leadscrew to the spindle at a selectable thread pitch for
   single-point threading. Metric (mm/rev) and imperial (TPI) thread pitch tables are built in.
+- **Reverse threading** — a thread mode that runs the carriage in the opposite direction (from the
+  left stop toward the right) for left-hand threads or threading away from a shoulder.
 - **Feeding** — powered feed at a selectable feed rate (mm/rev metric, or thou/rev imperial).
 - **Feed / thread mode switching** and **metric / imperial** switching from the keypad.
 - **Jog** — move the carriage left/right under power. Supports both an interactive "hold to jog"
@@ -215,6 +218,56 @@ retune the firmware for your lathe.
 4. **Fill in the settings** (see [Settings reference](#settings-reference)) and press **Submit**.
    Settings are written to the ESP32's flash. Press **Reset** on the page (or power-cycle) to reboot
    into normal operation with the new settings.
+
+---
+
+## Operating the ELS — controls & display
+
+In normal operation the device shows the current **feed/thread pitch**, the **mode**, spindle **RPM**,
+the **end-stop** status, the sync state, and the keypad **lock** state on the display. Input is via a
+**3×3 button keypad** plus a **rotary encoder**.
+
+> **The keypad starts LOCKED at power-on** as a safety measure — press **Lock** once to unlock before
+> anything else will respond.
+
+### Modes
+
+Press **Mode** to cycle through:
+
+| Mode | What it does |
+|---|---|
+| **Feed** | Leadscrew feeds at a set distance per spindle revolution (mm/rev or thou/rev). |
+| **Thread** | Leadscrew is synced to the spindle to cut a thread; starts at the **right** stop and travels **left**. |
+| **Thread ↺ (reverse)** | Same as Thread but the leadscrew travels the **opposite** way — starts at the **left** stop and moves **right** (for left-hand threads / threading away from the shoulder). Shown with a ↺ marker next to the pitch. |
+| **Jog** | Move the carriage independently of the spindle; the encoder/rate buttons set the jog speed. |
+
+*Hold* **Mode** to toggle between **metric** and **imperial** units.
+
+### Button reference
+
+| Control | Press (click) | Hold |
+|---|---|---|
+| **Mode** | Cycle Feed → Thread → Thread ↺ → Jog | Toggle metric / imperial |
+| **Rate +** / **Rate −** | Select next / previous pitch (or jog speed in Jog mode) | — |
+| **Rotary encoder** | Turn to change pitch / jog speed | — |
+| **Enable** | Start / stop the leadscrew following the spindle (it decelerates to a stop, it does not stop dead) | — |
+| **Lock** | Lock / unlock the keypad | — |
+| **Jog Left** / **Jog Right** | *Feed/Thread:* jog the carriage to the set left/right stop (press again to stop early). *Jog mode:* jog while the button is held. | *Feed/Thread:* **set** the left/right stop at the current position, or **clear** it if already set |
+| **Thread Sync** | — | Reset / re-initialise the display |
+| **Half Nut** | Toggle debug mode | **Trigger an over-the-air firmware update** (see below) |
+
+### Cutting a thread (typical flow)
+
+1. Unlock the keypad (**Lock**), select **Thread** (or **Thread ↺** for a left-hand thread) with **Mode**, and choose the pitch with the encoder / **Rate ±**.
+2. Position the carriage and **hold Jog Left/Right** to set your **end stops**.
+3. Move to the starting stop, press **Enable** — the leadscrew waits for the spindle sync point, then tracks the thread to the far stop, where it stops automatically. Retract, return, and **Enable** again for the next pass; sync is preserved so every pass follows the same helix.
+
+### Over-the-air (web) firmware update
+
+**Hold the Half Nut button** to start an OTA update: the device downloads the firmware binary from the
+**Update URL** configured on the web page (see [Settings reference](#settings-reference)) and flashes
+itself, showing progress on the display. Publish new firmware to that URL to update in the field
+without a USB cable. *(The USB path — `pio run -e esp32dev_usb -t upload` — remains available too.)*
 
 ---
 
