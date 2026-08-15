@@ -24,7 +24,6 @@ Leadscrew::Leadscrew(LatheConfigDerived *config, Spindle* spindle, LeadscrewIO* 
   m_io(io),
   m_spindle(spindle),
   initPos(false),
-  //m_accumulator(0),
   m_currentDirection(LeadscrewDirection::UNKNOWN),
   m_leftStopState(LeadscrewStopState::UNSET),
   m_rightStopState(LeadscrewStopState::UNSET),
@@ -57,7 +56,7 @@ void Leadscrew::unsetStopPosition(LeadscrewStopPosition position) {
       m_syncPositionState = LeadscrewSpindleSyncPositionState::UNSET;
       // extrapolate the sync position to the other endstop if set
       if (m_rightStopState == LeadscrewStopState::SET) {
-        m_spindleSyncPosition = ((((int)(static_cast<int>(m_syncPositionState) + (m_rightStopPosition - m_leftStopPosition) * m_ratio)) % encoderPPR) + encoderPPR) % encoderPPR;
+        m_spindleSyncPosition = positiveModulo((int)(static_cast<int>(m_syncPositionState) + (m_rightStopPosition - m_leftStopPosition) * m_ratio), encoderPPR);
         m_syncPositionState = LeadscrewSpindleSyncPositionState::RIGHT;
       }
     }
@@ -66,7 +65,7 @@ void Leadscrew::unsetStopPosition(LeadscrewStopPosition position) {
     m_rightStopState = LeadscrewStopState::UNSET;
     m_rightStopPosition = INT32_MAX;
     if (m_syncPositionState == LeadscrewSpindleSyncPositionState::RIGHT) {
-      m_spindleSyncPosition = ((((int)(static_cast<int>(m_syncPositionState) + (m_rightStopPosition - m_leftStopPosition) * m_ratio)) % encoderPPR) + encoderPPR) % encoderPPR;
+      m_spindleSyncPosition = positiveModulo((int)(static_cast<int>(m_syncPositionState) + (m_rightStopPosition - m_leftStopPosition) * m_ratio), encoderPPR);
       m_syncPositionState = LeadscrewSpindleSyncPositionState::LEFT;
     }
     break;
@@ -296,7 +295,7 @@ void Leadscrew::update() {
 
     if (m_globalState->getThreadSyncState() != SS_SYNC) {
       // So, I think this is, how far we need to move, converted to spindle pulses, plus the spindle sync pos, mod the spindle PPM, to get the next revolution. 
-      int expectedSyncPosition = ((((int)((m_currentPosition - pulsesToTargetSpeed - syncPosition) / m_ratio) + m_spindleSyncPosition) % encoderPPR) + encoderPPR) % encoderPPR;
+      int expectedSyncPosition = positiveModulo((int)((m_currentPosition - pulsesToTargetSpeed - syncPosition) / m_ratio) + m_spindleSyncPosition, encoderPPR);
 
       if (currentpos == expectedSyncPosition) {
         m_expectedPosition = m_currentPosition - pulsesToTargetSpeed; // Ensure these are aligned at the sync point. 

@@ -35,7 +35,7 @@ void Spindle::setCurrentPosition(int position) {
   m_unconsumedPosition += positionDelta;
 
   int ppr = config->spindleEncoderPpr();
-  m_currentPosition = ((position % ppr) + ppr) % ppr;
+  m_currentPosition = positiveModulo(position, ppr);
 }
 
 void Spindle::incrementCurrentPosition(int amount) {

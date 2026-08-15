@@ -19,6 +19,14 @@
 // the amount of microseconds in a second
 #define US_PER_SECOND 1000000
 
+// Euclidean (always non-negative) modulo: returns value mod modulus in the range
+// [0, modulus) even for negative inputs. This replaces the repeated
+// ((x % m) + m) % m idiom used to wrap encoder/spindle positions into a single
+// revolution; the integer semantics are identical to that idiom.
+inline int positiveModulo(int value, int modulus) {
+  return ((value % modulus) + modulus) % modulus;
+}
+
 // Number of pulses between speed updates
 #define ELS_SPEED_COUNTS 300
 

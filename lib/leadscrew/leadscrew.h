@@ -64,8 +64,6 @@ private:
   const float m_leadscrewAccel;
   LeadscrewDirection m_currentDirection;
 
-  //float m_accumulator;
-
   // we may want more sophisticated control over positions, but for now this is
   // fine
   LeadscrewStopState m_leftStopState;
