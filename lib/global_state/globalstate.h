@@ -67,24 +67,29 @@ private:
 
 
 
-  GlobalFeedMode m_feedMode;
-  GlobalMotionMode m_motionMode;
-  GlobalUnitMode m_unitMode;
-  GlobalThreadSyncState m_threadSyncState;
-  GlobalButtonLock m_buttonLock;
+  // These are read AND written from two RTOS tasks pinned to different cores:
+  // the SpindleTask (core 0, via Leadscrew::update()) and the DisplayTask
+  // (core 1, buttons + display). They are 32-bit aligned, so reads/writes are
+  // atomic on the ESP32; `volatile` stops the compiler caching stale copies
+  // across the tasks. No lock is taken, so the spindle hot loop is unaffected.
+  volatile GlobalFeedMode m_feedMode;
+  volatile GlobalMotionMode m_motionMode;
+  volatile GlobalUnitMode m_unitMode;
+  volatile GlobalThreadSyncState m_threadSyncState;
+  volatile GlobalButtonLock m_buttonLock;
 
   volatile bool m_debugMode = false;
   volatile bool m_displayReset = false;
 
-  int m_feedSelect;
+  volatile int m_feedSelect;
 
-  int m_jogSpeed;
+  volatile int m_jogSpeed;
 
   // the position at which the spindle will be back in sync with the leadscrew
   // note that this position actually has *two* solutions, left and right
   // but we only use the "left" position and calculate the "right" position when
   // required
-  int m_resyncPulseCount;
+  volatile int m_resyncPulseCount;
 
   GlobalState() {
     setUnitMode(DEFAULT_UNIT_MODE);
