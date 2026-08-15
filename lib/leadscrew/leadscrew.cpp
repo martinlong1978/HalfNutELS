@@ -54,26 +54,43 @@ void Leadscrew::setTargetPitchMM(float pitch) {
  * old Leadscrew methods; only the member names lost their m_ prefix).
  */
 void LeadscrewStopSync::unsetStop(LeadscrewStopPosition position, float ratio, int encoderPPR) {
+  // Capture the pre-reset state: if this stop currently holds the spindle-sync
+  // anchor and the OTHER stop is set, the anchor must MOVE to that stop. The
+  // helix relation used by update() is
+  //   spindlePhase(L) = positiveModulo((int)((L - syncStop)/ratio) + spindleSyncPosition, encoderPPR)
+  // so re-anchoring from `source` (the stop being unset) to `dest` requires
+  //   newSync = positiveModulo((int)((dest - source)/ratio) + oldSync, encoderPPR)
+  // These reads must happen BEFORE the source position is reset to its sentinel.
   switch (position) {
   case LeadscrewStopPosition::LEFT:
-    leftStopState = LeadscrewStopState::UNSET;
-    leftStopPosition = INT32_MIN;
     if (syncPositionState == LeadscrewSpindleSyncPositionState::LEFT) {
-      syncPositionState = LeadscrewSpindleSyncPositionState::UNSET;
-      // extrapolate the sync position to the other endstop if set
       if (rightStopState == LeadscrewStopState::SET) {
-        spindleSyncPosition = positiveModulo((int)(static_cast<int>(syncPositionState) + (rightStopPosition - leftStopPosition) * ratio), encoderPPR);
+        // extrapolate the sync position to the other endstop
+        spindleSyncPosition = positiveModulo(
+            (int)((float)(rightStopPosition - leftStopPosition) / ratio) + spindleSyncPosition,
+            encoderPPR);
         syncPositionState = LeadscrewSpindleSyncPositionState::RIGHT;
+      } else {
+        syncPositionState = LeadscrewSpindleSyncPositionState::UNSET;
       }
     }
+    leftStopState = LeadscrewStopState::UNSET;
+    leftStopPosition = INT32_MIN;
     break;
   case LeadscrewStopPosition::RIGHT:
+    if (syncPositionState == LeadscrewSpindleSyncPositionState::RIGHT) {
+      if (leftStopState == LeadscrewStopState::SET) {
+        // extrapolate the sync position to the other endstop
+        spindleSyncPosition = positiveModulo(
+            (int)((float)(leftStopPosition - rightStopPosition) / ratio) + spindleSyncPosition,
+            encoderPPR);
+        syncPositionState = LeadscrewSpindleSyncPositionState::LEFT;
+      } else {
+        syncPositionState = LeadscrewSpindleSyncPositionState::UNSET;
+      }
+    }
     rightStopState = LeadscrewStopState::UNSET;
     rightStopPosition = INT32_MAX;
-    if (syncPositionState == LeadscrewSpindleSyncPositionState::RIGHT) {
-      spindleSyncPosition = positiveModulo((int)(static_cast<int>(syncPositionState) + (rightStopPosition - leftStopPosition) * ratio), encoderPPR);
-      syncPositionState = LeadscrewSpindleSyncPositionState::LEFT;
-    }
     break;
   }
 }
