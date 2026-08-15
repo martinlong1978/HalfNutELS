@@ -36,7 +36,8 @@ int   LatheConfigDerived::leadscrewMaxSpeed() {
 }
 
 float LatheConfigDerived::leadscrewStepsPerMm() {
-    return (float)stepperPpr() * ((float)gearboxRatioNumerator() / (float)gearboxRatioDenominator());
+    // steps per mm of leadscrew travel = (motor steps per leadscrew turn) / (mm per leadscrew turn)
+    return (float)stepperPpr() * ((float)gearboxRatioNumerator() / (float)gearboxRatioDenominator()) / leadscrewPitchMm();
 }
 
 float LatheConfigDerived::jogSpeedPps() {

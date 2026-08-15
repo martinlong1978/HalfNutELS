@@ -4,6 +4,11 @@ Report-only review. No source files were modified. Scope: commits `b0b6137` ("Ma
 properties configurable via web") and `5db03d7` ("Improved websetting experience") against parent
 `cbd1b22`, plus the uncommitted working-tree captive-portal change to `src/WebSettings.cpp`.
 
+> **Update — Finding 1 (the steps-per-mm regression) has since been FIXED.** The `/ leadscrewPitchMm`
+> divisor was restored in `LatheConfigDerived::leadscrewStepsPerMm()`; `test_latheconfig` now pins the
+> corrected (pre-websettings) scaling and the `test_regression` suite that documented the defect has
+> been retired. Findings 2 onward remain open. The analysis below is preserved as the original review.
+
 ## Executive summary
 
 **Runtime behaviour is NOT fully preserved.** Web-configurability was added correctly for most

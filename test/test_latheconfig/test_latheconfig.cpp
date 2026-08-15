@@ -1,10 +1,11 @@
-// Pin CURRENT behaviour of LatheConfigDerived (pure math, no Arduino stub
-// required). These tests MUST PASS on master: they document what the code does
-// today so that low-risk refactors can be verified against them.
+// Pin the behaviour of LatheConfigDerived (pure math, no Arduino stub
+// required). These tests MUST PASS: they document the derived-value maths so
+// that refactors can be verified against them.
 //
-// NOTE: The default-config values asserted here are the *current* (post
-// web-settings) values, which are known to differ from the pre-web-settings
-// firmware. The separate test_regression suite documents that discrepancy.
+// The default-config values below match the pre-web-settings firmware: the
+// steps-per-mm regression (a dropped /leadscrewPitchMm divisor) has been fixed,
+// so leadscrewStepsPerMm and everything derived from it are back to the
+// original scaling.
 #include <gmock/gmock.h>
 
 #include "config.h"
@@ -40,25 +41,26 @@ TEST(LatheConfigDerivedDefaults, RawAccessors) {
   EXPECT_EQ(d.leadscrewMaxSpeed(), 40);
 }
 
-// --- Derived values at defaults (current behaviour) ------------------------
+// --- Derived values at defaults -------------------------------------------
 TEST(LatheConfigDerivedDefaults, DerivedValues) {
   LatheConfig cfg = makeDefaultConfig();
   LatheConfigDerived d(&cfg);
 
-  // stepperPpr * (num/den) = 400 * 2 = 800  (NOTE: no /leadscrewPitchMm)
-  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 800.0f);
+  // stepperPpr * (num/den) / leadscrewPitchMm = 400 * 2 / 2.54 ~= 314.96
+  const float stepsPerMm = 400.0f * (2.0f / 1.0f) / 2.54f;
+  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), stepsPerMm);
 
-  // jogSpeed(40) * stepsPerMm(800) = 32000
-  EXPECT_FLOAT_EQ(d.jogSpeedPps(), 32000.0f);
+  // jogSpeed(40) * stepsPerMm ~= 12598.4
+  EXPECT_FLOAT_EQ(d.jogSpeedPps(), 40.0f * stepsPerMm);
 
-  // leadscrewMaxSpeed(40) * stepsPerMm(800) = 32000
-  EXPECT_FLOAT_EQ(d.leadscrewMaxSpeedPps(), 32000.0f);
+  // leadscrewMaxSpeed(40) * stepsPerMm ~= 12598.4
+  EXPECT_FLOAT_EQ(d.leadscrewMaxSpeedPps(), 40.0f * stepsPerMm);
 
-  // leadscrewAcceleration(150) * stepsPerMm(800) = 120000
-  EXPECT_FLOAT_EQ(d.accellerationPulseSec(), 120000.0f);
+  // leadscrewAcceleration(150) * stepsPerMm ~= 47244.1
+  EXPECT_FLOAT_EQ(d.accellerationPulseSec(), 150.0f * stepsPerMm);
 
-  // US_PER_SECOND / (LEADSCREW_JERK(0.5) * stepsPerMm(800)) = 1e6/400 = 2500
-  EXPECT_FLOAT_EQ(d.leadscrewInitialPulseDelay(), 2500.0f);
+  // US_PER_SECOND / (LEADSCREW_JERK(0.5) * stepsPerMm) = 6350
+  EXPECT_FLOAT_EQ(d.leadscrewInitialPulseDelay(), 1000000.0f / (0.5f * stepsPerMm));
 
   EXPECT_FLOAT_EQ(d.gearboxRatio(), 2.0f);
   EXPECT_EQ(d.dirRight(), 1);
@@ -84,9 +86,10 @@ TEST(LatheConfigDerivedNonDefault, GearboxRatioScalesStepsPerMm) {
   LatheConfigDerived d(&cfg);
 
   EXPECT_FLOAT_EQ(d.gearboxRatio(), 1.5f);
-  // 400 * 1.5 = 600
-  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 600.0f);
-  EXPECT_FLOAT_EQ(d.jogSpeedPps(), 40.0f * 600.0f);
+  // 400 * 1.5 / 2.54 ~= 236.22
+  const float stepsPerMm = 400.0f * (3.0f / 2.0f) / 2.54f;
+  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), stepsPerMm);
+  EXPECT_FLOAT_EQ(d.jogSpeedPps(), 40.0f * stepsPerMm);
 }
 
 // --- Stepper PPR scaling --------------------------------------------------
@@ -95,20 +98,22 @@ TEST(LatheConfigDerivedNonDefault, StepperPprScalesStepsPerMm) {
   cfg.stepperPpr = 800;  // e.g. 1/2 microstepping change
   LatheConfigDerived d(&cfg);
 
-  // 800 * 2 = 1600
-  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 1600.0f);
-  // initial pulse delay = 1e6 / (0.5 * 1600) = 1250
-  EXPECT_FLOAT_EQ(d.leadscrewInitialPulseDelay(), 1250.0f);
+  // 800 * 2 / 2.54 ~= 629.92
+  const float stepsPerMm = 800.0f * (2.0f / 1.0f) / 2.54f;
+  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), stepsPerMm);
+  // initial pulse delay = 1e6 / (0.5 * stepsPerMm) = 3175
+  EXPECT_FLOAT_EQ(d.leadscrewInitialPulseDelay(), 1000000.0f / (0.5f * stepsPerMm));
 }
 
-// --- leadscrewPitchMm does NOT influence steps-per-mm (documents the bug) ---
-TEST(LatheConfigDerivedNonDefault, PitchDoesNotAffectStepsPerMm) {
+// --- leadscrewPitchMm scales steps-per-mm inversely ------------------------
+TEST(LatheConfigDerivedNonDefault, PitchAffectsStepsPerMm) {
   LatheConfig cfg = makeDefaultConfig();
-  cfg.leadscrewPitchMm = 5.08f;  // double the pitch
+  cfg.leadscrewPitchMm = 5.08f;  // double the default pitch
   LatheConfigDerived d(&cfg);
 
-  // Current behaviour: steps-per-mm is independent of pitch.
-  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 800.0f);
+  // steps-per-mm is inversely proportional to leadscrew pitch, so doubling the
+  // pitch halves steps-per-mm: 400 * 2 / 5.08 ~= 157.48
+  EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 800.0f / 5.08f);
 }
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.
