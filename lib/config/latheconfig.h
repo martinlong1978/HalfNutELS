@@ -24,6 +24,17 @@ typedef struct LatheConfig {
 class LatheConfigDerived {
 private:
     LatheConfig* config;
+    // Derived values are precomputed once in the constructor (config is fixed at
+    // runtime - changes require a reboot) so the hot leadscrew loop reads cached
+    // values instead of recomputing divisions every update().
+    float m_leadscrewStepsPerMm;
+    float m_jogSpeedPps;
+    float m_leadscrewMaxSpeedPps;
+    float m_accellerationPulseSec;
+    float m_leadscrewInitialPulseDelay;
+    float m_gearboxRatio;
+    int m_dirRight;
+    int m_dirLeft;
 public:
     LatheConfigDerived(LatheConfig* config);
 
