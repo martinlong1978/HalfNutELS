@@ -76,6 +76,7 @@ public:
   void init();
   void update();
   void showWifi(const char * ssid, const char * password, IPAddress ip);
+  void showConnected(IPAddress ip);
 
 protected:
   void initvars();

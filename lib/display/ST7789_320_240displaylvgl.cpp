@@ -94,6 +94,58 @@ void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {
 
 }
 
+// Shown once a device has joined the setup AP: drops the join details and
+// presents a QR that opens the configuration page in the phone's browser.
+void Display::showConnected(IPAddress ip) {
+  // Replace the join screen (LVGL is already initialised by showWifi()).
+  lv_obj_clean(lv_screen_active());
+
+  String ipStr = ip.toString();
+
+  // Left column: status message + IP.
+  lv_obj_t* title = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_26, 0);
+  lv_label_set_text(title, "Connected!");
+  lv_obj_set_pos(title, 10, 12);
+
+  lv_obj_t* msg = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(msg, &lv_font_montserrat_14, 0);
+  lv_label_set_text(msg, "Open a browser to\nconfigure the ELS");
+  lv_obj_set_pos(msg, 10, 58);
+
+  lv_obj_t* ipLabel = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(ipLabel, &lv_font_montserrat_14, 0);
+  lv_label_set_text(ipLabel, "IP Address");
+  lv_obj_set_pos(ipLabel, 10, 150);
+
+  lv_obj_t* ipText = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(ipText, &lv_font_montserrat_26, 0);
+  lv_label_set_text(ipText, ipStr.c_str());
+  lv_obj_set_pos(ipText, 10, 168);
+
+  // Right side: a QR that opens the config page directly.
+  lv_obj_t* scanLabel = lv_label_create(lv_screen_active());
+  lv_obj_set_style_text_font(scanLabel, &lv_font_montserrat_14, 0);
+  lv_label_set_text(scanLabel, "Scan for setup");
+  lv_obj_set_pos(scanLabel, 182, 24);
+
+  String url = String("http://") + ipStr + "/";
+
+  lv_obj_t* urlQr = lv_qrcode_create(lv_screen_active());
+  lv_qrcode_set_size(urlQr, 124);
+  lv_qrcode_set_dark_color(urlQr, lv_color_black());
+  lv_qrcode_set_light_color(urlQr, lv_color_white());
+  lv_obj_set_style_bg_color(urlQr, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(urlQr, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(urlQr, 0, 0);
+  lv_obj_set_style_pad_all(urlQr, 6, 0);
+  lv_qrcode_update(urlQr, url.c_str(), url.length());
+  lv_obj_set_pos(urlQr, 182, 46);
+
+  lv_timer_handler();
+
+}
+
 
 void Display::initDisplay() {
   if (!initialised) {

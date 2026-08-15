@@ -40,6 +40,7 @@ int64_t lastcycle;
 int cyclecount;
 int finalcyclecount;
 bool configMode = false;
+bool apClientConnected = false;
 
 
 // have to handle the leadscrew updates in a timer callback so we can update the
@@ -233,6 +234,12 @@ void setup() {
 void loop() {
   if (configMode) {
     wifiLoop();
+    // Once a device joins the setup AP, switch the display to the "connected"
+    // screen that points the browser at the config page.
+    if (!apClientConnected && WiFi.softAPgetStationNum() > 0) {
+      apClientConnected = true;
+      display->showConnected(WiFi.softAPIP());
+    }
   } else {
     vTaskDelay(1000);
   }
