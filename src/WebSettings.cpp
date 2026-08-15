@@ -2,6 +2,8 @@
 #include "WebServer.h"
 #include <WiFi.h>
 #include <DNSServer.h>
+#include <cstdlib>
+#include <cstring>
 
 WebServer* webServer;
 
@@ -22,7 +24,34 @@ uint32_t latheaddress = 0x3000 + sizeof(WebSettings);
     sprintf(tempbuffer, format, setting); \
     html += ((latheConfig->check == CHECKVALUE ) ? tempbuffer : default)
 
-#define SETCONFIG(websetting, configsetting)    configsetting = std::stoi(webServer->arg(websetting).c_str());
+// Non-throwing form-field parsers. On empty/invalid input they keep the given
+// fallback (the LatheConfig default), and clamp to a safe minimum, so a blank
+// or 0 field can never crash setValues() (std::stoi used to throw) or later
+// divide by zero (encoder PPR, gearbox denominator).
+static int parseIntArg(const char* name, int fallback, int minVal) {
+    String a = webServer->arg(name);
+    char* end = nullptr;
+    long v = strtol(a.c_str(), &end, 10);
+    if (a.length() == 0 || end == a.c_str()) v = fallback;
+    if (v < minVal) v = minVal;
+    return (int)v;
+}
+
+static float parseFloatArg(const char* name, float fallback, float minVal) {
+    String a = webServer->arg(name);
+    char* end = nullptr;
+    double v = strtod(a.c_str(), &end);
+    if (a.length() == 0 || end == a.c_str()) v = fallback;
+    if (v < minVal) v = minVal;
+    return (float)v;
+}
+
+// Bounded copy into a fixed char[] (arg is attacker/typo controllable).
+static void copyArg(const char* name, char* dst, size_t dstSize) {
+    String a = webServer->arg(name);
+    strncpy(dst, a.c_str(), dstSize - 1);
+    dst[dstSize - 1] = '\0';
+}
 
 
 
@@ -227,22 +256,21 @@ void setValues() {
     Serial.printf("Password %s\n", webServer->arg("password").c_str());
     Serial.printf("update url %s\n", webServer->arg("url").c_str());
     WebSettings settings;
-    strcpy(settings.ssid, webServer->arg("ssid").c_str());
-    strcpy(settings.password, webServer->arg("password").c_str());
-    strcpy(settings.url, webServer->arg("url").c_str());
+    copyArg("ssid", settings.ssid, sizeof(settings.ssid));
+    copyArg("password", settings.password, sizeof(settings.password));
+    copyArg("url", settings.url, sizeof(settings.url));
     settings.check = CHECKVALUE;
 
-    LatheConfig config;
-    SETCONFIG("spindleEncoderPpr", config.spindleEncoderPpr);
-    SETCONFIG("gearboxRatioDenominator", config.gearboxRatioDenominator);
-    SETCONFIG("gearboxRatioNumerator", config.gearboxRatioNumerator);
-    SETCONFIG("jogSpeed", config.jogSpeed);
-    SETCONFIG("leadscrewAcceleration", config.leadscrewAcceleration);
-    SETCONFIG("leadscrewMaxSpeed", config.leadscrewMaxSpeed);
-    SETCONFIG("leadscrewPitchMm", config.leadscrewPitchMm);
-    SETCONFIG("stepperPpr", config.stepperPpr);
-    config.invertDirection = strcmp(webServer->arg("invertDirection").c_str(), "invert") == 0 ? true : false;
-    config.leadscrewPitchMm = std::stof(webServer->arg("leadscrewPitchMm").c_str());
+    LatheConfig config;  // members start at their safe defaults
+    config.spindleEncoderPpr       = parseIntArg("spindleEncoderPpr", config.spindleEncoderPpr, 1);
+    config.stepperPpr              = parseIntArg("stepperPpr", config.stepperPpr, 1);
+    config.gearboxRatioNumerator   = parseIntArg("gearboxRatioNumerator", config.gearboxRatioNumerator, 1);
+    config.gearboxRatioDenominator = parseIntArg("gearboxRatioDenominator", config.gearboxRatioDenominator, 1);
+    config.jogSpeed                = parseIntArg("jogSpeed", config.jogSpeed, 1);
+    config.leadscrewAcceleration   = parseIntArg("leadscrewAcceleration", config.leadscrewAcceleration, 1);
+    config.leadscrewMaxSpeed       = parseIntArg("leadscrewMaxSpeed", config.leadscrewMaxSpeed, 1);
+    config.leadscrewPitchMm        = parseFloatArg("leadscrewPitchMm", config.leadscrewPitchMm, 0.001f);
+    config.invertDirection = strcmp(webServer->arg("invertDirection").c_str(), "invert") == 0;
     config.check = CHECKVALUE;
 
     ESP.flashEraseSector((NVM_Offset + address) / 4096);
