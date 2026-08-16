@@ -28,9 +28,15 @@ act on*. That one change is what buys back the panel.
 | **STOPS** | Set / clear the left / right stop | `STOPS` | `OK`, `HALT`, 4 s idle |
 | **MENU** | Move through menu tiles | `MENU` | `MENU`, `HALT` |
 
-`OK` has two jobs, and they never overlap: **inside a widget it means done**, and **at rest,
-with nothing to confirm, it opens jog speed** — the setting belonging to the thing the arrows
-are already driving. It is the only key that would otherwise be idle at rest.
+`OK` has three jobs, and they never overlap:
+
+| Gesture | Context | Effect |
+|---|---|---|
+| Click | Widget open | Done — commit and dismiss |
+| Click | At rest | Open jog speed — the setting for what the arrows already drive |
+| **Hold** | At rest | **Zero the DRO here** (§8) |
+
+It is the only key that would otherwise sit idle at rest.
 
 The focused field is always outlined in the accent colour and carries `◀ ▶` chevrons, so
 "what will the arrows do right now" is answerable at a glance without pressing anything.
@@ -206,6 +212,8 @@ left/right keys, and a 320×240 landscape panel suits a row of cards.
 | Tile | `OK` does | Notes |
 |---|---|---|
 | **Units** | Toggle mm / inch | Must also `setFeedSelect(-1)` — `setUnitMode()` is a bare assignment (`globalstate.cpp:182`) and does not reset the index |
+| **Theme** | Toggle dark / light | Persisted. Rebuilds the screen via `setDisplayReset()` |
+| **DRO datum** | ◀ ▶ pick Left / Right | Persisted. Re-picking also clears a manual zero |
 | **Jog speed** | ◀ ▶ adjust inline | The same widget `OK` opens at rest; here for discoverability |
 | **Sync** | Set a sync point against a stopped spindle | Disabled in Feed mode. Needs real work — today the anchor is only ever latched as a side effect of setting a stop |
 | **Software update** | Confirm → `setOTA()` | Replaces the half-nut hold |
@@ -222,6 +230,26 @@ There is currently no runtime path into config mode: `runWifiSettings()` is file
 Use **RTC memory** instead — `RTC_DATA_ATTR uint32_t bootToSetup;` survives `ESP.restart()`,
 costs no flash wear, and clears on power-cycle. `setup()` then checks
 `digitalRead(ELS_PAD_H2) || !checks || bootToSetup == MAGIC`.
+
+### Saving settings from the device
+
+Theme and DRO datum are the first settings the *device* has ever needed to write. Today the
+only writer is `setValues()` in `WebSettings.cpp:254-282` — file-local, and dependent on the
+live `webServer` global for its argument parsing. So it needs a small exported API:
+
+```cpp
+void saveLatheSettings(LatheConfig* config);   // read-modify-write the shared sector
+```
+
+It must be read-modify-write: `WebSettings` and `LatheConfig` live in **one 4 KB sector that
+is erased as a unit** (`WebSettings.cpp:16-18`), so writing lathe settings without first
+re-reading the Wi-Fi credentials would wipe them.
+
+**Adding fields to `LatheConfig` requires bumping `CHECKVALUE`.** The stored blob is shorter
+than the new struct, so `droDatum` and `theme` would otherwise read back as flash garbage.
+Per `CLAUDE.md`, bumping invalidates saved Wi-Fi *and* lathe parameters, so the device boots
+into AP setup and everything must be re-entered — schedule it with the firmware that ships
+the redesign, not as a separate release.
 
 ---
 
@@ -291,6 +319,60 @@ place that states the unit mode itself.
 
 Imperial text **cannot** come from `getCurrentFeedPitch()` — see the display caution in §4.
 Position is converted for display only; internally everything stays in pulses.
+
+### The DRO datum
+
+A position is meaningless without a zero, and "wherever the machine happened to boot" is the
+worst available choice. **Zero is referenced to an endstop.**
+
+Resolution order, first match wins:
+
+| # | Condition | Datum |
+|---|---|---|
+| 1 | Manual zero set (`OK` held) | That position |
+| 2 | Both stops set | The one named by `LatheConfig.droDatum` |
+| 3 | Exactly one stop set | That one — the preference cannot be honoured |
+| 4 | Neither stop set | Power-on origin, flagged `REL` on screen |
+
+**Sign convention: position increases to the right**, matching
+`LeadscrewDirection::RIGHT = 1`. So a left datum reads 0 at the left and counts up rightward;
+a right datum reads 0 at the right and counts *negative* leftward. Negative travel is normal
+DRO behaviour and needs no special casing.
+
+The datum end shows `0.0` and is underlined; the far end shows the span. A manual zero adds a
+`▽` tick on the bar at the zero point and tags the readout `MAN`.
+
+Two consequences worth designing for:
+
+- **The numbers jump when the datum changes.** Setting a second stop can hand the datum to the
+  configured side. This is inherent in the rule, not a bug — but it must not be silent, so the
+  readout flashes for ~1 s whenever the datum moves.
+- **Manual zero outranks everything** until it is cleared, and it is cleared by re-picking
+  Left or Right on the *DRO datum* menu tile. That keeps one authority for "what is zero"
+  rather than two competing ones.
+
+### Theme
+
+Dark and light are both good on this panel in different light, so the choice is the user's:
+a **Theme** menu tile, persisted in `LatheConfig`.
+
+Implementation is cheaper than it looks, given one asset change:
+
+- Replace the `#define COLOUR_*` constants with a palette struct and a pointer to the active
+  one. Both palettes stay compiled in; they are a few dozen bytes.
+- On change, call the existing `setDisplayReset()` path — `Display::update()` already rebuilds
+  the whole screen when it sees that flag (`ST7789_320_240displaylvgl.cpp:255-256`). No new
+  mechanism needed.
+- **Regenerate the icons as `A8` instead of `I1`.** This is the load-bearing part. LVGL applies
+  recolour for free *only* on A8, where the image is treated as a mask and the blend colour is
+  set directly (`lv_draw_sw_img.c:240-252`); every other format with `recolor_opa > 0` falls
+  through to `recolor_only()`, which allocates a temp buffer on every draw out of the 64 KB
+  LVGL pool. With A8 the same twelve assets serve both themes via
+  `lv_obj_set_style_image_recolor()`, and the edges come out anti-aliased instead of jagged.
+
+  Flash cost: A8 is 8 bytes per pixel-byte of I1, so 4 × 128×64 + 8 × 32×32 goes from
+  **5.2 KB to 40 KB**. There is ~519 KB of headroom, so this is affordable and it removes the
+  need for duplicate light/dark artwork entirely.
 
 The bottom-right soft-key hints mirror the bottom physical row, so the panel is
 self-documenting for the two functions that have no on-screen state of their own.
@@ -379,9 +461,16 @@ Roughly in dependency order. None of it is on the motion hot path.
    4 KB spindle task — a latent crash if anyone re-enables it).
 6. **Per-mode pitch memory** (§4) and the `setUnitMode()` index reset (§6).
 7. **RTC boot-to-setup flag** (§6).
-8. **Rebuild the display** to the §8 layout, plus overlay rendering.
-9. **A real sync action** (§6) — the only genuinely new motion behaviour, and the only item
-   that needs host-test coverage before it goes near the lathe.
+8. **DRO datum resolution** (§8) — pure arithmetic over `getStopPosition()` and the config
+   preference, plus the manual-zero override on `OK`-hold. Worth host tests: the resolution
+   order has four branches and a sign convention, and it is cheap to cover.
+9. **Theme support** (§8) — palette struct, `LatheConfig` fields, `saveLatheSettings()`, and
+   the `CHECKVALUE` bump.
+10. **Regenerate the twelve icons as `A8`** (§8). Prerequisite for the theme; also worth doing
+    on its own for the anti-aliasing.
+11. **Rebuild the display** to the §8 layout, plus overlay rendering.
+12. **A real sync action** (§6) — the only genuinely new motion behaviour, and the only item
+    that must have host-test coverage before it goes near the lathe.
 
-Items 1–8 are UI-layer and testable by inspection. Item 9 should follow the repo's
-test-first convention (`CLAUDE.md`, "Testing conventions").
+Items 1–7 and 9–11 are UI-layer and testable by inspection. Items 8 and 12 should follow the
+repo's test-first convention (`CLAUDE.md`, "Testing conventions").
