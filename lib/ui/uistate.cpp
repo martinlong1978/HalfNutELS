@@ -1,12 +1,19 @@
-// DELIBERATELY UNIMPLEMENTED STUB.
+// UI focus state machine for the Mk2 button panel (docs/ux-redesign.md §1-§6).
 //
-// Feature set D is being written test-first: test/test_uistate/ pins the whole
-// contract from docs/ux-redesign.md §1-§6, and this file exists only so those
-// tests LINK. Every method returns a neutral value, so the suite fails on
-// assertions rather than on link errors.
+// Pure C++: no Arduino / ESP / FreeRTOS / LVGL includes, no heap, no clock of
+// its own (time arrives as `nowMs`). Every decision is a pure function of
+// (key, event, UiContext) plus the small amount of state declared in uistate.h.
 //
-// The implementer replaces the bodies below. Do not change uistate.h - the
-// tests are written against that exact API.
+// The whole file leans on one fact about the real keypad
+// (src/keyarray.cpp:144-170):
+//
+//     short press:  Press -> Click -> Release
+//     long  press:  Press -> Hold  -> Release      (no Click after a Hold)
+//
+// So for any one gesture the state machine sees the surrounding Press/Release
+// as well as the Click or Hold in the middle. Exactly one of those events may
+// act; the others must be inert, or a single tap fires twice - or worse, the
+// Release aborts the powered run that its own Click just started.
 #include "uistate.h"
 
 // Out-of-line definitions for the in-class-initialised static constants, so
@@ -14,6 +21,21 @@
 // pre-C++17 as well.
 const unsigned long UiState::kFocusTimeoutMs;
 const int UiState::kMenuItemCount;
+
+namespace {
+
+// Arrow direction as a sign: -1 left, +1 right. Only ever called for the two
+// arrow keys.
+inline int arrowDir(UiKey key) { return key == UiKey::Left ? -1 : +1; }
+
+// The four selector widgets, i.e. every focus that is neither Jog nor Menu.
+// These are the ones that commit on OK and expire on the idle timeout.
+inline bool isWidgetFocus(UiFocus f) {
+  return f == UiFocus::JogSpeed || f == UiFocus::Rate || f == UiFocus::Mode ||
+         f == UiFocus::Stops;
+}
+
+}  // namespace
 
 UiState::UiState()
     : m_focus(UiFocus::Jog),
@@ -23,22 +45,245 @@ UiState::UiState()
       m_runToStopDir(0),
       m_jogDir(0) {}
 
-UiFocus UiState::focus() const { return UiFocus::Jog; }
+UiFocus UiState::focus() const { return m_focus; }
 
-bool UiState::menuOpen() const { return false; }
+bool UiState::menuOpen() const { return m_menuOpen; }
 
-int UiState::menuIndex() const { return 0; }
+int UiState::menuIndex() const { return m_menuIndex; }
 
 UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
                             unsigned long nowMs) {
-  (void)key;
-  (void)ev;
-  (void)ctx;
-  (void)nowMs;
+  // Any key event - even an inert one - counts as activity and restarts the
+  // idle clock (§1).
+  m_lastActivityMs = nowMs;
+
+  // -------------------------------------------------------------------------
+  // HALT: checked before focus, before overlays, before anything (§5).
+  // Safety-critical, so it fires on the earliest event of the gesture (Press)
+  // as well as on Click and Hold. CancelMotion is idempotent, so a short press
+  // cancelling on both Press and Click is harmless. Release must not re-fire.
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Halt) {
+    if (ev == UiKeyEvent::Release) {
+      return UiIntent::None;
+    }
+    m_menuOpen = false;
+    m_focus = UiFocus::Jog;
+    m_runToStopDir = 0;
+    m_jogDir = 0;
+    return UiIntent::CancelMotion;
+  }
+
+  // -------------------------------------------------------------------------
+  // MENU: top level, so it opens over any widget and closes from anywhere (§6).
+  // Acts on Click only - the Press and Release of the same tap would otherwise
+  // toggle the menu straight back shut.
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Menu) {
+    if (ev != UiKeyEvent::Click) {
+      return UiIntent::None;
+    }
+    if (m_menuOpen) {
+      m_menuOpen = false;
+      m_focus = UiFocus::Jog;
+      return UiIntent::CloseMenu;
+    }
+    m_menuOpen = true;
+    m_focus = UiFocus::Menu;
+    m_menuIndex = 0;  // the carousel is not resumable; every open starts at 0
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
+  // Menu open: the carousel owns the arrows and OK. MODE / RATE / STOPS must
+  // not steal focus out from under it - the menu leaves on MENU or HALT only,
+  // and both of those were handled above.
+  // -------------------------------------------------------------------------
+  if (m_menuOpen) {
+    if (ev != UiKeyEvent::Click) {
+      return UiIntent::None;  // Press / Release / Hold are all inert here
+    }
+    if (key == UiKey::Ok) {
+      return UiIntent::MenuActivate;  // tiles toggle in place; menu stays open
+    }
+    if (key == UiKey::Left) {
+      // Saturating, not wrapping. A blocked move returns None so the caller can
+      // treat any non-None result as "redraw".
+      if (m_menuIndex <= 0) {
+        return UiIntent::None;
+      }
+      --m_menuIndex;
+      return UiIntent::MenuPrev;
+    }
+    if (key == UiKey::Right) {
+      if (m_menuIndex >= kMenuItemCount - 1) {
+        return UiIntent::None;
+      }
+      ++m_menuIndex;
+      return UiIntent::MenuNext;
+    }
+    return UiIntent::None;  // MODE / RATE / STOPS ignored while the menu is up
+  }
+
+  // -------------------------------------------------------------------------
+  // Selector keys: a Click moves focus to that widget and nothing else. A
+  // repeat of the same selector is a no-op that merely restarts the idle timer
+  // (§1 lists the leave conditions as OK / HALT / idle - not the key itself).
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Mode || key == UiKey::Rate || key == UiKey::Stops) {
+    if (ev != UiKeyEvent::Click) {
+      return UiIntent::None;
+    }
+    m_focus = (key == UiKey::Mode)   ? UiFocus::Mode
+              : (key == UiKey::Rate) ? UiFocus::Rate
+                                     : UiFocus::Stops;
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
+  // OK: three jobs that never overlap (§1). Press and Release are always inert
+  // so the same gesture cannot act twice.
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Ok) {
+    if (ev == UiKeyEvent::Click) {
+      if (isWidgetFocus(m_focus)) {
+        m_focus = UiFocus::Jog;  // commit and dismiss
+        return UiIntent::None;
+      }
+      // At rest: open the jog-speed widget, the setting the arrows already
+      // drive. No intent - opening a widget is pure UI state.
+      m_focus = UiFocus::JogSpeed;
+      return UiIntent::None;
+    }
+    if (ev == UiKeyEvent::Hold && m_focus == UiFocus::Jog) {
+      // Defined "at rest" only, so a slow OK press inside a widget can never
+      // silently move the datum. Zeroing moves no metal, so the MM_ENABLED
+      // inhibit of §3 does not apply.
+      return UiIntent::ZeroDro;
+    }
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
+  // Arrows. What they do depends entirely on the current focus.
+  // -------------------------------------------------------------------------
+  if (key != UiKey::Left && key != UiKey::Right) {
+    return UiIntent::None;  // unreachable today; keeps the switch total
+  }
+  const bool left = (key == UiKey::Left);
+
+  switch (m_focus) {
+    case UiFocus::JogSpeed:
+      if (ev != UiKeyEvent::Click) {
+        return UiIntent::None;  // discrete steps only; Hold has no meaning here
+      }
+      return left ? UiIntent::JogSpeedPrev : UiIntent::JogSpeedNext;
+
+    case UiFocus::Rate:
+      if (ev != UiKeyEvent::Click) {
+        return UiIntent::None;
+      }
+      return left ? UiIntent::PitchPrev : UiIntent::PitchNext;
+
+    case UiFocus::Mode:
+      if (ev != UiKeyEvent::Click) {
+        return UiIntent::None;
+      }
+      return left ? UiIntent::ModePrev : UiIntent::ModeNext;
+
+    case UiFocus::Stops: {
+      // The deliberate asymmetry of §4: setting a stop is cheap to undo,
+      // clearing one loses a position you may have spent time finding. So a
+      // click only ever SETS, and only a hold CLEARS. Each arrow sees its own
+      // stop and nothing else.
+      const bool stopSet = left ? ctx.leftStopSet : ctx.rightStopSet;
+      if (ev == UiKeyEvent::Click) {
+        if (stopSet) {
+          return UiIntent::None;  // display flashes "hold to clear"
+        }
+        return left ? UiIntent::SetLeftStop : UiIntent::SetRightStop;
+      }
+      if (ev == UiKeyEvent::Hold) {
+        if (!stopSet) {
+          return UiIntent::None;  // a hold must never set a stop by accident
+        }
+        return left ? UiIntent::ClearLeftStop : UiIntent::ClearRightStop;
+      }
+      return UiIntent::None;  // Press / Release inert
+    }
+
+    case UiFocus::Menu:
+      // Unreachable: m_menuOpen and Menu focus are kept in lockstep and the
+      // menu branch above already returned.
+      return UiIntent::None;
+
+    case UiFocus::Jog:
+      break;
+  }
+
+  // --- Focus is Jog: the arrows drive the carriage (§3). -------------------
+
+  // Inhibited entirely while the leadscrew is engaged. The state bar says why.
+  if (ctx.motionEnabled) {
+    return UiIntent::None;
+  }
+
+  const int dir = arrowDir(key);
+
+  // A powered run is in flight: the next discrete gesture on EITHER arrow
+  // cancels it (§7 - cancellable by any of three keys). The opposite arrow
+  // cancels rather than reversing: one gesture, one effect. Press and Release
+  // stay inert, so the Release of the cancelling tap does not also fire, and
+  // so the Press of a fresh tap cannot cancel before its own Click is seen.
+  if (m_runToStopDir != 0) {
+    if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
+      m_runToStopDir = 0;
+      return UiIntent::CancelMotion;
+    }
+    return UiIntent::None;
+  }
+
+  const bool stopSet = (dir < 0) ? ctx.leftStopSet : ctx.rightStopSet;
+
+  if (stopSet) {
+    // Click-to-run. Hold behaves identically (§3 table) and is safe because no
+    // Click follows a Hold. Press/Release must be inert: a Release must never
+    // abort the powered run its own Click just started.
+    if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
+      m_runToStopDir = dir;
+      return (dir < 0) ? UiIntent::RunToLeftStop : UiIntent::RunToRightStop;
+    }
+    return UiIntent::None;
+  }
+
+  // No stop on this side: dead-man jog, bounded by the physical gesture.
+  // "Continuous jog while held" is Press/Release - the Click and Hold that
+  // arrive in between are redundant and must be inert.
+  if (ev == UiKeyEvent::Press) {
+    m_jogDir = dir;
+    return (dir < 0) ? UiIntent::JogLeftStart : UiIntent::JogRightStart;
+  }
+  if (ev == UiKeyEvent::Release) {
+    if (m_jogDir != dir) {
+      return UiIntent::None;  // not the arrow that started this jog
+    }
+    m_jogDir = 0;
+    return UiIntent::JogStop;
+  }
   return UiIntent::None;
 }
 
 bool UiState::tick(unsigned long nowMs) {
-  (void)nowMs;
-  return false;
+  // Only the selector widgets expire. Jog is the rest state (nothing to fall
+  // back to) and Menu is exempt: it leaves on MENU or HALT only (§1).
+  if (!isWidgetFocus(m_focus)) {
+    return false;
+  }
+  if (nowMs - m_lastActivityMs < kFocusTimeoutMs) {
+    return false;
+  }
+  m_focus = UiFocus::Jog;
+  // Motion is deliberately untouched: the idle timeout moves focus and nothing
+  // else, so a powered run survives it and the next arrow click still cancels.
+  return true;
 }
