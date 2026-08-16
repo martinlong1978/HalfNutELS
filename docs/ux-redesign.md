@@ -342,6 +342,17 @@ DRO behaviour and needs no special casing.
 The datum end shows `0.0` and is underlined; the far end shows the span. A manual zero adds a
 `▽` tick on the bar at the zero point and tags the readout `MAN`.
 
+Four details the rules above leave implicit, pinned by `test/test_dro/` and repeated here so
+they are not lost in test code:
+
+- **A stop parked at pulse 0 is a real datum.** "Is it set" comes from the stop state alone,
+  never from `pulses != 0`. This is the trap an implementation falls into most easily.
+- **An unset stop's stored position must be ignored entirely** — it may hold stale junk.
+- **Coincident stops** (both set to the same position) still resolve to the preferred *side*,
+  because the chosen source is what decides which end of the bar renders as the datum.
+- **Translating the `INT32_MIN` / `INT32_MAX` unset sentinels into set/unset flags is the
+  caller's job.** `lib/dro` takes explicit booleans and never sees a sentinel.
+
 Two consequences worth designing for:
 
 - **The numbers jump when the datum changes.** Setting a second stop can hand the datum to the
