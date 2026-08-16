@@ -50,18 +50,35 @@ thumbs sit, state on the bottom.
 ### Matrix mapping
 
 The scan builds `code = a | b<<3` (`keyarray.cpp:125,137-138`) where `a` is the H bitmask
-and `b` the V bitmask, giving nine fixed codes. Assignment is pure `board.h` edit, so the
-table below can be permuted freely to match however the caps are physically wired.
+and `b` the V bitmask. **Physical rows run along H, physical columns along V** — so the
+codes read down the H index and across the V index:
 
-|        | H1 | H2 | H3 |
+|        | V1 (left) | V2 (centre) | V3 (right) |
+|--------|-----------|-------------|------------|
+| **H1** (top) | `9` | `17` | `33` |
+| **H2** (mid) | `10` | `18` | `34` |
+| **H3** (bot) | `12` | `20` | `36` |
+
+Today's caps sit on those codes like this — note Rate−/Rate+ adjacent on the top row and
+Jog L/R adjacent on the bottom, the grouping this redesign breaks up:
+
+|        | V1 | V2 | V3 |
 |--------|----|----|----|
-| **V1** | `9` MODE | `10` RATE | `12` STOPS |
-| **V2** | `17` ◀ | `18` OK | `20` ▶ |
-| **V3** | `33` HALT | `34` MENU | `36` ENABLE |
+| **H1** | `9` Rate − | `17` Rate + | `33` Mode |
+| **H2** | `10` Sync | `18` Half-nut | `34` Enable |
+| **H3** | `12` Lock | `20` Jog ◀ | `36` Jog ▶ |
 
-Note `18` is today's `ELS_HALF_NUT_BUTTON` — the key sampled at boot for setup mode
-(`main.cpp:120-129`). Putting **OK** there keeps the boot gesture memorable: *hold OK at
-power-on for setup*.
+The Mk2 assignment is a pure `board.h` edit:
+
+|        | V1 | V2 | V3 |
+|--------|----|----|----|
+| **H1** | `9` MODE | `17` RATE | `33` STOPS |
+| **H2** | `10` ◀ | `18` OK | `34` ▶ |
+| **H3** | `12` HALT | `20` MENU | `36` ENABLE |
+
+Note `18` stays the centre key in both layouts, and it is today's `ELS_HALF_NUT_BUTTON` —
+the key sampled at boot for setup mode (`main.cpp:120-129`). Putting **OK** there keeps the
+boot gesture memorable: *hold OK at power-on for setup*.
 
 ### What happened to the old nine
 
