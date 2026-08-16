@@ -97,25 +97,24 @@ public:
   LeadscrewDirection getCurrentDirection();
   float getEstimatedVelocityInMillimetersPerSecond();
 
-  // TODO: implemented in FS-B
   // Carriage position in millimetres, converted from getCurrentPosition()
-  // (pulses) via config->leadscrewStepsPerMm(). Stub returns a deliberately
-  // wrong sentinel so callers relying on it fail loudly on assertion rather
-  // than link error.
-  float getPositionMM() { return -12345.0f; }
+  // (pulses) via config->leadscrewStepsPerMm(). Display-path only (not called
+  // from update()); cheap divide by an already-cached derived value.
+  float getPositionMM() { return getCurrentPosition() / config->leadscrewStepsPerMm(); }
 
-  // TODO: implemented in FS-B
   // Stop position in millimetres. ONLY valid when
   // getStopPositionState(position) == LeadscrewStopState::SET. When UNSET,
-  // contract is to return NAN (test the result with std::isnan) rather than
-  // converting the INT32_MIN/INT32_MAX pulse sentinels, which are meaningless
-  // once divided by steps-per-mm.
-  float getStopPositionMM(LeadscrewStopPosition position) { return -12345.0f; }
+  // returns NAN rather than converting the INT32_MIN/INT32_MAX pulse
+  // sentinels, which are meaningless once divided by steps-per-mm.
+  float getStopPositionMM(LeadscrewStopPosition position) {
+    if (getStopPositionState(position) != LeadscrewStopState::SET) {
+      return NAN;
+    }
+    return getStopPosition(position) / config->leadscrewStepsPerMm();
+  }
 
-  // TODO: implemented in FS-B
   // Exposes the derived config so the display can format units without a
-  // separate global. Stub returns nullptr so callers relying on it fail on
-  // assertion (non-null check) rather than link error.
-  LatheConfigDerived* getConfig() { return nullptr; }
+  // separate global.
+  LatheConfigDerived* getConfig() { return config; }
 
 };
