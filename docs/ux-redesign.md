@@ -22,10 +22,15 @@ act on*. That one change is what buys back the panel.
 | Focus | ◀ / ▶ do | Entered by | Leaves on |
 |---|---|---|---|
 | **JOG** (rest) | Move the carriage | default | — |
-| **RATE** | Step the pitch list | `RATE` | OK, `HALT`, 4 s idle |
-| **MODE** | Cycle feed / thread-R / thread-L | `MODE` | OK, `HALT`, 4 s idle |
-| **STOPS** | Set / clear the left / right stop | `STOPS` | OK, `HALT`, 4 s idle |
+| **JOG SPEED** | Step the jog speed | `OK` | `OK`, `HALT`, 4 s idle |
+| **RATE** | Step the pitch list | `RATE` | `OK`, `HALT`, 4 s idle |
+| **MODE** | Cycle feed / thread-R / thread-L | `MODE` | `OK`, `HALT`, 4 s idle |
+| **STOPS** | Set / clear the left / right stop | `STOPS` | `OK`, `HALT`, 4 s idle |
 | **MENU** | Move through menu tiles | `MENU` | `MENU`, `HALT` |
+
+`OK` has two jobs, and they never overlap: **inside a widget it means done**, and **at rest,
+with nothing to confirm, it opens jog speed** — the setting belonging to the thing the arrows
+are already driving. It is the only key that would otherwise be idle at rest.
 
 The focused field is always outlined in the accent colour and carries `◀ ▶` chevrons, so
 "what will the arrows do right now" is answerable at a glance without pressing anything.
@@ -116,8 +121,12 @@ Consequences:
   `MM_DECELLERATE` behaviour, kept).
 - Arrows are **inhibited while `MM_ENABLED`**. The state bar says why rather than silently
   ignoring the press.
-- Jog speed is no longer reachable via `next/prevFeedPitch()`. It becomes a preference:
-  `RATE` **held** opens the jog-speed picker, and it also has a menu tile.
+- **Jog speed moves onto `OK`.** Today it rides on `next/prevFeedPitch()`, which dispatch to
+  `inc/decJogSpeed()` only when the mode is `FM_JOG` (`globalstate.cpp:158-176`). With that
+  mode gone it needs an explicit home: tap `OK` at rest, arrows step the speed, `OK` again
+  returns. It keeps a menu tile as the discoverable route.
+- While the jog-speed widget is open the arrows own the speed, not the carriage — so jogging
+  pauses for as long as it is up. It is a two-tap in-and-out, not somewhere you linger.
 
 ---
 
@@ -140,11 +149,23 @@ feed returns you to the pitch you were using.
 The pitch list as a horizontal ticker, current value large in the centre, neighbours dimmed
 either side. Arrows step, OK commits.
 
-`RATE` **held** switches the same widget to jog speed (`jogSpeeds[]`, shown as 1 %–100 %).
-
 Display caution: `getCurrentFeedPitch()` returns mm/rev always and negates for
 `FM_THREAD_REVERSE` (`globalstate.cpp:137-156`). Rendering "16 TPI" or "4 thou" must index
 `threadPitchImperial[]` / `feedPitchImperial[]` directly via `getFeedSelect()`.
+
+### JOG SPEED
+
+Opened by tapping `OK` at rest. Six steps from `jogSpeeds[]`, shown as a percentage bar with
+the value large in the centre. Arrows step, `OK` closes.
+
+The scale is `{0.01, 0.05, 0.1, 0.25, 0.5, 1}` → 1 %, 5 %, 10 %, 25 %, 50 %, 100 % of
+`jogSpeedPps()`. Two fixes go with the move:
+
+- `incJogSpeed()` clamps against a **hardcoded 5** rather than `ARRAY_SIZE(jogSpeeds) - 1`
+  (`globalstate.cpp:83-85`), so adding a speed silently makes it unreachable.
+- The `FM_JOG` dispatch inside `next/prevFeedPitch()` goes away with the mode. Those functions
+  also return a stale `m_feedSelect` on the jog branch today — a latent bug that disappears
+  with the same change.
 
 ### STOPS
 
@@ -185,7 +206,7 @@ left/right keys, and a 320×240 landscape panel suits a row of cards.
 | Tile | `OK` does | Notes |
 |---|---|---|
 | **Units** | Toggle mm / inch | Must also `setFeedSelect(-1)` — `setUnitMode()` is a bare assignment (`globalstate.cpp:182`) and does not reset the index |
-| **Jog speed** | ◀ ▶ adjust inline | Also on `RATE`-hold |
+| **Jog speed** | ◀ ▶ adjust inline | The same widget `OK` opens at rest; here for discoverability |
 | **Sync** | Set a sync point against a stopped spindle | Disabled in Feed mode. Needs real work — today the anchor is only ever latched as a side effect of setting a stop |
 | **Software update** | Confirm → `setOTA()` | Replaces the half-nut hold |
 | **Setup / Wi-Fi** | Confirm → reboot into AP mode | **Needs new firmware** — see below |
