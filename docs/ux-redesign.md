@@ -260,8 +260,8 @@ handler in `buttonpad.cpp` and `drawLocked()` in the display.
 120├────────────────────────────────────────────┤
    │  ·  ·  ·  ·  ▮  ·  ·  ·  ·  ·  ·  ·  ·  ·  │  pitch ticker
 140├────────────────────────────────────────────┤
-   │  L▐━━━━━━━━━━━●─────────────────────▌R     │  carriage travel
-   │    set              12.4 mm      unset     │
+   │   ▐━━━━━━━━━━━●─────────────────────▌      │  carriage travel
+   │  L 0.0           12.4 mm         48.0 R    │  (a small DRO)
 190├────────────────────────────────────────────┤
    │  ● RUNNING        HALT   MENU   ENABLE     │  state + soft keys
 240└────────────────────────────────────────────┘
@@ -269,7 +269,28 @@ handler in `buttonpad.cpp` and `drawLocked()` in the display.
 
 The **carriage travel bar** is new and is the biggest information win: stop positions and
 where the carriage sits between them are currently invisible, and they are what you actually
-need to know mid-cut. It needs one plumbing change (§9).
+need to know mid-cut. It reads as a small DRO — live position and unit in the centre, each
+stop's own position at its end, `——` where a stop is unset. It needs one plumbing change (§9).
+
+### Units
+
+Every number carries its unit, sized down and dimmed so the digits still dominate. They are
+not all the same unit:
+
+| Readout | Metric | Imperial |
+|---|---|---|
+| Pitch — thread | `1.25 mm` | `16 TPI` |
+| Pitch — feed | `0.25 mm` | `4 thou` |
+| Carriage & stops | `12.4 mm`, 2 dp | `0.488 in`, 3 dp |
+| Jog speed | `25 %` | `25 %` |
+| Spindle | `1250 RPM` | `1250 RPM` |
+
+Feed in thou/rev while position reads in inches is not an inconsistency — it is what machine
+tools do, and matching it is correct. The status bar keeps its `mm` / `inch` chip as the one
+place that states the unit mode itself.
+
+Imperial text **cannot** come from `getCurrentFeedPitch()` — see the display caution in §4.
+Position is converted for display only; internally everything stays in pulses.
 
 The bottom-right soft-key hints mirror the bottom physical row, so the panel is
 self-documenting for the two functions that have no on-screen state of their own.
@@ -344,7 +365,10 @@ Roughly in dependency order. None of it is on the motion hot path.
    a private member with no accessor, and the only `LatheConfigDerived` is a local in
    `setup()` (`main.cpp:141`). Add `float getPositionMM()` on `Leadscrew` (or hoist the
    config to a global and pass it to `Display`). Same requirement for showing stop positions
-   — `getStopPosition()` already exists and has no non-test callers.
+   — `getStopPosition()` already exists and has no non-test callers, and returns the
+   sentinels `INT32_MIN` / `INT32_MAX` when unset, which is exactly what renders as `——`.
+   Imperial divides by 25.4 at the point of render only; internally everything stays in
+   pulses.
 2. **A UI state machine.** Focus + overlay state, currently nonexistent. Belongs beside
    `ButtonPad`, not in `GlobalState` — it is display-task-local and needs no cross-core
    visibility.
