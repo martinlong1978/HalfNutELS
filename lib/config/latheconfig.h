@@ -3,7 +3,7 @@
 #ifndef ELS_LATHECONFIG_H
 #define ELS_LATHECONFIG_H
 
-#define CHECKVALUE 0xDFEB093F
+#define CHECKVALUE 0xDFEB0940
 
 //#define ELS_OFFLINE
 typedef struct LatheConfig {
