@@ -148,7 +148,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--a
     html += "'><button type='button' class='reveal' data-reveal='password'>Show</button></div><div class='help hintline'>Leave blank for an open network.</div></div>";
 
     html += "<div class='field'><label for='url'>Firmware update URL</label><div class='control'><input id='url' name='url' type='url' placeholder='http://.../firmware.bin' value='";
-    DEFAULTWEBSETTING(webSettings->url, "http://hass.longhome.co.uk/els/elstft.bin");
+    DEFAULTWEBSETTING(webSettings->url, "https://github.com/martinlong1978/TeensyELS/releases/latest/download/elstft.bin");
     html += "'></div><div class='help hintline'>Where holding Half-Nut pulls OTA updates from.</div><div class='help err'>Must start with http:// or https://</div></div>";
     html += "</section>";
 

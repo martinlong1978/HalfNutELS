@@ -3,6 +3,14 @@
 
 // Board and pin definitions are all in here
 
+// OTA update source. The device pulls firmware from the "latest" GitHub release
+// of this repo. Derived URLs (built in code, see ESPCommsManager.cpp):
+//   API:      https://api.github.com/repos/<REPO>/releases/latest
+//   Download: https://github.com/<REPO>/releases/latest/download/<ASSET>
+// The download asset MUST be named OTA_ASSET_NAME so the permalink resolves.
+#define OTA_GITHUB_REPO "martinlong1978/TeensyELS"
+#define OTA_ASSET_NAME "elstft.bin"
+
 #define ELS_SPINDLE_ENCODER_A 35
 #define ELS_SPINDLE_ENCODER_B 34
 

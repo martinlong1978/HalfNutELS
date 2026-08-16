@@ -200,6 +200,9 @@ int  GlobalState::getOTABytes() { return OTAbytes; }
 int  GlobalState::getOTALength() { return OTAlength; }
 void  GlobalState::setOTAContentLength(int length) { OTAlength = length; }
 
+void  GlobalState::setOtaStatus(GlobalOtaStatus status) { m_otaStatus = status; }
+GlobalOtaStatus  GlobalState::getOtaStatus() { return m_otaStatus; }
+
 
 void  GlobalState::setDisplayReset() { m_displayReset = true; }
 bool  GlobalState::getDisplayReset() {

@@ -278,14 +278,34 @@ void Display::update() {
 }
 
 void Display::drawOTA() {
-  int bytes = GlobalState::getInstance()->getOTABytes();
-  int length = GlobalState::getInstance()->getOTALength();
-  int percent = (((float)(bytes * 100)) / ((float)length));
-  lv_slider_set_value(updateSlider, bytes > 0 ? percent : 0, LV_ANIM_OFF);
-  if (percent > 99 && bytes > 0) {
-    lv_label_set_text(updateLabel, "Rebooting...");
-  } else {
-    lv_label_set_text(updateLabel, "Updating...");
+  GlobalState* state = GlobalState::getInstance();
+  switch (state->getOtaStatus()) {
+  case OTA_CHECKING:
+  case OTA_IDLE:
+    // OTA_IDLE is the brief window before the OTA task sets CHECKING.
+    lv_label_set_text(updateLabel, "Checking for updates...");
+    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
+    break;
+  case OTA_NO_UPDATE:
+    lv_label_set_text(updateLabel, "No update available");
+    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
+    break;
+  case OTA_FAILED:
+    lv_label_set_text(updateLabel, "Update failed");
+    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
+    break;
+  case OTA_DOWNLOADING: {
+    int bytes = state->getOTABytes();
+    int length = state->getOTALength();
+    int percent = length > 0 ? (int)(((float)(bytes * 100)) / ((float)length)) : 0;
+    lv_slider_set_value(updateSlider, bytes > 0 ? percent : 0, LV_ANIM_OFF);
+    if (percent > 99 && bytes > 0) {
+      lv_label_set_text(updateLabel, "Rebooting...");
+    } else {
+      lv_label_set_text(updateLabel, "Updating...");
+    }
+    break;
+  }
   }
 }
 

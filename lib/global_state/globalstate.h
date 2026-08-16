@@ -42,6 +42,19 @@ enum GlobalThreadSyncState { SS_UNSET, SS_SYNC, SS_UNSYNC };
  */
 enum GlobalButtonLock { LK_UNSET, LK_UNLOCKED, LK_LOCKED };
 
+/**
+ * OTA update progress, set by the OTA task (SpindleTask) and read by the
+ * DisplayTask so the OTA screen can show the right message. The two tasks
+ * coordinate only through this (volatile) value; no display method is ever
+ * called from the OTA task.
+ *  OTA_IDLE        - no update in progress
+ *  OTA_CHECKING    - connecting / checking the latest release version
+ *  OTA_NO_UPDATE   - already on the latest version, nothing to do
+ *  OTA_DOWNLOADING - downloading + flashing the new image (progress bar active)
+ *  OTA_FAILED      - the update failed (device will reboot)
+ */
+enum GlobalOtaStatus { OTA_IDLE, OTA_CHECKING, OTA_NO_UPDATE, OTA_DOWNLOADING, OTA_FAILED };
+
 typedef struct DebugData {
   int tm;
   float positionError;
@@ -64,6 +77,7 @@ private:
   volatile bool OTA = false;
   volatile int OTAbytes = 0;
   volatile int OTAlength = 0;
+  volatile GlobalOtaStatus m_otaStatus = OTA_IDLE;
 
 
 
@@ -145,6 +159,9 @@ public:
   int getOTABytes();
   int getOTALength();
   void setOTAContentLength(int length);
+
+  void setOtaStatus(GlobalOtaStatus status);
+  GlobalOtaStatus getOtaStatus();
 
   void setDisplayReset();
   bool getDisplayReset();
