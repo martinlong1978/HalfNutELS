@@ -203,7 +203,19 @@ _(accumulated as they arise; nothing here blocks the work below it)_
    six-step jog speed cannot. Either the menu model grows an editing sub-state, or those two
    spec lines change to "OK opens a sub-widget". I lean to the sub-state, but it is a design
    decision, not an implementation one, so it is waiting for you.
-4. **Should a run-to-stop be cancellable by the opposite arrow, or only the same one?** §3 says
+4. **The rotary encoder bypasses the focus model entirely.** `KeyArray::updateEncoderPos()`
+   calls `next/prevFeedPitch()` directly regardless of `UiFocus`, so turning the encoder while
+   the STOPS or JOG SPEED widget is open silently steps the pitch — which contradicts §1's
+   "the arrows are the only actuators". Pre-existing, but it used to be masked by the button
+   lock, and the new buttonpad unlocks at boot, so it is now live from power-on. It should
+   route through `UiState` as `PitchNext`/`PitchPrev` like everything else. Is the encoder
+   still fitted and used? That decides whether this is worth wiring or whether the code should
+   go.
+5. **Should ENABLE also dismiss an open widget?** It does not today. Engaging the leadscrew
+   while the RATE widget is up leaves it on screen for up to 4 s with the arrows already
+   inhibited. Spec §1 lists the leave conditions as OK / HALT / idle, so this is as designed —
+   but it may feel wrong on the bench, and it is a one-line change.
+6. **Should a run-to-stop be cancellable by the opposite arrow, or only the same one?** §3 says
    "a second press of the same arrow"; §7 says "cancellable by any of three keys". The
    implementation takes the broader, safer reading — either arrow cancels. Flagging only
    because the two spec lines disagree.
