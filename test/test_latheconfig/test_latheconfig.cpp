@@ -197,6 +197,60 @@ TEST(LatheConfigDroDatumMapping, OutOfRangeByteFallsBackToLeft) {
   EXPECT_EQ(toDroDatumPreference(0x7F), DroDatumPreference::Left);
 }
 
+// Every byte value must resolve to one of the two enumerators, and ONLY the
+// DRO_DATUM_RIGHT byte may produce Right. The three spot values above would
+// still pass if the helper mapped, say, 0x80 to Right; this closes that.
+TEST(LatheConfigDroDatumMapping, EveryByteResolvesAndOnlyOneMapsToRight) {
+  for (int b = 0; b <= 0xFF; ++b) {
+    DroDatumPreference expected = (b == DRO_DATUM_RIGHT) ? DroDatumPreference::Right
+                                                         : DroDatumPreference::Left;
+    EXPECT_EQ(toDroDatumPreference((uint8_t)b), expected) << "stored byte " << b;
+  }
+}
+
+// --- Flash layout ---------------------------------------------------------
+// LatheConfig is blitted raw into flash (src/WebSettings.cpp), so its size and
+// member offsets are the on-disk format. latheconfig.h carries static_asserts
+// that fail the BUILD if any offset moves; these mirror them at runtime so the
+// intent is visible in the test suite and a failure reads as a sentence rather
+// than a compiler error. Keep the two in step.
+TEST(LatheConfigFlashLayout, SizeAndMemberOffsetsAreFrozen) {
+  EXPECT_EQ(sizeof(LatheConfig), 44u);
+  EXPECT_EQ(offsetof(LatheConfig, check), 0u);
+  EXPECT_EQ(offsetof(LatheConfig, spindleEncoderPpr), 4u);
+  EXPECT_EQ(offsetof(LatheConfig, stepperPpr), 8u);
+  EXPECT_EQ(offsetof(LatheConfig, invertDirection), 12u);
+  EXPECT_EQ(offsetof(LatheConfig, gearboxRatioNumerator), 16u);
+  EXPECT_EQ(offsetof(LatheConfig, gearboxRatioDenominator), 20u);
+  EXPECT_EQ(offsetof(LatheConfig, leadscrewPitchMm), 24u);
+  EXPECT_EQ(offsetof(LatheConfig, jogSpeed), 28u);
+  EXPECT_EQ(offsetof(LatheConfig, leadscrewAcceleration), 32u);
+  EXPECT_EQ(offsetof(LatheConfig, leadscrewMaxSpeed), 36u);
+}
+
+// The two ux-redesign fields were appended so that no existing member moved.
+// This asserts the specific property that made that safe: they sit past the
+// end of the pre-redesign struct (which was 40 bytes), so a stored blob
+// written by older firmware overlaps only the older members.
+TEST(LatheConfigFlashLayout, NewFieldsSitPastThePreRedesignStructSize) {
+  EXPECT_GE(offsetof(LatheConfig, theme), 40u);
+  EXPECT_EQ(offsetof(LatheConfig, theme), 40u);
+  EXPECT_EQ(offsetof(LatheConfig, droDatum), 41u);
+  // ...and the struct still ends 4-byte aligned, which is what keeps the
+  // flashWrite length legal and LatheConfig's flash offset aligned.
+  EXPECT_EQ(sizeof(LatheConfig) % 4, 0u);
+}
+
+// A settings blob is only trusted when check == CHECKVALUE. Erased flash reads
+// back as all-0xFF and a blank/zeroed region as all-0x00, so CHECKVALUE must
+// equal neither - otherwise a wiped sector (including the window mid-save,
+// between flashEraseSector and flashWrite) would be accepted as valid settings
+// instead of dropping the device into AP setup.
+TEST(LatheConfigCheckValue, DoesNotCollideWithErasedOrBlankFlash) {
+  EXPECT_NE((uint32_t)CHECKVALUE, 0xFFFFFFFFu);
+  EXPECT_NE((uint32_t)CHECKVALUE, 0x00000000u);
+}
+
 // PlatformIO does not inject a googletest runner for this env, so provide one.
 int main(int argc, char **argv) {
   ::testing::InitGoogleMock(&argc, argv);

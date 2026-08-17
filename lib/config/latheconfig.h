@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 
 #include "dro.h"
 
@@ -61,6 +62,43 @@ typedef struct LatheConfig {
     uint8_t droDatum = DRO_DATUM_LEFT;
 
 } LatheConfig;
+
+// --- Flash layout pin -----------------------------------------------------
+// This struct is blitted raw into flash (src/WebSettings.cpp), so its size and
+// every member offset ARE the on-disk format. Anything that moves an existing
+// offset silently reinterprets settings already saved on a user's machine -
+// their leadscrew pitch read back as their jog speed, etc. - and nothing at
+// runtime would report it. These asserts are compiled by BOTH the host test
+// build and the device build, so such a change fails at compile time instead.
+//
+// Rules if you need to change this struct:
+//   * Append new fields at the END only, and bump CHECKVALUE (above) in the
+//     same commit so stored blobs shorter than the new struct are discarded.
+//   * Then update the size assert below to the new size, and add offset
+//     asserts for the new members. NEVER "fix" an existing offset assert to
+//     match a moved member - that is the bug the assert exists to catch.
+//   * The total must still fit the shared 4 KB sector alongside WebSettings -
+//     see the sector asserts in src/WebSettings.cpp.
+static_assert(sizeof(LatheConfig) == 44, "LatheConfig is a flash layout: size changed");
+static_assert(alignof(LatheConfig) == 4, "LatheConfig alignment changed");
+static_assert(offsetof(LatheConfig, check) == 0, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, spindleEncoderPpr) == 4, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, stepperPpr) == 8, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, invertDirection) == 12, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, gearboxRatioNumerator) == 16, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, gearboxRatioDenominator) == 20, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, leadscrewPitchMm) == 24, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, jogSpeed) == 28, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, leadscrewAcceleration) == 32, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, leadscrewMaxSpeed) == 36, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, theme) == 40, "LatheConfig flash offset moved");
+static_assert(offsetof(LatheConfig, droDatum) == 41, "LatheConfig flash offset moved");
+
+// An erased flash sector reads back as all-0xFF, and a zeroed one as all-0x00.
+// CHECKVALUE must match neither, or a wiped/blank sector would be accepted as
+// valid saved settings (see the boot check in src/main.cpp).
+static_assert((uint32_t)CHECKVALUE != 0xFFFFFFFFu, "CHECKVALUE would match erased flash");
+static_assert((uint32_t)CHECKVALUE != 0x00000000u, "CHECKVALUE would match blank flash");
 
 // Maps a stored `droDatum` byte onto DroDatumPreference. Flash can hand back
 // garbage (a short-read blob, or corruption) that is neither DRO_DATUM_LEFT

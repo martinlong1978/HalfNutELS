@@ -13,9 +13,49 @@ DNSServer dnsServer;
 const byte DNS_PORT = 53;
 
 
-const uint32_t NVM_Offset = 0x9000;
-uint32_t address = 0x3000;
-uint32_t latheaddress = 0x3000 + sizeof(WebSettings);
+// Both saved structs live back-to-back in ONE 4 KB flash sector, inside the
+// `nvs` partition (0x9000, 0x5000 - see my_4MB.csv). constexpr rather than
+// plain globals so the layout can be checked at compile time below; nothing
+// outside this file references them.
+constexpr uint32_t NVM_Offset = 0x9000;
+constexpr uint32_t address = 0x3000;
+constexpr uint32_t latheaddress = address + sizeof(WebSettings);
+
+// --- Sector budget --------------------------------------------------------
+// setValues() and saveLatheSettings() both erase exactly ONE sector,
+// (NVM_Offset + address) / 4096, and then write BOTH structs into it. That is
+// only correct while both structs fit inside that single sector. If they ever
+// stop fitting, LatheConfig spills into the next sector, which is never
+// erased - and flash writes can only clear bits, so the spilled bytes would be
+// AND-ed into whatever was already there. That corrupts silently: no error is
+// returned, the data just reads back wrong. Hence a compile-time budget.
+//
+// Current numbers (verified with the xtensa toolchain, and identical on the
+// host):
+//     sizeof(WebSettings) = 612   (4 + 32 + 63 + 512 = 611, padded to 612)
+//     sizeof(LatheConfig) =  44
+//     total               = 656 of 4096  ->  3440 bytes headroom
+// Adding fields is therefore safe today, but is NOT unlimited - grow
+// WebSettings::url and this is the assert that will stop you.
+constexpr uint32_t SECTOR_SIZE = 4096;
+constexpr uint32_t SETTINGS_BYTES = sizeof(WebSettings) + sizeof(LatheConfig);
+
+static_assert(((NVM_Offset + address) % SECTOR_SIZE) + SETTINGS_BYTES <= SECTOR_SIZE,
+              "WebSettings + LatheConfig no longer fit the single erased sector - "
+              "LatheConfig would spill into a sector that is never erased");
+
+// spi_flash_read/write require 4-byte-aligned offsets and lengths. Both struct
+// sizes are multiples of 4 (each has 4-byte alignment, so sizeof rounds up),
+// which is also what keeps `latheaddress` aligned - assert it rather than rely
+// on it.
+static_assert((NVM_Offset + address) % 4 == 0, "WebSettings flash offset must be 4-byte aligned");
+static_assert((NVM_Offset + latheaddress) % 4 == 0, "LatheConfig flash offset must be 4-byte aligned");
+static_assert(sizeof(WebSettings) % 4 == 0, "flashWrite length must be a multiple of 4");
+static_assert(sizeof(LatheConfig) % 4 == 0, "flashWrite length must be a multiple of 4");
+
+// ...and the whole region must stay inside the nvs partition (0x9000 + 0x5000).
+static_assert(NVM_Offset + address + SETTINGS_BYTES <= 0x9000 + 0x5000,
+              "settings region escapes the nvs partition");
 
 #define DEFAULTWEBSETTING(setting, default) html += ((webSettings->check == CHECKVALUE ) ? setting : default)
 #define DEFAULTLATHESETTING(setting, default) html += ((latheConfig->check == CHECKVALUE ) ? setting : default)
