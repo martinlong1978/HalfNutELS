@@ -489,15 +489,15 @@ static const int OVERLAY_DATUM_POST_X_RIGHT =
 // bar under it so drift reads as movement before the digits are legible.
 //
 //     0 +--------------------------------------------+
-//       | DIAGNOSTICS                       +34 p    |  title + raw pulses (14)
-//       |   POSITION ERROR                           |
+//       | DIAGNOSTICS            OK / MENU / HALT    |  title + exit hint (14)
+//       |   POSITION ERROR                  +34 p    |  label + raw pulses (14)
 //       |            +0.01  mm                       |  error   (48 + 26)
 //       |  ------------------|------------------     |  centre-zero bar
 //       +--------------------------------------------+  rule
 //       |  SPINDLE      CARRIAGE      EXPECT         |  labels        (14)
 //       |  320          6.72          6.72           |  values        (26)
 //       |  RPM          mm/s          mm/s           |  units         (14)
-//       |  SYNC [SYNCED]         OK / MENU / HALT    |  sync chip + exit hint
+//       |  SYNC [SYNCED]         ANCHOR   L stop     |  sync chip + anchor src
 //   240 +--------------------------------------------+
 //
 // CARRIAGE vs EXPECT are deliberately the same unit (mm/s): a ratio problem
@@ -541,13 +541,23 @@ static const int DIAG_COL_W = 95;
 static const int DIAG_RATE_LABEL_Y = 138;  // 14 -> 138..154
 static const int DIAG_RATE_VALUE_Y = 157;  // 26 -> 157..186
 static const int DIAG_RATE_UNIT_Y = 188;   // 14 -> 188..204
-// Bottom row: sync chip left, exit hint right.
+// Bottom row: sync chip left, the anchor SOURCE right. GlobalThreadSyncState
+// (the chip) only says synced / not synced; getSyncAnchorState() says what the
+// helix is pinned TO -- a stop, a manual sync point, or nothing -- which is
+// the difference between a recut that picks up and one that does not. The two
+// belong on one row because they are two halves of the same fact.
 static const int DIAG_SYNC_LABEL_X = 10;
 static const int DIAG_SYNC_CHIP_X = 64;    // ink x; the chip pads around it
 static const int DIAG_BOTTOM_Y = 216;      // 14 ink -> 216..232
 static const int DIAG_SYNC_PAD_H = 6;
 static const int DIAG_SYNC_PAD_V = 3;      // chip 213..235
-static const int DIAG_HINT_X = 170;        // right-aligned box 170..310
+static const int DIAG_ANCHOR_LABEL_X = 180;  // "ANCHOR", dim -> 180..244
+static const int DIAG_ANCHOR_VALUE_X = 250;  // right-aligned box 250..310
+static const int DIAG_ANCHOR_VALUE_W = 60;
+// The exit hint moved to the title row (its right half was empty) to free the
+// bottom row for the anchor readout: chip box worst case ends at 165 and
+// "OK / MENU / HALT" needs 129 of the remaining 145 -- the two cannot share.
+static const int DIAG_HINT_X = 170;        // right-aligned box 170..310, row 1
 static const int DIAG_HINT_W = 140;
 
 // --- About screen ------------------------------------------------------------
@@ -571,6 +581,49 @@ static const int ABOUT_UP_W = 140;         // 170..310
 static const int ABOUT_HINT_X = 170;       // right-aligned box, bottom
 static const int ABOUT_HINT_W = 140;
 static const int ABOUT_HINT_Y = 216;
+
+// --- Wi-Fi setup screens -----------------------------------------------------
+//
+// showWifi() / showConnected() run BEFORE any stored config is valid -- that is
+// why the device is in AP mode -- so there is no theme preference to read: the
+// no-arg constructor pins m_palette to PALETTE_DARK and these screens are
+// always dark, on the same palette tokens as everything else.
+//
+// Left column: the credentials as labelled text (the fallback if the QR can't
+// be scanned). Right: the join QR on a WHITE CARD. The QR itself stays
+// dark-on-light whatever the ground: inverted QR is readable by some scanners
+// and not others, and this code exists to get a phone onto the AP -- not the
+// place to be clever. The card's white padding is the quiet zone (lv_qrcode
+// also centres the scaled code inside its canvas, so the canvas's own leftover
+// margin adds to it), and black/white here are FUNCTIONAL, the one sanctioned
+// pair of non-palette colours in this file.
+static const int WIFI_LABEL_X = 10;
+static const int WIFI_SSID_LABEL_Y = 12;   // 14 -> 12..28
+static const int WIFI_SSID_VALUE_Y = 28;   // 26 -> 28..57
+static const int WIFI_PASS_LABEL_Y = 82;   // 14 -> 82..98
+static const int WIFI_PASS_VALUE_Y = 98;   // 26 -> 98..127
+static const int WIFI_IP_LABEL_Y = 152;    // 14 -> 152..168
+static const int WIFI_IP_VALUE_Y = 168;    // 26 -> 168..197
+static const int WIFI_QR_SIZE = 124;       // the QR canvas (code + centring margin)
+static const int WIFI_QR_PAD = 10;         // the white quiet-zone ring; ~2.3
+                                           // modules at the payload's version 3
+                                           // (29 modules over 124 px)
+static const int WIFI_CARD_X = 170;        // card 170..313
+static const int WIFI_CARD_Y = 42;         // card 42..185
+static const int WIFI_CARD_W = WIFI_QR_SIZE + (2 * WIFI_QR_PAD);  // 144
+static const int WIFI_SCAN_Y = 20;         // "Scan to join", 14 -> 20..36
+// Credential values are boxed + clipped so a long string can never run under
+// the card. The firmware's actual strings are far narrower (see the measured
+// widths below); anything longer clips rather than colliding.
+static const int WIFI_TEXT_W = WIFI_CARD_X - WIFI_LABEL_X - 6;  // 154
+
+// The connected screen: what happened, what to do on a phone, and the AP
+// address for computers. One column, no QR (deliberately -- see showConnected()).
+static const int CONN_TITLE_Y = 14;        // 36 -> 14..54
+static const int CONN_MSG_Y = 72;          // CONN_MSG_LINES x 14 -> 72..152
+static const int CONN_MSG_LINES = 5;       // lines in showConnected()'s message
+static const int CONN_IP_LABEL_Y = 178;    // 14 -> 178..194
+static const int CONN_IP_VALUE_Y = 198;    // 26 -> 198..227
 
 // Measured worst-case ink for the overlay's fixed boxes, on the same basis as
 // the main screen's constants above (summed adv_w, no kerning credit).
@@ -612,6 +665,13 @@ static const int TEXT26_DIAG_RATE_W = 80;    // "-99.99" (both mm/s columns;
                                              // "-9999" RPM is 74)
 static const int TEXT14_DIAG_SYNC_STATE_W = 95;  // "NOT SYNCED"
 static const int TEXT14_DIAG_HINT_W = 129;   // "OK / MENU / HALT"
+static const int TEXT14_DIAG_TITLE_W = 100;  // "DIAGNOSTICS" -- now shares its
+                                             // row with the exit hint, so its
+                                             // ink is a bound, not just decor
+static const int TEXT14_DIAG_ANCHOR_LABEL_W = 64;  // "ANCHOR"
+static const int TEXT14_DIAG_ANCHOR_W = 55;  // "manual" (widest of the four
+                                             // anchor sources; "R stop" is 46,
+                                             // "L stop" 44, "none" 38)
 // About.
 static const int TEXT36_ABOUT_IP_W = 276;    // "255.255.255.255" at 36
                                              // ("not connected" is 272)
@@ -619,6 +679,23 @@ static const int TEXT26_ABOUT_FW_W = 139;    // "v99.99.999" -- a version longer
                                              // than that clips, it never crowds
 static const int TEXT26_ABOUT_UP_W = 121;    // "999d 23h" (longest uptime form)
 static const int TEXT14_ABOUT_HINT_W = 120;  // "OK / MENU close"
+// Wi-Fi screens, same measured-adv_w basis.
+static const int TEXT14_WIFI_SCAN_W = 85;    // "Scan to join"
+static const int TEXT26_WIFI_VALUE_W = 137;  // worst realistic credential/IP
+                                             // string: "123456789" (the AP
+                                             // password) and the renderer's
+                                             // "ELS-Setup" both measure 137;
+                                             // "192.168.4.1" is 129,
+                                             // "ELS_Wifi" 113
+// OTA screen. The status label is auto-width, centred: its margin is what is
+// left of the screen after the ink, so the widest string drawOTA() can push is
+// the bound. "No update available" is 267; "Checking updates..." is 262 (its
+// previous form, "Checking for updates...", was 306 -- flush to both edges).
+static const int TEXT26_OTA_STATUS_W = 267;
+static const int TEXT36_CONN_TITLE_W = 214;  // "Connected!"
+static const int TEXT14_CONN_MSG_W = 256;    // "A device joined the setup
+                                             // network." (widest message line)
+static const int TEXT26_CONN_IP_W = 129;     // "192.168.4.1" (softAPIP)
 
 // --- Layout assertions -------------------------------------------------------
 // There is no host test for this file (lvgl is lib_ignore'd on the native env),
@@ -857,11 +934,24 @@ static_assert(DIAG_COL_X0 + DIAG_COL_W <= DIAG_COL_X1 && DIAG_COL_X1 + DIAG_COL_
 static_assert(DIAG_COL_X2 + DIAG_COL_W <= SCREEN_W, "diag third column off the right edge");
 static_assert(TEXT26_DIAG_RATE_W <= DIAG_COL_W, "worst rate value wider than its column");
 static_assert(TEXT14_DIAG_COL_LABEL_W <= DIAG_COL_W, "\"CARRIAGE\" wider than its column");
-// Bottom row: the chip's padded box must clear the hint's box.
-static_assert(DIAG_SYNC_CHIP_X + TEXT14_DIAG_SYNC_STATE_W + DIAG_SYNC_PAD_H <= DIAG_HINT_X,
-              "\"NOT SYNCED\" chip runs into the exit hint");
+// Title row: the exit hint lives up here now, so the title's INK is a bound
+// the hint box has to clear (same reasoning as the MENU title assert above --
+// comparing the two boxes would prove nothing about the text between them).
+static_assert(DIAG_TITLE_X + TEXT14_DIAG_TITLE_W <= DIAG_HINT_X,
+              "DIAGNOSTICS title ink runs into the exit hint");
 static_assert(TEXT14_DIAG_HINT_W <= DIAG_HINT_W, "diag exit hint wider than its box");
 static_assert(DIAG_HINT_X + DIAG_HINT_W <= SCREEN_W, "diag hint box off the right edge");
+// Bottom row: the sync chip's padded box, the ANCHOR label's ink and the
+// anchor value's box, left to right. Ink bounds where the text is what can
+// collide; the chip pads beyond its ink on every side.
+static_assert(DIAG_SYNC_CHIP_X + TEXT14_DIAG_SYNC_STATE_W + DIAG_SYNC_PAD_H <= DIAG_ANCHOR_LABEL_X,
+              "\"NOT SYNCED\" chip runs into the ANCHOR label");
+static_assert(DIAG_ANCHOR_LABEL_X + TEXT14_DIAG_ANCHOR_LABEL_W <= DIAG_ANCHOR_VALUE_X,
+              "ANCHOR label ink runs into the anchor value box");
+static_assert(TEXT14_DIAG_ANCHOR_W <= DIAG_ANCHOR_VALUE_W,
+              "\"manual\" wider than the anchor value box");
+static_assert(DIAG_ANCHOR_VALUE_X + DIAG_ANCHOR_VALUE_W <= SCREEN_W,
+              "anchor value box off the right edge");
 
 // --- About screen assertions --------------------------------------------------
 static_assert(ABOUT_TITLE_Y + FONT14_H <= ABOUT_IP_LABEL_Y, "about title overlaps the IP label");
@@ -879,6 +969,43 @@ static_assert(ABOUT_UP_X + ABOUT_UP_W <= SCREEN_W, "about uptime box off the rig
 static_assert(TEXT26_ABOUT_FW_W <= ABOUT_FW_W, "\"v99.99.999\" wider than the version box");
 static_assert(TEXT26_ABOUT_UP_W <= ABOUT_UP_W, "\"999d 23h\" wider than the uptime box");
 static_assert(TEXT14_ABOUT_HINT_W <= ABOUT_HINT_W, "about exit hint wider than its box");
+
+// --- Wi-Fi screen assertions ---------------------------------------------------
+// The card is square (the QR is), so one width serves both axes.
+static_assert(WIFI_CARD_X + WIFI_CARD_W <= SCREEN_W, "QR card off the right edge");
+static_assert(WIFI_CARD_Y + WIFI_CARD_W <= SCREEN_H, "QR card off the bottom");
+static_assert(WIFI_SCAN_Y + FONT14_H <= WIFI_CARD_Y, "\"Scan to join\" overlaps the QR card");
+static_assert(TEXT14_WIFI_SCAN_W <= WIFI_CARD_W, "\"Scan to join\" wider than the card it captions");
+// The credential column is boxed + clipped; the box must clear the card, and
+// the worst realistic string must fit the box (a wider one clips, it never
+// collides).
+static_assert(WIFI_LABEL_X + WIFI_TEXT_W < WIFI_CARD_X, "credential text box runs under the QR card");
+static_assert(TEXT26_WIFI_VALUE_W <= WIFI_TEXT_W, "worst credential string wider than its box");
+// The three label/value pairs, top to bottom.
+static_assert(WIFI_SSID_LABEL_Y + FONT14_H <= WIFI_SSID_VALUE_Y, "SSID label overlaps its value");
+static_assert(WIFI_SSID_VALUE_Y + FONT26_H <= WIFI_PASS_LABEL_Y, "SSID value overlaps the password label");
+static_assert(WIFI_PASS_LABEL_Y + FONT14_H <= WIFI_PASS_VALUE_Y, "password label overlaps its value");
+static_assert(WIFI_PASS_VALUE_Y + FONT26_H <= WIFI_IP_LABEL_Y, "password value overlaps the IP label");
+static_assert(WIFI_IP_LABEL_Y + FONT14_H <= WIFI_IP_VALUE_Y, "IP label overlaps its value");
+static_assert(WIFI_IP_VALUE_Y + FONT26_H <= SCREEN_H, "IP value off the bottom");
+// The connected screen: title, the wrapped message (all CONN_MSG_LINES of it),
+// then the labelled address.
+static_assert(CONN_TITLE_Y + FONT36_H <= CONN_MSG_Y, "connected title overlaps the message");
+static_assert(CONN_MSG_Y + (CONN_MSG_LINES * FONT14_H) <= CONN_IP_LABEL_Y,
+              "connected message overlaps the IP label");
+static_assert(CONN_IP_LABEL_Y + FONT14_H <= CONN_IP_VALUE_Y, "connected IP label overlaps the address");
+static_assert(CONN_IP_VALUE_Y + FONT26_H <= SCREEN_H, "connected IP off the bottom");
+static_assert(WIFI_LABEL_X + TEXT36_CONN_TITLE_W <= SCREEN_W, "\"Connected!\" off the right edge");
+static_assert(WIFI_LABEL_X + TEXT14_CONN_MSG_W <= SCREEN_W, "connected message off the right edge");
+static_assert(WIFI_LABEL_X + TEXT26_CONN_IP_W <= SCREEN_W, "connected IP off the right edge");
+
+// --- OTA screen assertion ------------------------------------------------------
+// The status label is centred and auto-width, so a margin of at least 20 px a
+// side is a claim about the widest STRING, not about any box constant -- which
+// is exactly why the "Checking for updates..." regression (306 px of ink in
+// 320) got through: nothing measured the string. Now something does.
+static_assert(TEXT26_OTA_STATUS_W <= SCREEN_W - (2 * 20),
+              "widest OTA status line leaves no side margin");
 
 // Radii. LV_DRAW_SW_CIRCLE_CACHE_SIZE is 4, so keep the number of DISTINCT
 // radii small (docs/ux-redesign.md section 8 "Renderer constraints"): this
@@ -1342,6 +1469,7 @@ void Display::resetObjectTree() {
   diagCarriageValue = nullptr;
   diagExpectValue = nullptr;
   diagSyncChip = nullptr;
+  diagAnchorValue = nullptr;
   aboutPanel = nullptr;
   aboutIpValue = nullptr;
   aboutUptimeValue = nullptr;
@@ -1446,44 +1574,60 @@ static void appendWifiQrEscaped(String& out, const char* src) {
 void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {
   initDisplay();
 
+  // These are the first screens anyone sees on a new device, and they used to
+  // sit on LVGL's stock light-grey ground looking like a different product.
+  // They are on the dark palette now (m_palette is pinned to PALETTE_DARK by
+  // the no-arg constructor -- there is no valid stored config to read a theme
+  // from on this path, and m_leadscrew is null, so nothing here may look at
+  // LatheConfig). See the WIFI_* constants for the layout and its assertions.
+  lv_obj_set_style_bg_color(lv_screen_active(), m_palette->background, 0);
+  lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+
   // Left column: credentials as text (fallback if the QR can't be scanned).
-  lv_obj_t* ssidLabel = lv_label_create(lv_screen_active());
-  lv_obj_t* passwordLabel = lv_label_create(lv_screen_active());
-  lv_obj_t* ipLabel = lv_label_create(lv_screen_active());
-
-  lv_obj_t* ssidText = lv_label_create(lv_screen_active());
-  lv_obj_t* passwordText = lv_label_create(lv_screen_active());
-  lv_obj_t* ipText = lv_label_create(lv_screen_active());
-
-  lv_obj_set_style_text_font(ssidLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_font(passwordLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_font(ipLabel, &lv_font_montserrat_14, 0);
-
-  lv_obj_set_style_text_font(ssidText, &lv_font_montserrat_26, 0);
-  lv_obj_set_style_text_font(passwordText, &lv_font_montserrat_26, 0);
-  lv_obj_set_style_text_font(ipText, &lv_font_montserrat_26, 0);
-
-  lv_obj_set_pos(ssidLabel, 10, 12);
-  lv_obj_set_pos(ssidText, 10, 28);
-  lv_obj_set_pos(passwordLabel, 10, 82);
-  lv_obj_set_pos(passwordText, 10, 98);
-  lv_obj_set_pos(ipLabel, 10, 152);
-  lv_obj_set_pos(ipText, 10, 168);
-
+  // Same grammar as everywhere else: dim 14 label over primary 26 value.
+  lv_obj_t* ssidLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                                    m_palette->textDim, WIFI_LABEL_X,
+                                    WIFI_SSID_LABEL_Y);
   lv_label_set_text(ssidLabel, "Wifi SSID");
-  lv_label_set_text(passwordLabel, "Password");
-  lv_label_set_text(ipLabel, "IP Address");
-
+  lv_obj_t* ssidText = createLabel(lv_screen_active(), &lv_font_montserrat_26,
+                                   m_palette->textPrimary, WIFI_LABEL_X,
+                                   WIFI_SSID_VALUE_Y);
+  fixLabelBox(ssidText, WIFI_TEXT_W, LV_TEXT_ALIGN_LEFT);
   lv_label_set_text(ssidText, ssid);
+
+  lv_obj_t* passwordLabel = createLabel(lv_screen_active(),
+                                        &lv_font_montserrat_14,
+                                        m_palette->textDim, WIFI_LABEL_X,
+                                        WIFI_PASS_LABEL_Y);
+  lv_label_set_text(passwordLabel, "Password");
+  lv_obj_t* passwordText = createLabel(lv_screen_active(),
+                                       &lv_font_montserrat_26,
+                                       m_palette->textPrimary, WIFI_LABEL_X,
+                                       WIFI_PASS_VALUE_Y);
+  fixLabelBox(passwordText, WIFI_TEXT_W, LV_TEXT_ALIGN_LEFT);
   lv_label_set_text(passwordText, password);
+
+  lv_obj_t* ipLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                                  m_palette->textDim, WIFI_LABEL_X,
+                                  WIFI_IP_LABEL_Y);
+  lv_label_set_text(ipLabel, "IP Address");
+  lv_obj_t* ipText = createLabel(lv_screen_active(), &lv_font_montserrat_26,
+                                 m_palette->textPrimary, WIFI_LABEL_X,
+                                 WIFI_IP_VALUE_Y);
+  fixLabelBox(ipText, WIFI_TEXT_W, LV_TEXT_ALIGN_LEFT);
   lv_label_set_text(ipText, ip.toString().c_str());
 
   // Right side: a Wi-Fi join QR code. Scanning it on a phone connects straight
-  // to the setup AP (the captive portal then opens the config page).
-  lv_obj_t* scanLabel = lv_label_create(lv_screen_active());
-  lv_obj_set_style_text_font(scanLabel, &lv_font_montserrat_14, 0);
+  // to the setup AP (the captive portal then opens the config page). The code
+  // is dark-on-light ON PURPOSE and stays that way whatever happens to the
+  // palette -- inverted QR fails on some scanners -- so on the dark ground it
+  // sits on a deliberate white card whose padding is the quiet zone. Black and
+  // white here are functional, not styling; everything else on the screen is
+  // palette ink.
+  lv_obj_t* scanLabel = createLabel(
+    lv_screen_active(), &lv_font_montserrat_14, m_palette->textDim,
+    WIFI_CARD_X + ((WIFI_CARD_W - TEXT14_WIFI_SCAN_W) / 2), WIFI_SCAN_Y);
   lv_label_set_text(scanLabel, "Scan to join");
-  lv_obj_set_pos(scanLabel, 196, 24);
 
   String qrPayload = "WIFI:S:";
   appendWifiQrEscaped(qrPayload, ssid);
@@ -1492,16 +1636,19 @@ void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {
   qrPayload += ";;";
 
   lv_obj_t* wifiQr = lv_qrcode_create(lv_screen_active());
-  lv_qrcode_set_size(wifiQr, 124);
+  lv_qrcode_set_size(wifiQr, WIFI_QR_SIZE);
   lv_qrcode_set_dark_color(wifiQr, lv_color_black());
   lv_qrcode_set_light_color(wifiQr, lv_color_white());
-  // White background + padding gives the quiet zone scanners need.
+  // The white card: bg + padding around the canvas. Radius 4 (RADIUS_TRACK,
+  // one of the three sanctioned radii) so it reads as a placed card rather
+  // than a rendering hole in the dark ground.
   lv_obj_set_style_bg_color(wifiQr, lv_color_white(), 0);
   lv_obj_set_style_bg_opa(wifiQr, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(wifiQr, 0, 0);
-  lv_obj_set_style_pad_all(wifiQr, 6, 0);
+  lv_obj_set_style_radius(wifiQr, RADIUS_TRACK, 0);
+  lv_obj_set_style_pad_all(wifiQr, WIFI_QR_PAD, 0);
   lv_qrcode_update(wifiQr, qrPayload.c_str(), qrPayload.length());
-  lv_obj_set_pos(wifiQr, 182, 46);
+  lv_obj_set_pos(wifiQr, WIFI_CARD_X, WIFI_CARD_Y);
 
   lv_timer_handler();
 
@@ -1515,29 +1662,41 @@ void Display::showConnected(IPAddress ip) {
   // Replace the join screen (LVGL is already initialised by showWifi()).
   lv_obj_clean(lv_screen_active());
 
-  lv_obj_t* title = lv_label_create(lv_screen_active());
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_36, 0);
-  lv_label_set_text(title, "Connected!");
-  lv_obj_set_pos(title, 10, 14);
+  // Same dark palette as showWifi() -- and set again here rather than relying
+  // on the style showWifi() left on the screen object, so this screen renders
+  // correctly even if the call order ever changes. m_leadscrew is null on this
+  // path; nothing here may read config.
+  lv_obj_set_style_bg_color(lv_screen_active(), m_palette->background, 0);
+  lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
 
-  lv_obj_t* msg = lv_label_create(lv_screen_active());
-  lv_obj_set_style_text_font(msg, &lv_font_montserrat_14, 0);
+  // colourRun, not textPrimary: this is the one genuinely good-news headline
+  // in the whole UI, and the run green reads ~8.8:1 on the dark ground. (The
+  // "no coloured text" chip rule exists for the LIGHT palette's white ground;
+  // this screen is always dark -- see the WIFI_* constants.)
+  lv_obj_t* title = createLabel(lv_screen_active(), &lv_font_montserrat_36,
+                                m_palette->colourRun, WIFI_LABEL_X,
+                                CONN_TITLE_Y);
+  lv_label_set_text(title, "Connected!");
+
+  lv_obj_t* msg = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                              m_palette->textPrimary, WIFI_LABEL_X,
+                              CONN_MSG_Y);
+  // CONN_MSG_LINES lines -- keep the constant in step with this string.
   lv_label_set_text(msg,
     "A device joined the setup network.\n\n"
     "On your phone, tap the\n"
     "\"Sign in to network\" prompt\n"
     "to open the configuration page.");
-  lv_obj_set_pos(msg, 10, 72);
 
-  lv_obj_t* ipLabel = lv_label_create(lv_screen_active());
-  lv_obj_set_style_text_font(ipLabel, &lv_font_montserrat_14, 0);
+  lv_obj_t* ipLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                                  m_palette->textDim, WIFI_LABEL_X,
+                                  CONN_IP_LABEL_Y);
   lv_label_set_text(ipLabel, "On a computer, browse to:");
-  lv_obj_set_pos(ipLabel, 10, 178);
 
-  lv_obj_t* ipText = lv_label_create(lv_screen_active());
-  lv_obj_set_style_text_font(ipText, &lv_font_montserrat_26, 0);
+  lv_obj_t* ipText = createLabel(lv_screen_active(), &lv_font_montserrat_26,
+                                 m_palette->textPrimary, WIFI_LABEL_X,
+                                 CONN_IP_VALUE_Y);
   lv_label_set_text(ipText, ip.toString().c_str());
-  lv_obj_set_pos(ipText, 10, 198);
 
   lv_timer_handler();
 
@@ -2019,10 +2178,17 @@ void Display::init() {
                                m_palette->textDim, DIAG_SYNC_LABEL_X,
                                DIAG_BOTTOM_Y);
     lv_label_set_text(sl, "SYNC");
+    // The anchor SOURCE's static label; the value label is a member below.
+    lv_obj_t* al = createLabel(diagPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, DIAG_ANCHOR_LABEL_X,
+                               DIAG_BOTTOM_Y);
+    lv_label_set_text(al, "ANCHOR");
     // Exit hint: the three keys that leave the screen, nothing more. The
-    // arrows are inert here (uistate.cpp) and deliberately unmentioned.
+    // arrows are inert here (uistate.cpp) and deliberately unmentioned. On
+    // the TITLE row, not the bottom row -- the anchor readout took its slot
+    // (see the DIAG_ANCHOR_* constants).
     lv_obj_t* h = createLabel(diagPanel, &lv_font_montserrat_14,
-                              m_palette->textDim, DIAG_HINT_X, DIAG_BOTTOM_Y);
+                              m_palette->textDim, DIAG_HINT_X, DIAG_TITLE_Y);
     fixLabelBox(h, DIAG_HINT_W, LV_TEXT_ALIGN_RIGHT);
     lv_label_set_text(h, "OK / MENU / HALT");
     createRect(diagPanel, 0, DIAG_RULE_Y, SCREEN_W, 1,
@@ -2069,6 +2235,14 @@ void Display::init() {
   lv_obj_set_style_radius(diagSyncChip, RADIUS_TRACK, 0);
   lv_obj_set_style_bg_color(diagSyncChip, m_palette->colourRun, 0);
   lv_obj_set_style_bg_opa(diagSyncChip, LV_OPA_TRANSP, 0);
+  // The anchor source value ("L stop" / "R stop" / "manual" / "none"), from
+  // Leadscrew::getSyncAnchorState(). Plain primary ink, no chip: it is a
+  // readout of WHERE the helix anchor came from, not a judgement -- the chip
+  // to its left already carries the good/bad colour.
+  diagAnchorValue = createLabel(diagPanel, &lv_font_montserrat_14,
+                                m_palette->textPrimary, DIAG_ANCHOR_VALUE_X,
+                                DIAG_BOTTOM_Y);
+  fixLabelBox(diagAnchorValue, DIAG_ANCHOR_VALUE_W, LV_TEXT_ALIGN_RIGHT);
 
   // --- The About screen (UiFocus::About) ------------------------------------
   // Quiet and plain: three labelled values, the IP at 36 as the hero, and an
@@ -2163,7 +2337,10 @@ void Display::drawOTA() {
   case OTA_CHECKING:
   case OTA_IDLE:
     // OTA_IDLE is the brief window before the OTA task sets CHECKING.
-    lv_label_set_text(updateLabel, "Checking for updates...");
+    // "Checking updates...", not "Checking for updates...": at Montserrat 26
+    // the longer form measured 306 of the 320 px -- flush to both edges,
+    // unlike anything else on the panel. See TEXT26_OTA_STATUS_W.
+    lv_label_set_text(updateLabel, "Checking updates...");
     lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
     break;
   case OTA_NO_UPDATE:
@@ -2871,10 +3048,8 @@ void Display::drawDiagnostics() {
   }
   setLabelText(diagExpectValue, TS_DIAG_EXPECT, buf);
 
-  // The helix sync state, on the status bar's chip grammar. This is what the
-  // machine PUBLISHES about the sync anchor (GlobalThreadSyncState); the
-  // anchor's source (left stop / right stop / manual) is not exposed by
-  // Leadscrew's public API -- see the note at the bottom row's creation.
+  // The helix sync state, on the status bar's chip grammar
+  // (GlobalThreadSyncState: synced or not) ...
   const GlobalThreadSyncState sync = m_globalState->getThreadSyncState();
   if ((int)sync != m_lastDiagSyncState) {
     m_lastDiagSyncState = (int)sync;
@@ -2887,6 +3062,30 @@ void Display::drawDiagnostics() {
   }
   setLabelText(diagSyncChip, TS_DIAG_SYNC,
                sync == SS_SYNC ? "SYNCED" : "NOT SYNCED");
+
+  // ... and, beside it, WHERE the anchor came from -- the bit the chip does
+  // not carry. A thread that will pick up on a recut and one that will not
+  // look identical without this: both read SYNCED, but only the anchor source
+  // says what the helix is actually pinned to. Single aligned enum read from
+  // the DisplayTask (see getSyncAnchorState()'s doc); the strings are all
+  // static literals well inside the TEXT_SLOT_LEN cache cap.
+  const char* anchorText;
+  switch (m_leadscrew->getSyncAnchorState()) {
+  case LeadscrewSpindleSyncPositionState::LEFT:
+    anchorText = "L stop";
+    break;
+  case LeadscrewSpindleSyncPositionState::RIGHT:
+    anchorText = "R stop";
+    break;
+  case LeadscrewSpindleSyncPositionState::MANUAL:
+    anchorText = "manual";
+    break;
+  case LeadscrewSpindleSyncPositionState::UNSET:
+  default:
+    anchorText = "none";
+    break;
+  }
+  setLabelText(diagAnchorValue, TS_DIAG_ANCHOR, anchorText);
 }
 
 // About (UiFocus::About). The IP is the hero; version was set in init() and

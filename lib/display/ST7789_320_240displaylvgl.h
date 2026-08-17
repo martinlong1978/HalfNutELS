@@ -206,6 +206,9 @@ private:
   lv_obj_t* diagCarriageValue;// measured carriage mm/s (26)
   lv_obj_t* diagExpectValue;  // RPM x pitch expectation, "--" unless engaged
   lv_obj_t* diagSyncChip;     // SYNCED / NOT SYNCED, status-bar chip grammar
+  lv_obj_t* diagAnchorValue;  // the sync anchor's SOURCE (L stop / R stop /
+                              // manual / none), from getSyncAnchorState() --
+                              // the bit GlobalThreadSyncState doesn't carry
 
   // --- About, a full read-only screen (UiFocus::About) -----------------------
   // Quiet and plain. The IP is the big thing (36): it is the one value someone
@@ -247,7 +250,7 @@ private:
     // error clamps to +-999.99 mm / +-99999 p before formatting, the rates are
     // %.2f / %d), so nothing here can approach the TEXT_SLOT_LEN cap.
     TS_DIAG_ERR, TS_DIAG_ERR_P, TS_DIAG_RPM, TS_DIAG_CARRIAGE, TS_DIAG_EXPECT,
-    TS_DIAG_SYNC,
+    TS_DIAG_SYNC, TS_DIAG_ANCHOR,
     // About. Longest possible IP is "255.255.255.255" -- 15 bytes, inside the
     // cap; the uptime formats are at most 8 bytes ("999d 23h").
     TS_ABOUT_IP, TS_ABOUT_UPTIME,

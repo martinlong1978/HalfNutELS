@@ -413,6 +413,23 @@ void sc_diagnosticsError(Rig& r) {
   key(r, UiKey::Ok, UiKeyEvent::Click);
 }
 
+// Diagnostics with a MANUAL sync anchor: the operator pressed sync with the
+// tool on the thread rather than letting a stop latch it. baseState()'s
+// setStopPosition(LEFT, 0) latches a LEFT anchor first (stop == carriage at
+// that moment), so this scene exercises exactly the "last call wins" override
+// setSyncPoint() documents -- and the bottom row must read "manual", not
+// "L stop", which is what the ANCHOR readout exists to distinguish.
+void sc_diagnosticsManualAnchor(Rig& r) {
+  baseState(r);
+  setFeedMode(r, FM_THREAD);
+  spinDriven(r, 0, 5);   // settle expected==current while still disabled
+  r.ls->setSyncPoint();  // MANUAL anchor; raises SS_SYNC itself
+  r.gs->setMotionMode(MM_ENABLED);
+  spinDriven(r, 320, 900);
+  openMenuAt(r, MENU_DIAGNOSTICS);
+  key(r, UiKey::Ok, UiKeyEvent::Click);
+}
+
 void sc_about(Rig& r) {
   baseState(r);
   spin(r, 850, 200);
@@ -478,6 +495,7 @@ const SceneDef kScenes[] = {
   { "overlay-datum-locked",   sc_overlayDatumLocked,  THEME_DARK,  false, 0 },
   { "diagnostics",            sc_diagnostics,         THEME_DARK,  false, 0 },
   { "diagnostics-error",      sc_diagnosticsError,    THEME_DARK,  false, 0 },
+  { "diagnostics-manual",     sc_diagnosticsManualAnchor, THEME_DARK, false, 0 },
   { "about",                  sc_about,               THEME_DARK,  false, 0 },
   // Light palette. Same two states as their dark counterparts above, so the
   // pair is directly comparable.
