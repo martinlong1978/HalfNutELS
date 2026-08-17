@@ -349,6 +349,44 @@ static const int OVERLAY_STOP_POS_Y = 76;     // 26 -> 76..104
 static const int OVERLAY_STOP_POS_X = 20;     // 20..279
 static const int OVERLAY_STOP_POS_W = 260;
 
+// MENU: the tile carousel (docs/ux-redesign.md section 6).
+//
+//    40 +--- 2px accent border ----------------------+
+//       |   MENU                             6 / 9   |  title + position (14)
+//       |        +--------------------------+        |
+//       |        |     Software update      |        |  current tile card (26)
+//       |        +--------------------------+        |
+//       |     Sync                Wi-Fi setup        |  neighbours     (14, dim)
+//       |   <> move                        OK open   |  hints          (14)
+//   188 +--------------------------------------------+
+//
+// The neighbours sit on the row BELOW the card rather than truly beside it, and
+// that is forced arithmetic, not a preference: "Software update" is 223px at
+// Montserrat 26 and the panel's content area is only 300 wide, so a card able to
+// show the longest tile name leaves ~35px a side - not enough for a legible
+// neighbour, and clipping a neighbour to "Softwa" tells the operator nothing.
+// The direction information is preserved instead by ALIGNMENT: the previous tile
+// is right-aligned into the left half and the next tile left-aligned into the
+// right half, so both point at the card, exactly as the RATE ticker's dimmed
+// neighbours do. Same grammar, one row down.
+//
+// No LV_SYMBOL arrows on the neighbour labels: they would eat into the 140px
+// boxes that the longest name (122px at 14) already nearly fills, and the hint
+// row below already says which key moves which way.
+static const int OVERLAY_MENU_POS_X = 236;   // 236..295, right of the title
+static const int OVERLAY_MENU_POS_W = 60;
+static const int OVERLAY_MENU_CARD_X = 10;   // 10..289
+static const int OVERLAY_MENU_CARD_W = 280;
+static const int OVERLAY_MENU_CARD_Y = 28;   // 28..83
+static const int OVERLAY_MENU_CARD_H = 56;
+static const int OVERLAY_MENU_NAME_PAD = 8;  // inset of the name box in the card
+// 26 centred in the card: 28 + (56-29)/2 = 41 (integer division, 1px high).
+static const int OVERLAY_MENU_NAME_Y = 41;
+static const int OVERLAY_MENU_SIDE_Y = 92;   // 14 -> 92..107
+static const int OVERLAY_MENU_SIDE_W = 140;
+static const int OVERLAY_MENU_PREV_X = 4;    // 4..143
+static const int OVERLAY_MENU_NEXT_X = 156;  // 156..295
+
 // Measured worst-case ink for the overlay's fixed boxes, on the same basis as
 // the main screen's constants above (summed adv_w, no kerning credit).
 // The 48 and 26 ticker widths are "6.00" -- the longest string ANY of the four
@@ -363,6 +401,15 @@ static const int TEXT14_HINT_W = 161;      // "moving - stops locked"
 static const int TEXT14_HINT_OK_W = 64;    // "OK done"
 static const int TEXT14_STOP_END_W = 69;   // "L -1200.00"
 static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
+// Menu, on the same basis. The two tile widths are "Software update", the
+// longest of the nine names in menuTileName() - 122px at 14, 223px at 26. The
+// title is "MENU" and the position slot's widest reading is "9 / 9". These are
+// what the carousel's boxes are checked against, so a longer tile name fails the
+// build here rather than clipping silently on the panel.
+static const int TEXT14_MENU_TILE_W = 122;   // "Software update" at 14
+static const int TEXT26_MENU_TILE_W = 223;   // "Software update" at 26
+static const int TEXT14_MENU_TITLE_W = 44;   // "MENU"
+static const int TEXT14_MENU_POS_W = 31;     // "9 / 9"
 
 // --- Layout assertions -------------------------------------------------------
 // There is no host test for this file (lvgl is lib_ignore'd on the native env),
@@ -486,6 +533,39 @@ static_assert(TEXT26_STOP_POS_W <= OVERLAY_STOP_POS_W, "stops readout wider than
 // The carriage must have somewhere to travel: it is placed by fraction across
 // (track width - its own width), which is only a scale if that is positive.
 static_assert(OVERLAY_STOP_CARRIAGE_W < OVERLAY_STOP_TRACK_W, "carriage marker wider than the track");
+// MENU carousel.
+// The title label is a FULL-CONTENT-WIDTH centred box, so it geometrically
+// overlaps the position box; what must not overlap is the INK. A centred string
+// of width w occupies (CONTENT_W - w)/2 .. (CONTENT_W + w)/2, so the title's
+// right ink edge is the bound the position slot has to clear. Asserting the two
+// boxes instead would be vacuously true and would prove nothing.
+static_assert(((OVERLAY_CONTENT_W + TEXT14_MENU_TITLE_W) / 2) <= OVERLAY_MENU_POS_X,
+              "MENU title ink runs into the n/9 position slot");
+static_assert(OVERLAY_MENU_POS_X + OVERLAY_MENU_POS_W <= OVERLAY_CONTENT_W,
+              "menu position slot off the right of the panel");
+static_assert(TEXT14_MENU_POS_W <= OVERLAY_MENU_POS_W, "\"9 / 9\" wider than its box");
+static_assert(OVERLAY_MENU_CARD_Y >= OVERLAY_BODY_TOP, "menu card overlaps the title row");
+static_assert(OVERLAY_MENU_CARD_X + OVERLAY_MENU_CARD_W <= OVERLAY_CONTENT_W,
+              "menu card off the right of the panel");
+// The name is a child of the GROUP, not of the card, so nothing clips it to the
+// card - these two are the only thing keeping it inside its own tile.
+static_assert(OVERLAY_MENU_NAME_Y >= OVERLAY_MENU_CARD_Y &&
+              OVERLAY_MENU_NAME_Y + FONT26_H <= OVERLAY_MENU_CARD_Y + OVERLAY_MENU_CARD_H,
+              "menu tile name is not inside its card");
+static_assert(TEXT26_MENU_TILE_W <= OVERLAY_MENU_CARD_W - (2 * OVERLAY_MENU_NAME_PAD),
+              "longest tile name wider than the card's inner box");
+// Card and neighbour row must not collide, and the neighbour row must stay
+// clear of the hint row (OVERLAY_BODY_BOTTOM is where the body ends).
+static_assert(OVERLAY_MENU_CARD_Y + OVERLAY_MENU_CARD_H <= OVERLAY_MENU_SIDE_Y,
+              "menu card overlaps the neighbour row");
+static_assert(OVERLAY_MENU_SIDE_Y + FONT14_H <= OVERLAY_BODY_BOTTOM,
+              "menu neighbour row overflows the body into the hints");
+static_assert(OVERLAY_MENU_PREV_X + OVERLAY_MENU_SIDE_W <= OVERLAY_MENU_NEXT_X,
+              "menu neighbour labels collide");
+static_assert(OVERLAY_MENU_NEXT_X + OVERLAY_MENU_SIDE_W <= OVERLAY_CONTENT_W,
+              "menu next-tile label off the right of the panel");
+static_assert(TEXT14_MENU_TILE_W <= OVERLAY_MENU_SIDE_W,
+              "longest tile name wider than a neighbour box");
 
 // Radii. LV_DRAW_SW_CIRCLE_CACHE_SIZE is 4, so keep the number of DISTINCT
 // radii small (docs/ux-redesign.md section 8 "Renderer constraints"): this
@@ -732,8 +812,13 @@ static bool carriageFraction(Leadscrew* leadscrew, bool leftSet, bool rightSet,
 // the carriage is under power (uistate.cpp, UiFocus::Stops), so when that
 // inhibit is live the hint must say THAT instead -- offering a gesture the
 // machine will silently ignore is the one thing this row must not do.
+//
+// The MENU variants follow the same rule. A tile whose action is refused right
+// now renders dim AND says why, and its right-hand hint drops "OK open" rather
+// than promising a keypress that ButtonPad::activateMenuTile() will discard.
 enum OverlayHint {
-  OH_NONE, OH_PITCH, OH_SPEED, OH_MODE, OH_STOPS, OH_STOPS_LOCKED
+  OH_NONE, OH_PITCH, OH_SPEED, OH_MODE, OH_STOPS, OH_STOPS_LOCKED,
+  OH_MENU, OH_MENU_MOVING, OH_MENU_FEED
 };
 // LV_SYMBOL_* are the FontAwesome codepoints carried by every built-in
 // Montserrat face (the same ones drawStateBar() uses), so no extra font is
@@ -746,8 +831,56 @@ static const char* overlayHintText(OverlayHint hint) {
   case OH_MODE:         return OVERLAY_ARROWS " mode";
   case OH_STOPS:        return OVERLAY_ARROWS " set, hold to clear";
   case OH_STOPS_LOCKED: return "moving - stops locked";
+  case OH_MENU:         return OVERLAY_ARROWS " move";
+  // Both measured against TEXT14_HINT_W (161, "moving - stops locked"), which
+  // is still the widest string this row can hold: 156 and 145 respectively.
+  case OH_MENU_MOVING:  return "stop the carriage first";
+  case OH_MENU_FEED:    return "needs thread mode";
   case OH_NONE:
   default:              return "";
+  }
+}
+
+// The right-hand half of the hint row, on the same variant cache. It used to be
+// a single literal set once in init(); the menu needs "OK open" instead of
+// "OK done", and a blocked tile needs neither, so it is variant-driven now.
+static const char* overlayHintOkText(OverlayHint hint) {
+  switch (hint) {
+  case OH_MENU:         return "OK open";
+  // A blocked tile: OK does nothing, so the row must not offer it.
+  case OH_MENU_MOVING:
+  case OH_MENU_FEED:
+  case OH_NONE:         return "";
+  default:              return "OK done";
+  }
+}
+
+// The nine menu tiles, in MenuTile order (docs/ux-redesign.md section 6). The
+// ORDER is defined once, in the MenuTile enum in the header, and shared with
+// src/buttonpad.cpp; this is only the rendering of it.
+//
+// Two constraints on any name added or edited here:
+//   * under 20 bytes, or setLabelText()'s cache truncates it, never compares
+//     equal again, and repaints the label at 10 Hz forever (see the TextSlot
+//     comment in the header);
+//   * no wider than TEXT26_MENU_TILE_W / TEXT14_MENU_TILE_W, the measured
+//     widths the carousel's boxes are asserted against - a longer name clips
+//     silently on the panel, so re-measure and update those two constants.
+static const char* menuTileName(int tile) {
+  switch (tile) {
+  case MENU_UNITS:            return "Units";
+  case MENU_THEME:            return "Theme";
+  case MENU_DRO_DATUM:        return "DRO datum";
+  case MENU_JOG_SPEED:        return "Jog speed";
+  case MENU_SYNC:             return "Sync";
+  case MENU_SOFTWARE_UPDATE:  return "Software update";
+  case MENU_WIFI_SETUP:       return "Wi-Fi setup";
+  case MENU_DIAGNOSTICS:      return "Diagnostics";
+  case MENU_ABOUT:            return "About";
+  // Out of range: blank, the same answer formatPitch() gives for an index off
+  // the end of a pitch table. The carousel asks for index-1 and index+1 on
+  // purpose, and a blank neighbour is the correct rendering at the two ends.
+  default:                    return "";
   }
 }
 
@@ -764,6 +897,11 @@ Display::Display(Spindle* spindle, Leadscrew* leadscrew, const UiState* ui) {
   // safe-fallback pattern latheconfig.cpp uses for droDatum.
   uint8_t theme = (leadscrew != nullptr) ? leadscrew->getConfig()->theme() : THEME_DARK;
   this->m_palette = (theme == THEME_LIGHT) ? &PALETTE_LIGHT : &PALETTE_DARK;
+  // Same story as the theme one line up, and for the same reason: seeded from
+  // config ONCE here, then owned at runtime by setDroDatum(). Re-reading it in
+  // drawTravel() would clobber a menu change on the very next tick.
+  this->m_droDatum = (leadscrew != nullptr) ? leadscrew->getConfig()->droDatum()
+                                            : DroDatumPreference::Left;
   // Owned by initDisplay(), which is the only writer and runs before any read
   // of either -- but CLAUDE.md's rule is every member, and these two are the
   // ones the class was missing (Display is `new`ed, so they are heap garbage
@@ -790,6 +928,8 @@ Display::Display() {
   this->m_ui = nullptr;
   this->m_globalState = GlobalState::getInstance();
   this->m_palette = &PALETTE_DARK;  // no config available on this path -- default dark.
+  this->m_droDatum = DroDatumPreference::Left;  // ditto; nothing on this path
+                                                // draws the travel band anyway.
   this->disp = nullptr;             // see the other constructor.
   this->draw_buf = nullptr;
   resetObjectTree();
@@ -851,6 +991,12 @@ void Display::resetObjectTree() {
   overlayStopsLeftLabel = nullptr;
   overlayStopsRightLabel = nullptr;
   overlayStopsPosLabel = nullptr;
+  overlayMenuGroup = nullptr;
+  overlayMenuPos = nullptr;
+  overlayMenuCard = nullptr;
+  overlayMenuName = nullptr;
+  overlayMenuPrev = nullptr;
+  overlayMenuNext = nullptr;
   updateSlider = nullptr;
   updateLabel = nullptr;
 
@@ -877,6 +1023,16 @@ void Display::resetObjectTree() {
   m_lastOverlayRightStopSet = false;
   m_lastOverlayCarriageX = -1;
   m_lastOverlayCarriageShown = false;
+  // -1, not MTB_NONE: the first drawOverlayMenu() after a rebuild must run its
+  // restyle branch even when nothing is blocked, because that branch is what
+  // paints the freshly-built card in the accent for the first time.
+  m_lastMenuBlock = -1;
+  m_lastMenuPrevBlock = -1;
+  m_lastMenuNextBlock = -1;
+  // NOTE m_palette and m_droDatum are deliberately NOT reset here. Both are
+  // RUNTIME settings owned by setTheme()/setDroDatum(), and init() calls this
+  // on every rebuild -- including the rebuild setTheme() itself requests, which
+  // would then immediately undo the change that triggered it.
 }
 
 bool Display::setLabelText(lv_obj_t* label, int slot, const char* text) {
@@ -891,15 +1047,23 @@ bool Display::setLabelText(lv_obj_t* label, int slot, const char* text) {
   return true;
 }
 
-// Runtime theme switch. Not wired to any UI yet -- docs/ux-redesign.md
-// section 8 "Theme" menu tile doesn't exist -- but reachable: re-points
-// m_palette and asks Display::update() to rebuild the whole screen from
-// scratch next tick via the existing getDisplayReset()/init() path
-// (see Display::update() below), the same mechanism already used for the
-// OTA <-> normal screen swap, so no new plumbing is needed.
+// Runtime theme switch, driven by the "Theme" menu tile. Re-points m_palette
+// and asks Display::update() to rebuild the whole screen from scratch next tick
+// via the existing getDisplayReset()/init() path (see Display::update() below),
+// the same mechanism already used for the OTA <-> normal screen swap, so no new
+// plumbing is needed. Every colour on the screen comes from *m_palette, so the
+// full rebuild is what makes the swap total rather than partial.
 void Display::setTheme(uint8_t theme) {
   m_palette = (theme == THEME_LIGHT) ? &PALETTE_LIGHT : &PALETTE_DARK;
   m_globalState->setDisplayReset();
+}
+
+// Runtime DRO datum switch, driven by the "DRO datum" menu tile. No rebuild:
+// drawTravel() reads m_droDatum every tick and its own caches (m_lastDatumSource
+// and the TS_TRAVEL_* text slots) notice the change on the next pass, so the
+// datum end, the two stop readouts and the live position all move together.
+void Display::setDroDatum(DroDatumPreference datum) {
+  m_droDatum = datum;
 }
 
 void Display::initvars() {
@@ -1233,7 +1397,11 @@ void Display::init() {
                                  m_palette->textDim, OVERLAY_HINT_R_X,
                                  OVERLAY_HINT_Y);
   fixLabelBox(overlayHintRight, OVERLAY_HINT_R_W, LV_TEXT_ALIGN_RIGHT);
-  lv_label_set_text(overlayHintRight, "OK done");
+  // No literal here any more. This used to be a fixed "OK done", but the menu
+  // needs "OK open" and a blocked tile needs neither, so the right half is
+  // driven by the SAME hint variant as the left (drawOverlay()). Seeding it
+  // here would put the label out of step with m_lastHintVariant, which
+  // resetObjectTree() has just set to OH_NONE - i.e. "".
 
   // Group A: the ticker. RATE and JOG SPEED share it -- section 4 gives them
   // the same shape, and the only difference is which table feeds it.
@@ -1318,6 +1486,38 @@ void Display::init() {
                                      m_palette->textPrimary,
                                      OVERLAY_STOP_POS_X, OVERLAY_STOP_POS_Y);
   fixLabelBox(overlayStopsPosLabel, OVERLAY_STOP_POS_W, LV_TEXT_ALIGN_CENTER);
+
+  // Group D: MENU, the tile carousel. Card first, name after, so the name is
+  // the later sibling and draws on top of the fill -- the same ordering, and
+  // the same reason, as the MODE tiles above. The position label lives in this
+  // group rather than beside overlayTitle so it disappears with the rest of the
+  // menu instead of hanging over the PITCH/MODE/STOPS widgets.
+  overlayMenuGroup = createOverlayGroup(overlayPanel);
+  overlayMenuPos = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
+                               m_palette->textDim, OVERLAY_MENU_POS_X,
+                               OVERLAY_TITLE_Y);
+  fixLabelBox(overlayMenuPos, OVERLAY_MENU_POS_W, LV_TEXT_ALIGN_RIGHT);
+  overlayMenuCard = createRect(overlayMenuGroup, OVERLAY_MENU_CARD_X,
+                               OVERLAY_MENU_CARD_Y, OVERLAY_MENU_CARD_W,
+                               OVERLAY_MENU_CARD_H, m_palette->accent,
+                               RADIUS_TRACK);
+  overlayMenuName = createLabel(overlayMenuGroup, &lv_font_montserrat_26,
+                                m_palette->textPrimary,
+                                OVERLAY_MENU_CARD_X + OVERLAY_MENU_NAME_PAD,
+                                OVERLAY_MENU_NAME_Y);
+  fixLabelBox(overlayMenuName,
+              OVERLAY_MENU_CARD_W - (2 * OVERLAY_MENU_NAME_PAD),
+              LV_TEXT_ALIGN_CENTER);
+  // Both neighbours are aligned TOWARDS the card, so the row reads as "this is
+  // what is to your left / right" rather than as two loose words.
+  overlayMenuPrev = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
+                                m_palette->textDim, OVERLAY_MENU_PREV_X,
+                                OVERLAY_MENU_SIDE_Y);
+  fixLabelBox(overlayMenuPrev, OVERLAY_MENU_SIDE_W, LV_TEXT_ALIGN_RIGHT);
+  overlayMenuNext = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
+                                m_palette->textDim, OVERLAY_MENU_NEXT_X,
+                                OVERLAY_MENU_SIDE_Y);
+  fixLabelBox(overlayMenuNext, OVERLAY_MENU_SIDE_W, LV_TEXT_ALIGN_LEFT);
 }
 
 void showWifi(const char* ssid, const char* password, IPAddress ip) {
@@ -1559,7 +1759,11 @@ void Display::drawTravel() {
     ? m_leadscrew->getStopPosition(LeadscrewStopPosition::RIGHT) : 0;
   dro.manualZeroSet = false;  // see the note above -- no store for it yet.
   dro.manualZeroPulses = 0;
-  dro.preference = cfg->droDatum();
+  // m_droDatum, not cfg->droDatum(): the "DRO datum" menu tile changes the
+  // preference at runtime and cannot write through to LatheConfig (see the
+  // member's comment in the header). It is seeded FROM cfg in the constructor,
+  // so this reads identically until the tile is used.
+  dro.preference = m_droDatum;
 
   const DroDatumSource source = Dro::resolveSource(dro);
   const float safeStepsPerMm = (stepsPerMm > 0.0f) ? stepsPerMm : 1.0f;
@@ -1709,8 +1913,9 @@ void Display::drawStateBar() {
 
 // --- The selector overlay (docs/ux-redesign.md section 4) --------------------
 //
-// One panel for all four selector focuses, its CONTENTS swapped rather than the
-// panel rebuilt. Show/hide is LV_OBJ_FLAG_HIDDEN only -- never a delete and
+// One panel for all five overlay focuses (the four selectors plus the menu),
+// its CONTENTS swapped rather than the panel rebuilt. Show/hide is
+// LV_OBJ_FLAG_HIDDEN only -- never a delete and
 // re-create: this runs at 10 Hz, and rebuilding would both burn the frame and
 // throw away every redraw cache below.
 //
@@ -1718,9 +1923,10 @@ void Display::drawStateBar() {
 // arrows driving the carriage there, so nothing should be covering the travel
 // bar while that is true.
 //
-// UiFocus::Menu deliberately draws NOTHING here and leaves the main screen up.
-// The menu carousel and its tile actions are owned by the MENU feature set, not
-// this one; ButtonPad::applyIntent() likewise no-ops the Menu* intents today.
+// UiFocus::Menu uses the SAME panel, with the carousel as its content group
+// (docs/ux-redesign.md section 6). It is a settings surface like the other four,
+// so it obeys the same rule: it covers bands 2-4 and never the status bar or the
+// state bar, so RPM and the CUTTING/HALTED word stay readable throughout.
 void Display::drawOverlay() {
   if (overlayPanel == nullptr) {
     return;
@@ -1737,6 +1943,19 @@ void Display::drawOverlay() {
   // broader one alone is exactly equivalent.
   const GlobalMotionMode motion = m_globalState->getMotionMode();
   const bool stopsLocked = (motion != MM_DISABLED && motion != MM_UNSET);
+
+  // Whether the SELECTED menu tile can act right now, for the hint row.
+  // `stopsLocked` is exactly the motionActive predicate menuTileBlock() wants
+  // (same expression, same two exclusions), so it is reused rather than
+  // recomputed. drawOverlayMenu() calls the same function again for each of the
+  // three visible tiles; that is not a second opinion, because menuTileBlock()
+  // is a pure function of these two bools and one index and is defined once.
+  const GlobalFeedMode feedMode = m_globalState->getFeedMode();
+  const bool threadMode = (feedMode == FM_THREAD || feedMode == FM_THREAD_REVERSE);
+  const MenuTileBlock menuBlock =
+    (m_ui != nullptr)
+      ? menuTileBlock(m_ui->menuIndex(), stopsLocked, threadMode)
+      : MTB_NONE;
 
   lv_obj_t* group = nullptr;
   const char* title = "";
@@ -1762,8 +1981,16 @@ void Display::drawOverlay() {
     title = "STOPS";
     hint = stopsLocked ? OH_STOPS_LOCKED : OH_STOPS;
     break;
-  case UiFocus::Jog:
   case UiFocus::Menu:
+    // UiState keeps menuOpen() and Menu focus in lockstep, so focus alone is
+    // the condition - the same single source the other four branches use.
+    group = overlayMenuGroup;
+    title = "MENU";
+    hint = (menuBlock == MTB_MOTION)      ? OH_MENU_MOVING
+           : (menuBlock == MTB_FEED_MODE) ? OH_MENU_FEED
+                                          : OH_MENU;
+    break;
+  case UiFocus::Jog:
   default:
     break;
   }
@@ -1776,6 +2003,7 @@ void Display::drawOverlay() {
     lv_obj_add_flag(overlayTickerGroup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(overlayModeGroup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(overlayStopsGroup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(overlayMenuGroup, LV_OBJ_FLAG_HIDDEN);
     if (group != nullptr) {
       lv_label_set_text(overlayTitle, title);
       lv_obj_remove_flag(group, LV_OBJ_FLAG_HIDDEN);
@@ -1795,10 +2023,16 @@ void Display::drawOverlay() {
   if ((int)hint != m_lastHintVariant) {
     m_lastHintVariant = (int)hint;
     lv_label_set_text(overlayHintLeft, overlayHintText(hint));
+    // A refusal is a caution, not an instruction, in both widgets that can
+    // report one: the stops inhibit and the two menu blocks.
+    const bool blocked = (hint == OH_STOPS_LOCKED || hint == OH_MENU_MOVING ||
+                          hint == OH_MENU_FEED);
     lv_obj_set_style_text_color(overlayHintLeft,
-                                hint == OH_STOPS_LOCKED
-                                  ? m_palette->colourCaution
-                                  : m_palette->textDim, 0);
+                                blocked ? m_palette->colourCaution
+                                        : m_palette->textDim, 0);
+    // The right half moves with the same variant now that it is no longer
+    // always "OK done" -- see overlayHintOkText().
+    lv_label_set_text(overlayHintRight, overlayHintOkText(hint));
   }
 
   switch (focus) {
@@ -1810,6 +2044,9 @@ void Display::drawOverlay() {
     break;
   case UiFocus::Mode:
     drawOverlayMode();
+    break;
+  case UiFocus::Menu:
+    drawOverlayMenu(stopsLocked, threadMode);
     break;
   case UiFocus::Stops:
   default:
@@ -1940,6 +2177,84 @@ void Display::drawOverlayStops() {
     } else {
       lv_obj_add_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
     }
+  }
+}
+
+// MENU. The tile carousel (docs/ux-redesign.md section 6).
+//
+// This method RENDERS; it decides nothing. UiState owns the whole interaction -
+// menuIndex(), the saturating clamp, what MENU/HALT/the arrows do - and
+// MenuTile (header) owns what each index means. Reimplementing any of that here
+// is how the screen and the action dispatcher end up disagreeing about which
+// tile is selected.
+//
+// Neighbours are asked for index-1 and index+1 unconditionally: menuTileName()
+// answers "" out of range, so the ends of the list simply show a blank on the
+// outside, which matches the clamp (the carousel does not wrap) and matches how
+// the RATE ticker renders its own ends.
+void Display::drawOverlayMenu(bool motionActive, bool threadMode) {
+  if (m_ui == nullptr) {
+    return;  // no ButtonPad -> no menu; the Wi-Fi setup path never gets here.
+  }
+  const int index = m_ui->menuIndex();
+
+  char buf[TEXT_SLOT_LEN];
+  // 1-based for the reader, 0-based internally. kMenuItemCount, not a literal 9.
+  snprintf(buf, sizeof(buf), "%d / %d", index + 1, UiState::kMenuItemCount);
+  setLabelText(overlayMenuPos, TS_OV_MENU_POS, buf);
+
+  setLabelText(overlayMenuName, TS_OV_MENU_NAME, menuTileName(index));
+  setLabelText(overlayMenuPrev, TS_OV_MENU_PREV, menuTileName(index - 1));
+  setLabelText(overlayMenuNext, TS_OV_MENU_NEXT, menuTileName(index + 1));
+
+  // A tile whose action is unavailable renders UNAVAILABLE, never hidden:
+  // dropping it out of the ring would renumber everything after it, so "6 / 9"
+  // would name two different tiles depending on the machine's state.
+  //
+  // Out-of-range neighbours (at the two ends of the list) fall to
+  // menuTileBlock()'s default arm and read as MTB_NONE, which is right: their
+  // label is blank, so there is nothing to colour either way.
+  const MenuTileBlock block = menuTileBlock(index, motionActive, threadMode);
+  const MenuTileBlock prevBlock =
+    menuTileBlock(index - 1, motionActive, threadMode);
+  const MenuTileBlock nextBlock =
+    menuTileBlock(index + 1, motionActive, threadMode);
+
+  // Only the block state drives colour, so arrowing between two live tiles
+  // restyles nothing. The two block reasons share one appearance - the hint row
+  // is what tells them apart - so a change of reason costs a (rare, harmless)
+  // repaint.
+  if ((int)block != m_lastMenuBlock) {
+    m_lastMenuBlock = (int)block;
+    const bool live = (block == MTB_NONE);
+    lv_obj_set_style_bg_color(overlayMenuCard,
+                              live ? m_palette->accent
+                                   : m_palette->colourDisabled, 0);
+    // The accent is a pale blue, so a live tile takes the high-emphasis ink and
+    // a blocked one stays dim on its grey -- the same pairing the MODE tiles
+    // use, so "filled + dark ink" means the same thing in both widgets.
+    lv_obj_set_style_text_color(overlayMenuName,
+                                live ? m_palette->textPrimary
+                                     : m_palette->textDim, 0);
+  }
+
+  // The neighbours are ALREADY dim (they are neighbours), so "dimmer still" is
+  // not available as the unavailable cue: colourDisabled is a near-background
+  // grey in both palettes and would effectively hide the name, which is the one
+  // thing this rendering must not do. They take colourCaution instead - the
+  // exact colour the hint row uses for the refusal they are about to earn, and
+  // the same colour the STOPS overlay already uses for "you cannot do this now".
+  if ((int)prevBlock != m_lastMenuPrevBlock) {
+    m_lastMenuPrevBlock = (int)prevBlock;
+    lv_obj_set_style_text_color(overlayMenuPrev,
+                                prevBlock == MTB_NONE ? m_palette->textDim
+                                                      : m_palette->colourCaution, 0);
+  }
+  if ((int)nextBlock != m_lastMenuNextBlock) {
+    m_lastMenuNextBlock = (int)nextBlock;
+    lv_obj_set_style_text_color(overlayMenuNext,
+                                nextBlock == MTB_NONE ? m_palette->textDim
+                                                      : m_palette->colourCaution, 0);
   }
 }
 

@@ -36,6 +36,92 @@ LV_IMAGE_DECLARE(jog);
 
 #define DRAW_BUF_SIZE ((TFT_WIDTH * TFT_HEIGHT / 10) * (LV_COLOR_DEPTH / 8))
 
+// --- The menu tiles (docs/ux-redesign.md section 6, "MENU") -------------------
+//
+// UiState owns the menu INTERACTION (menuOpen/menuIndex/kMenuItemCount, the
+// saturating clamp); it deliberately knows nothing about what the tiles ARE.
+// That knowledge lives here, in ONE place, because it has exactly two consumers
+// and they must never disagree about what an index means:
+//   * this file renders the carousel from it (Display::drawOverlayMenu());
+//   * src/buttonpad.cpp dispatches UiIntent::MenuActivate on it
+//     (ButtonPad::activateMenuTile()), and includes <display.h> for it.
+// A second, private copy of the order on either side is exactly how tile 5
+// ("Software update") ends up firing tile 6 ("Wi-Fi setup", which REBOOTS).
+// The static_assert below is what ties it back to UiState's count.
+enum MenuTile {
+  MENU_UNITS = 0,
+  MENU_THEME,
+  MENU_DRO_DATUM,
+  MENU_JOG_SPEED,
+  MENU_SYNC,
+  MENU_SOFTWARE_UPDATE,
+  MENU_WIFI_SETUP,
+  MENU_DIAGNOSTICS,
+  MENU_ABOUT,
+  MENU_TILE_COUNT
+};
+static_assert((int)MENU_TILE_COUNT == UiState::kMenuItemCount,
+              "menu tile list and UiState::kMenuItemCount disagree - the "
+              "carousel would render or dispatch a tile the other side has "
+              "never heard of");
+
+// Why the selected tile cannot be activated right now, or MTB_NONE.
+//
+// Same rule, ONE evaluation, both sides: the display dims the tile and puts the
+// reason in the hint row, and ButtonPad refuses the activation. Splitting them
+// is how a menu ends up offering a gesture the machine will silently ignore -
+// the mistake docs/ux-redesign.md section 4 calls out for the STOPS hint.
+enum MenuTileBlock {
+  MTB_NONE,       // the tile is live
+  MTB_MOTION,     // the carriage is under power - stop it first
+  MTB_FEED_MODE,  // Sync means nothing outside a thread mode
+};
+
+// `motionActive` is the SAME predicate UiContext::motionActive carries:
+// motionMode is neither MM_DISABLED nor MM_UNSET (so it covers the engaged
+// feed, the powered run to a stop, the interactive jog AND the deceleration
+// tail). `threadMode` is FM_THREAD or FM_THREAD_REVERSE.
+//
+// Why each tile blocks on motion:
+//   Theme / DRO datum   - both persist through saveLatheSettings(), which
+//                         REFUSES while under power (src/WebSettings.h): a
+//                         flash erase disables the instruction cache on both
+//                         cores and stalls the spindle loop for tens of ms.
+//                         Rendering them live while the write cannot happen
+//                         would be the silent failure that guard exists to
+//                         prevent, so they dim with the rest.
+//   Sync                - setSyncPoint() zeroes the following error and raises
+//                         SS_SYNC, which releases update()'s re-sync gate. Do
+//                         that while the gate is holding the axis and the
+//                         carriage lurches up to a full pitch (measured
+//                         0.32 mm) into the work, and a residual lost-update
+//                         race on m_expectedPosition is reachable only in that
+//                         state. Section 6 words this as "against a stopped
+//                         spindle"; the enforceable form is the AXIS being
+//                         disengaged, since the re-sync gate can only be
+//                         holding while the leadscrew is under power.
+//   Software update     - hands the CPU to a TLS download for a minute.
+//   Wi-Fi setup         - reboots.
+// Units, Jog speed, Diagnostics and About touch neither flash nor motion, so
+// they stay live throughout.
+inline MenuTileBlock menuTileBlock(int tile, bool motionActive,
+                                   bool threadMode) {
+  switch (tile) {
+  case MENU_SYNC:
+    if (motionActive) {
+      return MTB_MOTION;
+    }
+    return threadMode ? MTB_NONE : MTB_FEED_MODE;
+  case MENU_THEME:
+  case MENU_DRO_DATUM:
+  case MENU_SOFTWARE_UPDATE:
+  case MENU_WIFI_SETUP:
+    return motionActive ? MTB_MOTION : MTB_NONE;
+  default:
+    return MTB_NONE;
+  }
+}
+
 // Runtime colour palette (dark/light). Full definition + the two compiled-in
 // instances (PALETTE_DARK, PALETTE_LIGHT) live in the .cpp -- only a pointer
 // to the active one is needed here. See the struct's own doc comment there
@@ -54,6 +140,16 @@ private:
   const UiState* m_ui;
   const DisplayPalette* m_palette;  // selected in the constructor (see .cpp);
                                      // re-pointed at runtime only by setTheme().
+  // Live DRO datum preference. Seeded from LatheConfig in the constructor and
+  // changed at runtime by setDroDatum() (the "DRO datum" menu tile), exactly as
+  // m_palette is by setTheme(), and for the same reason: LatheConfigDerived
+  // hands out a READ-ONLY view (getConfig()) and keeps its LatheConfig* private,
+  // so a menu toggle cannot write through to the struct drawTravel() would
+  // otherwise read. Without this the datum would only move on the next reboot.
+  // This is therefore the authority for the datum while the machine is running;
+  // the flash copy is the authority at boot. Deliberately NOT touched by
+  // resetObjectTree(), like m_palette - a screen rebuild must not revert it.
+  DroDatumPreference m_droDatum;
 #ifdef ELS_UI_ENCODER
   EncoderColour firstColour = EC_NONE;
   EncoderColour secondColour = EC_NONE;
@@ -102,20 +198,18 @@ private:
 
   // --- Selector overlay (docs/ux-redesign.md section 4) ----------------------
   // ONE panel, built once in init() alongside the main screen and left hidden.
-  // Its three content groups are swapped by drawOverlay() as focus moves; the
+  // Its four content groups are swapped by drawOverlay() as focus moves; the
   // panel is never rebuilt or deleted (a rebuild at 10 Hz would be wasteful and
   // would defeat the redraw caches below). It is created LAST so it sits on top
   // of the main screen in the sibling z-order, and it is opaque, so whatever it
   // covers simply is not visible -- LV_DRAW_LAYER_SIMPLE_BUF_SIZE is 24 KB and a
   // translucent panel this size needs ~84 KB (section 8).
   //
-  // UiFocus::Menu deliberately renders NOTHING here (the main screen stays
-  // visible): the menu carousel and its tile actions are owned by the menu
-  // feature set, not this one.
+  // UiFocus::Menu shares it: the carousel is group D below.
   lv_obj_t* overlayPanel;      // the solid ground + accent border
-  lv_obj_t* overlayTitle;      // PITCH / JOG SPEED / MODE / STOPS
+  lv_obj_t* overlayTitle;      // PITCH / JOG SPEED / MODE / STOPS / MENU
   lv_obj_t* overlayHintLeft;   // what the arrows do
-  lv_obj_t* overlayHintRight;  // "OK done"
+  lv_obj_t* overlayHintRight;  // "OK done" / "OK open"
 
   // Group A -- the horizontal ticker, shared by Rate and JogSpeed (section 4
   // gives them the same shape: value large, neighbours dimmed either side).
@@ -141,6 +235,19 @@ private:
   lv_obj_t* overlayStopsRightLabel;
   lv_obj_t* overlayStopsPosLabel;
 
+  // Group D -- MENU, the tile carousel (docs/ux-redesign.md section 6). A
+  // carousel and not a list because the panel has only left/right keys: the
+  // current tile is a wide card in the middle, its two neighbours sit dimmed to
+  // either side underneath it, and the title row carries "n / 9" so the position
+  // in a nine-long ring is readable without counting.
+  lv_obj_t* overlayMenuGroup;
+  lv_obj_t* overlayMenuPos;    // "4 / 9", right of the MENU title
+  lv_obj_t* overlayMenuCard;   // the emphasised current tile (accent, or grey
+                               // when the tile's action is unavailable)
+  lv_obj_t* overlayMenuName;   // the current tile's name (26)
+  lv_obj_t* overlayMenuPrev;   // the tile one step LEFT  (14, dim)
+  lv_obj_t* overlayMenuNext;   // the tile one step RIGHT (14, dim)
+
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
   lv_obj_t* updateLabel;
@@ -164,6 +271,12 @@ private:
     // silently turns the cache into a per-tick repaint.
     TS_OV_TICK_PREV, TS_OV_TICK_VALUE, TS_OV_TICK_NEXT, TS_OV_TICK_UNIT,
     TS_OV_STOP_LEFT, TS_OV_STOP_RIGHT, TS_OV_STOP_POS,
+    // Menu carousel. Safe to cache: the longest tile name is "Software update"
+    // at 15 bytes and the position reads "9 / 9", both well inside
+    // TEXT_SLOT_LEN - 1. Any tile name of 20 bytes or more would be truncated
+    // into the cache, never compare equal again, and silently repaint at 10 Hz
+    // forever; menuTileName() says so at its definition.
+    TS_OV_MENU_POS, TS_OV_MENU_NAME, TS_OV_MENU_PREV, TS_OV_MENU_NEXT,
     TS_COUNT
   };
   // Plain enum constant, not a `static const size_t`: an in-class static const
@@ -194,6 +307,12 @@ private:
   bool m_lastOverlayRightStopSet;
   int m_lastOverlayCarriageX;
   bool m_lastOverlayCarriageShown;
+  // Last MenuTileBlock pushed as the ink/fill of each of the three visible
+  // tiles. Only the block state drives colour, so arrowing between two tiles
+  // that are both live costs no restyle at all.
+  int m_lastMenuBlock;
+  int m_lastMenuPrevBlock;
+  int m_lastMenuNextBlock;
 
   void initDisplay();
   void initialiseOta();
@@ -212,9 +331,14 @@ public:
 
   void init();
   void update();
-  // Runtime theme switch -- see .cpp for how it rebuilds the screen. Not
-  // wired to any UI yet (no menu exists), but reachable for when one does.
+  // Runtime theme switch -- see .cpp for how it rebuilds the screen. Driven by
+  // the "Theme" menu tile (ButtonPad::activateMenuTile()), which persists the
+  // new value FIRST and only calls this once the write actually succeeded.
   void setTheme(uint8_t theme);
+  // Runtime DRO datum switch, driven by the "DRO datum" menu tile on the same
+  // save-then-apply order as setTheme(). See m_droDatum above for why the
+  // display has to hold this rather than re-reading LatheConfig.
+  void setDroDatum(DroDatumPreference datum);
   void showWifi(const char * ssid, const char * password, IPAddress ip);
   void showConnected(IPAddress ip);
 
@@ -231,6 +355,11 @@ protected:
   void drawOverlayTicker(bool jogSpeed);
   void drawOverlayMode();
   void drawOverlayStops();
+  // Takes the two machine facts rather than a per-tile verdict: the carousel
+  // shows THREE tiles and has to state the availability of each, and running
+  // them all through the one menuTileBlock() is what keeps the card, the two
+  // neighbours and drawOverlay()'s hint from ever disagreeing.
+  void drawOverlayMenu(bool motionActive, bool threadMode);
   void updateLed();
   void writeLed();
   void drawOTA();
