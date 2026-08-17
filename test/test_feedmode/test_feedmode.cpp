@@ -166,7 +166,9 @@ TEST(FeedMode, NextPrevFeedPitchReturnNewIndexAndLeaveJogSpeedAlone) {
   GlobalState* gs = GlobalState::getInstance();
   gs->setUnitMode(METRIC);
 
-  for (GlobalFeedMode mode : {FM_FEED, FM_THREAD}) {
+  // All three modes the cycle can now produce - FM_THREAD_REVERSE included,
+  // since it reuses the thread tables and must step exactly like FM_THREAD.
+  for (GlobalFeedMode mode : {FM_FEED, FM_THREAD, FM_THREAD_REVERSE}) {
     toMode(gs, mode);
     ASSERT_EQ(gs->getFeedMode(), mode);
 

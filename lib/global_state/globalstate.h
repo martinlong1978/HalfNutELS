@@ -110,8 +110,35 @@ private:
   // feed mode / unit restores the last index used for that slot instead of
   // resetting to the default. Indexed [unit][isThread]; FM_THREAD_REVERSE
   // shares the "thread" slot for the current unit (same pitch tables).
-  // Read/written from both RTOS tasks (via setFeedSelect/getFeedSelect
-  // callers on each side), so volatile like the other cross-task scalars.
+  //
+  // CROSS-TASK SAFETY. Unlike the scalars above this is an ARRAY, and every
+  // mutation of it is a read-modify-write across several fields (read
+  // m_unitMode, read m_feedMode, index, store). `volatile` gives no atomicity
+  // over that sequence, so it is NOT what makes this safe. What makes it safe
+  // is that the whole feed/pitch group - m_feedMode, m_unitMode, m_feedSelect,
+  // m_pitchMemory - has a SINGLE WRITER: the DisplayTask (core 1). Traced
+  // callers of every mutator:
+  //   IncFeedMode()          <- ButtonPad::modeCycleHandler   (DisplayTask)
+  //   setUnitMode()          <- ButtonPad::modeCycleHandler   (DisplayTask)
+  //   next/prevFeedPitch()   <- ButtonPad::rate*Handler       (DisplayTask)
+  //                          <- KeyArray::updateEncoderPos, reached only from
+  //                             consumeButton() on the DisplayTask - NOT from
+  //                             the GPIO/timer ISRs, which touch no GlobalState
+  //   setFeedSelect()        <- private, only from the above + the ctor
+  // The SpindleTask (core 0) never calls any of them and never reads
+  // m_feedSelect / m_feedMode / m_unitMode / m_pitchMemory in its hot loop;
+  // Leadscrew::update() gets the pitch pushed to it by the DisplayTask via
+  // setTargetPitchMM(), and the only field of this group the spindle path
+  // reads is the plain 32-bit m_jogSpeed (leadscrew.cpp getJogSpeed()).
+  // Leadscrew's own getCurrentFeedPitch() call is in its constructor, which
+  // runs in setup() before either task exists.
+  // KEEP IT THAT WAY: if a second task (web handler, OTA, a future UI task)
+  // ever needs to change mode/unit/pitch it must post an intent for the
+  // DisplayTask to apply, not call these directly - adding a lock here is not
+  // an option (see CLAUDE.md, no locks on the hot path).
+  // `volatile` is retained because the DisplayTask's writes to m_feedMode /
+  // m_unitMode / m_feedSelect are still observed by display code and must not
+  // be cached stale.
   volatile int m_pitchMemory[2][2];
 
   static int pitchMemoryUnitIndex(GlobalUnitMode unit) {
@@ -135,11 +162,31 @@ private:
     m_pitchMemory[pitchMemoryUnitIndex(IMPERIAL)][1] = DEFAULT_IMPERIAL_THREAD_PITCH_IDX;
 
     setButtonLock(LK_LOCKED);
-    setFeedSelect(DEFAULT_METRIC_FEED_PITCH_IDX);
+    // Seed from the slot the configured default mode/unit actually selects.
+    // Passing DEFAULT_METRIC_FEED_PITCH_IDX here instead would hardcode the
+    // METRIC/FEED default onto whatever slot DEFAULT_UNIT_MODE /
+    // DEFAULT_FEED_MODE happen to name, and stamp that wrong value into
+    // m_pitchMemory via setFeedSelect()'s write-back. Harmless today only
+    // because all four DEFAULT_*_PITCH_IDX are 8.
+    setFeedSelect(
+        m_pitchMemory[pitchMemoryUnitIndex(m_unitMode)][pitchMemoryTypeIndex(m_feedMode)]);
     setThreadSyncState(SS_UNSYNC);
     m_motionMode = MM_DISABLED;
     m_resyncPulseCount = 0;
-    m_jogSpeed = 5;
+    // Derived, not a hardcoded 5 - the same latent bug incJogSpeed() was fixed
+    // for (docs/ux-redesign.md Sec. 4). Shrinking jogSpeeds[] would otherwise
+    // leave m_jogSpeed indexing past the end until the first incJogSpeed()
+    // call clamped it. Same value as before for today's 6-entry table.
+    m_jogSpeed = (int)ARRAY_SIZE(jogSpeeds) - 1;
+    // The last two members. GlobalState is `new`ed (main.cpp), so these are
+    // heap garbage otherwise - the exact failure mode CLAUDE.md records. They
+    // are only dereferenced under getDebugMode() (leadscrew.cpp), which cannot
+    // currently return true because setDebugMode() is stubbed out, so the
+    // garbage is unreachable *today*; un-stubbing setDebugMode() without this
+    // line would turn the debug toggle into a wild pointer write from the
+    // spindle hot loop.
+    debugBuffer = nullptr;
+    debugInit = nullptr;
   }
 
 public:
