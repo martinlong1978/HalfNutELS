@@ -87,6 +87,43 @@ public:
 
   void setStopPosition(LeadscrewStopPosition position);
   void setStopPosition(LeadscrewStopPosition position, int stopPosition);
+
+  /**
+   * Anchor the thread helix to the CURRENT spindle angle and the CURRENT
+   * carriage position ("pick up an existing thread", docs/ux-redesign.md Sec. 6).
+   *
+   * The gesture: the spindle is stopped, the user hand-positions the tool so it
+   * sits in an existing groove, then declares "this spindle angle and this
+   * carriage position are in sync". Every later engagement re-enters that same
+   * helix instead of ploughing a new groove across the existing one.
+   *
+   * Contract (pinned by test/test_sync_point):
+   *  - takes BOTH coordinates itself, at one instant, from m_currentPosition and
+   *    m_spindle->getCurrentPosition(). It deliberately has no parameters: it is
+   *    called from the DisplayTask while the SpindleTask is inside update(), so
+   *    the caller must not be able to sample the two coordinates separately (or
+   *    at a different time) and hand in a skewed pair.
+   *  - sets GlobalThreadSyncState to SS_SYNC (at the instant of the call the
+   *    carriage is on the helix by definition).
+   *  - works with NO stops set, and must not create, move or clear either stop.
+   *  - the anchor it records is its OWN (carriage, spindle-phase) pair, not a
+   *    stop-derived one, so it must survive setStop()/unsetStop() untouched -
+   *    unsetStop()'s re-anchor migration exists only because a stop-derived
+   *    anchor loses its carriage coordinate when the stop goes away, which does
+   *    not apply here. An explicit user sync outranks an incidental one.
+   *  - the last call wins.
+   *
+   * Cold path (menu / button event only) - when implemented this belongs
+   * out-of-line in leadscrew.cpp next to setStopPosition(), NOT inline here, and
+   * must not add anything to Leadscrew::update().
+   */
+  void setSyncPoint() {
+    // ***** NOT IMPLEMENTED *****
+    // Deliberate no-op stub: it exists only so test/test_sync_point compiles and
+    // links, and fails on assertions rather than at link time. Every property
+    // this must satisfy is written down as a failing test in
+    // test/test_sync_point/test_sync_point.cpp - implement against those.
+  }
   LeadscrewStopState getStopPositionState(LeadscrewStopPosition position);
   void unsetStopPosition(LeadscrewStopPosition position);
   int getStopPosition(LeadscrewStopPosition position);
