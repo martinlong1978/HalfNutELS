@@ -192,6 +192,33 @@ Tracked, not accidental. All are consequences of removing a key before its repla
    so the encoder is not silently swallowed (`keyarray.cpp:102`). All of it dies with the
    display rebuild.
 
+## The sync action nearly shipped a carriage lurch
+
+Worth reading even if you skip the rest, because it is the clearest case tonight of tests
+passing being necessary and not sufficient.
+
+`setSyncPoint()` raised `SS_SYNC` unconditionally — and raising `SS_SYNC` is exactly what
+*releases* the re-sync gate. While that gate holds the axis, `update()` keeps accumulating
+spindle motion into `m_expectedPosition` with the carriage frozen, so the following error grows
+by **a whole pitch per revolution of holding**. Firing the gate normally is what discards that
+accumulation; jumping it skipped the discard and handed the axis a large error to close at
+maximum speed.
+
+Measured on the host rig: a sync taken a quarter-revolution into a hold moved the carriage
+**0.32 mm instantly, into the work**. Worst case approaches a full 1.27 mm pitch. All 13
+original tests passed with this present.
+
+Two things follow for the UI work:
+
+- **The Sync menu tile must be gated on the axis being disengaged.** Spec §6 already says
+  "against a stopped spindle" — that needs enforcing, not just documenting. There is also a
+  residual lost-update race on `m_expectedPosition`, reachable only when syncing while engaged
+  and gated, which the same gate closes. And an anchor sampled mid-cut is skewed by the servo
+  following error anyway.
+- **Do not "simplify" the sync tests.** The two headline "returns every whole pitch" cases
+  survive a sign inversion of the anchor, because they never disengage — they only exercise the
+  relative feed. The disengage/re-engage cases are the ones doing the work.
+
 ## The existing thread-sync tests never exercised the sync anchor
 
 Found while writing the FS-E suite, and worth knowing independently of this branch.
