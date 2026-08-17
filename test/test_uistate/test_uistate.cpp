@@ -130,6 +130,22 @@ class Rig {
     return out;
   }
 
+  // A tap that STARTS a powered run, with the context changing under it exactly
+  // as it does on the machine.
+  //
+  // Since the motion lockout an arrow cannot start anything while the carriage
+  // is already moving, so `before` must be an at-rest context - which is the
+  // truth at the moment of the press, since the run has not begun. `after` is
+  // the machine as the Release finds it: moving. ButtonPad rebuilds the context
+  // from GlobalState after executing each intent, so this is the real sequence,
+  // and it is also what promotes the run latch from Commanded to Confirmed.
+  UiIntent startRun(UiKey k, const UiContext& before, const UiContext& after) {
+    m_ui.handleKey(k, UiKeyEvent::Press, before, m_now);
+    UiIntent out = m_ui.handleKey(k, UiKeyEvent::Click, before, m_now);
+    m_ui.handleKey(k, UiKeyEvent::Release, after, m_now);
+    return out;
+  }
+
   // Full long-press gesture; returns the intent produced by the Hold.
   UiIntent hold(UiKey k, const UiContext& c = kNoStops) {
     m_ui.handleKey(k, UiKeyEvent::Press, c, m_now);
@@ -166,7 +182,9 @@ class Rig {
     }
   }
 
-  bool tick() { return m_ui.tick(m_now); }
+  // Defaults to an AT-REST context, so the many idle-timeout tests read as they
+  // always did. Close-on-motion tests pass a powered one explicitly.
+  bool tick(const UiContext& c = kNoStops) { return m_ui.tick(c, m_now); }
   void advance(unsigned long ms) { m_now += ms; }
   unsigned long now() const { return m_now; }
 
@@ -439,15 +457,15 @@ TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenIfMotionBecameActive) {
 
 TEST(UiStateJog, NaturallyCompletedLeftRunStartsAFreshRunOnTheNextClick) {
   Rig r;
-  // The run starts, and motionActive is (or becomes) true while it is
-  // genuinely in flight.
+  // The carriage is at rest when the run is ordered (the lockout means it must
+  // be), and motionActive becomes true while the run is genuinely in flight.
   UiContext running = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/true);
-  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  UiContext idle = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/false);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
 
   // The carriage reaches the stop on its own - no key event from the
   // operator - and the next context the display hands to UiState reflects
   // that motion is no longer active.
-  UiContext idle = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/false);
 
   // The very next arrow click must start a fresh run, NOT cancel a stale one.
   EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
@@ -456,8 +474,8 @@ TEST(UiStateJog, NaturallyCompletedLeftRunStartsAFreshRunOnTheNextClick) {
 TEST(UiStateJog, NaturallyCompletedRightRunStartsAFreshRunOnTheNextClick) {
   Rig r;
   UiContext running = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/true);
-  ASSERT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, running));
   UiContext idle = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/false);
+  ASSERT_EQ(UiIntent::RunToRightStop, r.startRun(UiKey::Right, idle, running));
   EXPECT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, idle));
 }
 
@@ -468,14 +486,15 @@ TEST(UiStateJog, InFlightRunStillCancelsOnTheNextClick) {
   // make every powered run uncancellable.
   Rig r;
   UiContext running = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/true);
-  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, kLeftOnly, running));
   EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, running));
 }
 
 TEST(UiStateJog, InFlightRightRunStillCancelsOnTheNextClick) {
   Rig r;
   UiContext running = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/true);
-  ASSERT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, running));
+  ASSERT_EQ(UiIntent::RunToRightStop,
+            r.startRun(UiKey::Right, kRightOnly, running));
   EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Right, running));
 }
 
@@ -490,8 +509,11 @@ TEST(UiStateJog, InFlightRightRunStillCancelsOnTheNextClick) {
 // Each works by making the LATER arrow click see motionActive true again (an
 // unrelated jog, an engaged feed, a deceleration tail). If reconciliation only
 // happened there, that click would see Confirmed + active, keep the stale latch
-// and return CancelMotion. Getting a fresh run instead proves the earlier,
-// unrelated key event is what cleared it.
+// and return CancelMotion. Getting None instead - the motion lockout's answer
+// for an arrow with no run to stop - proves the earlier, unrelated key event is
+// what cleared it. (Before the lockout the discriminator was a FRESH run rather
+// than None; an arrow may no longer start one under power, so the observation
+// moved but the thing observed did not.)
 
 TEST(UiStateJog, AnInertNonArrowKeyAlsoReconcilesACompletedRun) {
   Rig r;
@@ -499,14 +521,17 @@ TEST(UiStateJog, AnInertNonArrowKeyAlsoReconcilesACompletedRun) {
                                 /*motionActive=*/true);
   const UiContext idle = ctx(true, false, /*motionEnabled=*/false,
                              /*motionActive=*/false);
-  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
 
   // The run reaches the stop. The only event that sees the machine at rest is
   // an OK Press, which produces no intent at all - and must still reconcile.
   ASSERT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Press, idle));
 
-  // Something is moving again by the time the operator reaches for an arrow.
-  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  // Something is moving again by the time the operator reaches for an arrow. A
+  // stale latch would answer CancelMotion here.
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, running));
+  // ...and the machine is genuinely usable afterwards: at rest, a fresh run.
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
 }
 
 TEST(UiStateJog, ARunThatEndsWhileTheMenuIsOpenIsStillReconciled) {
@@ -518,13 +543,15 @@ TEST(UiStateJog, ARunThatEndsWhileTheMenuIsOpenIsStillReconciled) {
                                 /*motionActive=*/true);
   const UiContext idle = ctx(true, false, /*motionEnabled=*/false,
                              /*motionActive=*/false);
-  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
 
   r.click(UiKey::Menu, idle);  // run completes while the operator is in here
   ASSERT_TRUE(r.ui().menuOpen());
   ASSERT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu, idle));
 
-  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, running))
+      << "a stale latch would answer CancelMotion";
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
 }
 
 // ===========================================================================
@@ -579,11 +606,26 @@ TEST(UiStateOk, PressAndReleaseAreInert) {
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
-TEST(UiStateOk, ZeroDroStillWorksWhileMotionEnabled) {
-  // Decision: zeroing the DRO moves no metal, so the MM_ENABLED arrow inhibit
-  // (spec §3) does not extend to it.
-  Rig r;
-  EXPECT_EQ(UiIntent::ZeroDro, r.hold(UiKey::Ok, ctx(false, false, true)));
+TEST(UiStateOk, ZeroDroIsInertUnderPower) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // ZeroDroStillWorksWhileMotionEnabled, on the reasoning that zeroing the DRO
+  // moves no metal so the §3 arrow inhibit need not extend to it. The owner's
+  // ruling supersedes that: OK is not a stop function, so under power it does
+  // nothing at all. Zeroing the datum is also a thing you do to set up a cut,
+  // not during one, so nothing is lost but the ability to do it by accident.
+  const bool flags[] = {false, true};
+  for (bool enabled : flags) {
+    for (bool active : flags) {
+      if (!enabled && !active) {
+        continue;  // at rest - HoldAtRestZerosTheDroAndKeepsJogFocus covers it
+      }
+      Rig r;
+      const UiContext c = ctx(false, false, enabled, active);
+      EXPECT_EQ(UiIntent::None, r.hold(UiKey::Ok, c))
+          << "motionEnabled=" << enabled << " motionActive=" << active;
+      EXPECT_EQ(UiFocus::Jog, r.focus());
+    }
+  }
 }
 
 // ===========================================================================
@@ -678,14 +720,49 @@ TEST(UiStateSelectors, RepeatingTheSameSelectorKeepsItsFocus) {
   EXPECT_EQ(UiFocus::Mode, r.focus());
 }
 
-TEST(UiStateSelectors, SelectorsStillWorkWhileMotionEnabled) {
-  // Decision: the §3 inhibit is about the carriage, not the widgets - changing
-  // pitch or mode mid-cut must stay possible (and is instantly reversible).
+TEST(UiStateSelectors, AreInertUnderPower) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // SelectorsStillWorkWhileMotionEnabled, which pinned "RATE + arrows changes
+  // pitch mid-cut" on the reasoning that the §3 inhibit was about the carriage
+  // and not the widgets. The owner's ruling supersedes it: no selector may open
+  // a widget while the carriage is moving, so the arrows never get a widget to
+  // drive either.
+  //
+  // Every selector, both motion flags, and the focus checked as well as the
+  // intent - a selector that returned None but still moved focus would leave a
+  // picker on screen mid-cut, which is the exact thing the ruling is about.
+  const UiKey selectors[] = {UiKey::Mode, UiKey::Rate, UiKey::Stops};
+  const bool flags[] = {false, true};
+  for (UiKey k : selectors) {
+    for (bool enabled : flags) {
+      for (bool active : flags) {
+        if (!enabled && !active) {
+          continue;  // at rest - the selectors above pin the live behaviour
+        }
+        Rig r;
+        const UiContext c = ctx(false, false, enabled, active);
+        EXPECT_EQ(UiIntent::None, r.click(k, c))
+            << "enabled=" << enabled << " active=" << active;
+        EXPECT_EQ(UiFocus::Jog, r.focus())
+            << "no widget may open under power";
+        // ...and with no widget open the arrows cannot step a setting either.
+        EXPECT_EQ(UiIntent::None, r.click(UiKey::Right, c));
+        EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, c));
+      }
+    }
+  }
+}
+
+TEST(UiStateSelectors, AreLiveAgainOnceTheCarriageIsAtRest) {
+  // The other direction of the contract: without it the lockout test above
+  // would pass on a state machine that had simply broken the selectors.
   Rig r;
-  UiContext c = ctx(false, false, true);
-  r.click(UiKey::Rate, c);
-  ASSERT_EQ(UiFocus::Rate, r.focus());
-  EXPECT_EQ(UiIntent::PitchNext, r.click(UiKey::Right, c));
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/true);
+  ASSERT_EQ(UiIntent::None, r.click(UiKey::Rate, moving));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  r.click(UiKey::Rate, kNoStops);
+  EXPECT_EQ(UiFocus::Rate, r.focus());
+  EXPECT_EQ(UiIntent::PitchNext, r.click(UiKey::Right, kNoStops));
 }
 
 // ===========================================================================
@@ -775,12 +852,20 @@ TEST(UiStateStops, EachArrowOnlySeesItsOwnStop) {
 // actually saw, because DisplayTask sleeps 100 ms between polls.
 // ---------------------------------------------------------------------------
 
+// SETUP NOTE for this whole block. Since the motion lockout, the STOPS key
+// cannot take focus under power at all, so these tests open the widget AT REST
+// and only then hand the arrows a powered context. That is not a contrivance:
+// it is the one way the state is still reachable on the real machine - the web
+// UI and a spindle-driven feed can both start the carriage while a picker is
+// open - and it is what keeps the stop-edit gate below the lockout falsifiable
+// rather than merely unreachable.
+
 TEST(UiStateStops, ClickDoesNotSetAStopWhileMotionEnabled) {
   const UiKey arrows[] = {UiKey::Left, UiKey::Right};
   for (UiKey k : arrows) {
     Rig r;
     UiContext c = ctx(false, false, /*motionEnabled=*/true);
-    r.click(UiKey::Stops, c);
+    r.click(UiKey::Stops, kNoStops);  // opened at rest; motion starts under it
     ASSERT_EQ(UiFocus::Stops, r.focus());
     EXPECT_EQ(UiIntent::None, r.click(k, c))
         << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
@@ -793,7 +878,7 @@ TEST(UiStateStops, HoldDoesNotClearAStopWhileMotionEnabled) {
   for (UiKey k : arrows) {
     Rig r;
     UiContext c = ctx(true, true, /*motionEnabled=*/true);
-    r.click(UiKey::Stops, c);
+    r.click(UiKey::Stops, kBothStops);
     ASSERT_EQ(UiFocus::Stops, r.focus());
     EXPECT_EQ(UiIntent::None, r.hold(k, c))
         << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
@@ -812,7 +897,7 @@ TEST(UiStateStops, NoStopEditIsPossibleWhileMotionEnabled) {
         for (UiKeyEvent ev : events) {
           Rig r;
           UiContext c = ctx(ls, rs, /*motionEnabled=*/true);
-          r.click(UiKey::Stops, c);
+          r.click(UiKey::Stops, ctx(ls, rs));  // at rest
           ASSERT_EQ(UiFocus::Stops, r.focus());
           EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
               << "arrow=" << (k == UiKey::Left ? "Left" : "Right")
@@ -824,43 +909,48 @@ TEST(UiStateStops, NoStopEditIsPossibleWhileMotionEnabled) {
 }
 
 TEST(UiStateStops, TheInhibitLiftsWhenDisengaged) {
-  // The other direction of the contract: the inhibit is about MM_ENABLED and
-  // nothing else, so the identical gestures work once disengaged. Without this
-  // the tests above would pass on a state machine that had simply broken STOPS.
+  // The other direction of the contract: the inhibit is a state, not a latch,
+  // so the identical gestures work once disengaged. Without this the tests
+  // above would pass on a state machine that had simply broken STOPS.
   const UiContext engaged = ctx(false, false, true);
   const UiContext engagedSet = ctx(true, true, true);
 
   Rig setL;
-  setL.click(UiKey::Stops, engaged);
+  setL.click(UiKey::Stops, kNoStops);
   ASSERT_EQ(UiIntent::None, setL.click(UiKey::Left, engaged));
   EXPECT_EQ(UiIntent::SetLeftStop, setL.click(UiKey::Left, kNoStops));
 
   Rig setR;
-  setR.click(UiKey::Stops, engaged);
+  setR.click(UiKey::Stops, kNoStops);
   ASSERT_EQ(UiIntent::None, setR.click(UiKey::Right, engaged));
   EXPECT_EQ(UiIntent::SetRightStop, setR.click(UiKey::Right, kNoStops));
 
   Rig clearL;
-  clearL.click(UiKey::Stops, engagedSet);
+  clearL.click(UiKey::Stops, kBothStops);
   ASSERT_EQ(UiIntent::None, clearL.hold(UiKey::Left, engagedSet));
   EXPECT_EQ(UiIntent::ClearLeftStop, clearL.hold(UiKey::Left, kBothStops));
 
   Rig clearR;
-  clearR.click(UiKey::Stops, engagedSet);
+  clearR.click(UiKey::Stops, kBothStops);
   ASSERT_EQ(UiIntent::None, clearR.hold(UiKey::Right, engagedSet));
   EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, kBothStops));
 }
 
-TEST(UiStateStops, TheStopsWidgetStillOpensWhileMotionEnabled) {
-  // Only the edits are inhibited, not the view: the travel bar with both stops
-  // and the live carriage position (§4) is exactly what you want on screen
-  // mid-cut. The widget must still take focus and still time out normally.
+TEST(UiStateStops, TheStopsWidgetDoesNotOpenWhileMotionEnabled) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // TheStopsWidgetStillOpensWhileMotionEnabled, on the reasoning that only the
+  // edits were inhibited and the travel bar was worth having on screen mid-cut.
+  // The owner's ruling supersedes it: STOPS is not a stop function, so under
+  // power it does nothing - no focus change, no widget, nothing to time out.
+  // (The travel bar is not lost; it is on the rest screen, which is what the
+  // operator is now left looking at.)
   Rig r;
   UiContext c = ctx(true, true, /*motionEnabled=*/true);
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
-  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  // Nothing was opened, so the idle timeout has nothing to expire.
   r.advance(kTimeout);
-  EXPECT_TRUE(r.tick());
+  EXPECT_FALSE(r.tick());
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
@@ -886,7 +976,7 @@ TEST(UiStateStops, ClickDoesNotSetAStopWhileMotionActive) {
   for (UiKey k : arrows) {
     Rig r;
     UiContext c = ctx(false, false, /*motionEnabled=*/false, /*motionActive=*/true);
-    r.click(UiKey::Stops, c);
+    r.click(UiKey::Stops, kNoStops);  // opened at rest - see the setup note
     ASSERT_EQ(UiFocus::Stops, r.focus());
     EXPECT_EQ(UiIntent::None, r.click(k, c))
         << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
@@ -900,7 +990,7 @@ TEST(UiStateStops, HoldDoesNotClearAStopWhileMotionActive) {
   for (UiKey k : arrows) {
     Rig r;
     UiContext c = ctx(true, true, /*motionEnabled=*/false, /*motionActive=*/true);
-    r.click(UiKey::Stops, c);
+    r.click(UiKey::Stops, kBothStops);  // opened at rest - see the setup note
     ASSERT_EQ(UiFocus::Stops, r.focus());
     EXPECT_EQ(UiIntent::None, r.hold(k, c))
         << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
@@ -921,7 +1011,7 @@ TEST(UiStateStops, NoStopEditIsPossibleWhileMotionActive) {
         for (UiKeyEvent ev : events) {
           Rig r;
           UiContext c = ctx(ls, rs, /*motionEnabled=*/false, /*motionActive=*/true);
-          r.click(UiKey::Stops, c);
+          r.click(UiKey::Stops, ctx(ls, rs));  // at rest - see the setup note
           ASSERT_EQ(UiFocus::Stops, r.focus());
           EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
               << "arrow=" << (k == UiKey::Left ? "Left" : "Right")
@@ -959,15 +1049,16 @@ TEST(UiStateStops, TheMotionActiveInhibitLiftsWhenBothFlagsAreFalse) {
   EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, atRestSet));
 }
 
-TEST(UiStateStops, TheStopsWidgetStillOpensWhileMotionActive) {
-  // As with motionEnabled, only the edits are inhibited, not the view: the
-  // travel bar is exactly what you want on screen during a powered run.
+TEST(UiStateStops, TheStopsWidgetDoesNotOpenWhileMotionActive) {
+  // CHANGED BY THE MOTION LOCKOUT, for the same reason as the motionEnabled
+  // case above: a powered run is still "moving", and the ruling is about the
+  // operator's attention, not about which motion mode the machine is in.
   Rig r;
   UiContext c = ctx(true, true, /*motionEnabled=*/false, /*motionActive=*/true);
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
-  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
   r.advance(kTimeout);
-  EXPECT_TRUE(r.tick());
+  EXPECT_FALSE(r.tick());
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
@@ -1156,11 +1247,11 @@ TEST(UiStateTimeout, SurvivesMillisRollover) {
   // ...still inside the window one tick before the deadline, having wrapped.
   const unsigned long justBefore = kNearMax + kTimeout - 1;  // wraps
   ASSERT_LT(justBefore, kNearMax) << "the test clock must actually have wrapped";
-  EXPECT_FALSE(ui.tick(justBefore));
+  EXPECT_FALSE(ui.tick(c, justBefore));
   EXPECT_EQ(UiFocus::Mode, ui.focus());
 
   // ...and fires at exactly kFocusTimeoutMs across the wrap.
-  EXPECT_TRUE(ui.tick(kNearMax + kTimeout));
+  EXPECT_TRUE(ui.tick(c, kNearMax + kTimeout));
   EXPECT_EQ(UiFocus::Jog, ui.focus());
 }
 
@@ -1711,32 +1802,38 @@ TEST(UiStateEncoderInhibit, IsLiveAgainInEveryFocusOnceTheCarriageIsAtRest) {
   }
 }
 
-TEST(UiStateEncoderInhibit, RateFocusIsDeadWhileEngagedButTheArrowsAreNot) {
-  // The accepted cost of the blanket rule, stated explicitly: the knob is dead
-  // inside a widget the operator opened on purpose. Changing pitch mid-cut is
-  // still possible, with the keys - which is the capability §3 requires.
+TEST(UiStateEncoderInhibit, RateFocusIsDeadWhileEngagedAndSoAreTheArrows) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // RateFocusIsDeadWhileEngagedButTheArrowsAreNot, and it existed to state the
+  // accepted cost of the knob's blanket rule: the knob went dead inside a
+  // widget the operator had opened on purpose, but the KEYS still changed pitch
+  // mid-cut. The owner's ruling removes the exception - the widget cannot be
+  // opened under power at all, so there is nothing for either input to drive.
   Rig r;
   UiContext c = ctx(false, false, /*motionEnabled=*/true);
-  r.click(UiKey::Rate, c);
-  ASSERT_EQ(UiFocus::Rate, r.focus());
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Rate, c));
+  ASSERT_EQ(UiFocus::Jog, r.focus()) << "RATE may not open a widget under power";
   EXPECT_EQ(UiIntent::None, turn(r, true, c));
   EXPECT_EQ(UiIntent::None, turn(r, false, c));
-  EXPECT_EQ(UiIntent::PitchNext, r.click(UiKey::Right, c));
-  EXPECT_EQ(UiIntent::PitchPrev, r.click(UiKey::Left, c));
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Right, c));
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, c));
 }
 
-TEST(UiStateEncoderInhibit, TheMenuCarouselIsAlsoInhibited) {
-  // "Anywhere" includes the menu: the knob does not move the carousel under
-  // power either. The arrows still do - and menuTileBlock() is what refuses the
-  // dangerous tiles once OK is pressed.
+TEST(UiStateEncoderInhibit, TheMenuCannotEvenBeOpenedUnderPower) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // TheMenuCarouselIsAlsoInhibited, which pinned that the knob did not move the
+  // carousel under power while the ARROWS still did, with menuTileBlock()
+  // refusing the dangerous tiles at the OK. The owner's ruling is one level
+  // above that: "it shouldn't be possible to open a menu or tile while moving",
+  // so the carousel never appears and neither input has anything to walk.
   Rig r;
   UiContext c = ctx(false, false, /*motionEnabled=*/true);
-  r.click(UiKey::Menu, c);
-  ASSERT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu, c));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
   EXPECT_EQ(UiIntent::None, turn(r, true, c));
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Right, c));
   EXPECT_EQ(0, r.ui().menuIndex());
-  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right, c));
-  EXPECT_EQ(1, r.ui().menuIndex());
 }
 
 TEST(UiStateEncoder, DoesNotCancelAPoweredRun) {
@@ -1924,10 +2021,12 @@ TEST(UiStateClearBoth, IsRefusedWhileTheCarriageIsUnderPower) {
       }
       Rig r;
       UiContext c = ctx(true, true, enabled, active);
-      r.click(UiKey::Stops, c);
+      r.click(UiKey::Stops, kBothStops);  // opened at rest; motion starts under it
       ASSERT_EQ(UiFocus::Stops, r.focus());
       EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, c))
           << "motionEnabled=" << enabled << " motionActive=" << active;
+      EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()))
+          << "and the bar must not be left pinned on screen";
     }
   }
 }
@@ -2320,7 +2419,12 @@ TEST(UiStateEnable, DismissDoesNotCancelMotion) {
   Rig r;
   ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
   const UiContext running = ctx(true, false, false, /*motionActive=*/true);
-  r.click(UiKey::Rate, running);
+  // The widget is opened from the COMMANDED window - the run has been ordered
+  // but no context has reported it yet, so the machine still reads as at rest
+  // and RATE is still live. That is the only panel-reachable route to a widget
+  // over a live run since the motion lockout, and it is a real one: the caller
+  // rebuilds the context from the machine, which cannot have moved yet.
+  r.click(UiKey::Rate, kLeftOnly);
   ASSERT_EQ(UiFocus::Rate, r.focus());
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable, running));
   EXPECT_EQ(UiFocus::Jog, r.focus());
@@ -2462,8 +2566,11 @@ TEST(UiStateMenuRefusal, RefusedTileStaysOpenAndEmitsNothing) {
   const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
                                /*motionActive=*/true);
   Rig r;
-  r.click(UiKey::Menu, moving);
-  r.click(UiKey::Right, moving);
+  // Opened and walked AT REST - since the motion lockout the carousel cannot be
+  // opened under power at all, so the reachable form of this case is motion
+  // starting (web UI, spindle-driven feed) with the menu already up.
+  r.click(UiKey::Menu, kNoStops);
+  r.click(UiKey::Right, kNoStops);
   ASSERT_EQ((int)MENU_THEME, r.ui().menuIndex());
 
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, moving))
@@ -2508,9 +2615,9 @@ TEST(UiStateMenuRefusal, EveryBlockableTileStaysOpenUnderPower) {
     const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
                                  /*motionActive=*/true, /*threadMode=*/true);
     Rig r;
-    r.click(UiKey::Menu, moving);
+    r.click(UiKey::Menu, kThreadIdle);  // opened at rest - see the note above
     for (int i = 0; i < (int)tile; ++i) {
-      r.click(UiKey::Right, moving);
+      r.click(UiKey::Right, kThreadIdle);
     }
     ASSERT_EQ((int)tile, r.ui().menuIndex());
     EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, moving)) << "tile " << (int)tile;
@@ -2519,23 +2626,40 @@ TEST(UiStateMenuRefusal, EveryBlockableTileStaysOpenUnderPower) {
   }
 }
 
-TEST(UiStateMenuRefusal, UnblockedTilesStillFireUnderPower) {
-  // The refusal must be per-tile, not a blanket "no menu while moving": Units,
-  // Jog speed, Diagnostics and About touch neither flash nor motion and stay
-  // live throughout, which is what menuTileBlock() already documents.
+TEST(UiStateMenuRefusal, NoTileFiresUnderPowerNotEvenAnUnblockedOne) {
+  // CHANGED BY THE MOTION LOCKOUT. This used to be
+  // UnblockedTilesStillFireUnderPower, and it pinned the OPPOSITE: that the
+  // refusal was per-tile and not "a blanket no menu while moving", so Units,
+  // Jog speed, Diagnostics and About stayed live throughout. The owner's ruling
+  // makes it a blanket rule on purpose - "it shouldn't be possible to open a
+  // menu or tile while moving" - so OK is inert on every tile, including the
+  // four menuTileBlock() still calls MTB_NONE.
+  //
+  // menuTileBlock() itself is UNCHANGED and still per-tile: it is what the
+  // display dims with, and what ButtonPad re-checks against the machine. This
+  // test is about the panel, not about that rule.
   const MenuTile live[] = {MENU_UNITS, MENU_JOG_SPEED, MENU_DIAGNOSTICS,
                            MENU_ABOUT};
   for (MenuTile tile : live) {
     const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
                                  /*motionActive=*/true);
+    ASSERT_EQ(MTB_NONE, menuTileBlock((int)tile, /*motionActive=*/true,
+                                      /*threadMode=*/false))
+        << "tile " << (int)tile << " must be one menuTileBlock() allows, or "
+        << "this test is not about the lockout";
     Rig r;
-    r.click(UiKey::Menu, moving);
+    r.click(UiKey::Menu, kNoStops);  // opened at rest; motion starts under it
     for (int i = 0; i < (int)tile; ++i) {
-      r.click(UiKey::Right, moving);
+      r.click(UiKey::Right, kNoStops);
     }
-    EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, moving))
+    ASSERT_EQ((int)tile, r.ui().menuIndex());
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, moving))
         << "tile " << (int)tile;
-    EXPECT_FALSE(r.ui().menuOpen()) << "tile " << (int)tile;
+    EXPECT_TRUE(r.ui().menuOpen()) << "tile " << (int)tile;
+    EXPECT_EQ(UiFocus::Menu, r.focus()) << "tile " << (int)tile;
+    // ...and the same press fires the instant the carriage stops.
+    EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, kNoStops))
+        << "tile " << (int)tile;
     EXPECT_EQ(menuTileDestination((int)tile), r.focus()) << "tile " << (int)tile;
   }
 }
@@ -2549,16 +2673,23 @@ TEST(UiStateMenuRefusal, TheRefusalIsNotJustASuppressedIntent) {
   const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
                                /*motionActive=*/true);
   Rig r;
-  r.click(UiKey::Menu, moving);
-  r.click(UiKey::Right, moving);  // -> Theme, blocked
+  r.click(UiKey::Menu, kNoStops);   // opened at rest - see the note above
+  r.click(UiKey::Right, kNoStops);  // -> Theme, which the refusal will block
   ASSERT_EQ(UiIntent::None, r.click(UiKey::Ok, moving));
 
-  // Still a live carousel: the arrows still walk it.
-  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right, moving));
+  // The carousel is intact: still open, still on the same tile. (Under power
+  // the arrows are inert too now, so it is checked once the carriage stops -
+  // which is also when the operator could act on it.)
+  EXPECT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Menu, r.focus());
+  EXPECT_EQ((int)MENU_THEME, r.ui().menuIndex());
+
+  // Still a live carousel: the arrows walk it again at rest.
+  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right, kNoStops));
   EXPECT_EQ((int)MENU_DRO_DATUM, r.ui().menuIndex());
   EXPECT_TRUE(r.ui().menuOpen());
   // And MENU still closes it the ordinary way.
-  EXPECT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu, moving));
+  EXPECT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu, kNoStops));
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
@@ -2568,8 +2699,8 @@ TEST(UiStateMenuRefusal, ARefusedTileFiresOnceTheCarriageStops) {
   const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
                                /*motionActive=*/true);
   Rig r;
-  r.click(UiKey::Menu, moving);
-  r.click(UiKey::Right, moving);
+  r.click(UiKey::Menu, kNoStops);   // opened at rest - see the note above
+  r.click(UiKey::Right, kNoStops);
   ASSERT_EQ(UiIntent::None, r.click(UiKey::Ok, moving));
   EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, kNoStops));
   EXPECT_FALSE(r.ui().menuOpen());
@@ -2850,6 +2981,498 @@ TEST(UiStateMenuOpenedFocuses, AreAllReachableAndAllLeaveOnHalt) {
     EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt)) << f;
     EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
   }
+}
+
+// ===========================================================================
+// 15. THE MOTION LOCKOUT (OWNER RULING)
+//
+//   "I think every button except halt and enable should be disabled whilst
+//    moving. So it shouldn't be possible to open a menu or tile while moving.
+//    When moving, all of the operator's attention should be on the tool and
+//    workpiece, not the screen/menus."
+//
+// One rule replacing five separate "moving, X disabled" behaviours. The arrows
+// are the single refinement, and it is safety-critical: their STOPPING halves
+// survive, because disabling them wholesale would delete the dead-man
+// terminator and the run cancel - the two gestures whose whole job is to stop
+// the machine. Stated once: while moving, the only live functions are the ones
+// that stop things.
+//
+// The sections above pin the rule where it changed an existing behaviour. This
+// section pins the rule ITSELF, exhaustively, so that removing the lockout
+// fails here loudly rather than only in whatever test happened to observe it.
+// ===========================================================================
+
+namespace {
+
+// Every context in which the lockout applies: engaged, powered-run/jog/decel,
+// and both at once. Deliberately NOT including the at-rest context - the
+// "everything is live again" tests below cover that side.
+const UiContext kUnderPower[] = {
+    ctx(true, true, /*motionEnabled=*/true, /*motionActive=*/false),
+    ctx(true, true, /*motionEnabled=*/false, /*motionActive=*/true),
+    ctx(true, true, /*motionEnabled=*/true, /*motionActive=*/true),
+};
+
+// The keys the ruling makes inert. HALT and ENABLE are excluded because they
+// are explicitly unchanged; the arrows are excluded because they keep their
+// stopping halves and get their own tests.
+const UiKey kLockedOutKeys[] = {UiKey::Mode, UiKey::Rate,       UiKey::Stops,
+                                UiKey::Menu, UiKey::Ok,         UiKey::EncoderCw,
+                                UiKey::EncoderCcw};
+
+const UiKeyEvent kEveryEvent[] = {UiKeyEvent::Press, UiKeyEvent::Click,
+                                  UiKeyEvent::Hold, UiKeyEvent::Release};
+
+}  // namespace
+
+TEST(UiStateMotionLockout, EveryLockedOutKeyIsInertFromEveryFocus) {
+  // The whole rule in one sweep: every locked-out key, every event, every
+  // under-power context, entered from every focus an operator can be in when
+  // the carriage starts moving. Nothing may be emitted and nothing may move.
+  for (UiFocus f : kAllFocuses) {
+    for (const UiContext& c : kUnderPower) {
+      for (UiKey k : kLockedOutKeys) {
+        for (UiKeyEvent ev : kEveryEvent) {
+          Rig r;
+          r.enterFocus(f);  // at rest, as an operator would
+          ASSERT_EQ(f, r.focus()) << "setup failed for " << f;
+          const bool menuWasOpen = r.ui().menuOpen();
+          const int indexWas = r.ui().menuIndex();
+
+          EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
+              << "focus=" << f << " event=" << ev;
+          EXPECT_EQ(f, r.focus())
+              << "focus must not move under power (focus=" << f
+              << " event=" << ev << ")";
+          EXPECT_EQ(menuWasOpen, r.ui().menuOpen()) << "focus=" << f;
+          EXPECT_EQ(indexWas, r.ui().menuIndex()) << "focus=" << f;
+        }
+      }
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, NoMenuOrTileCanBeOpenedWhileMoving) {
+  // The owner's sentence, taken literally: "it shouldn't be possible to open a
+  // menu or tile while moving." Both halves - the carousel itself, and the
+  // three focuses a tile opens.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu, c));
+    EXPECT_FALSE(r.ui().menuOpen()) << "the carousel must not open";
+    EXPECT_EQ(UiFocus::Jog, r.focus());
+
+    // And with the carousel already up from before the machine started, OK
+    // cannot activate a tile either - so DroDatum, Diagnostics and About are
+    // unreachable while moving however the operator got here.
+    Rig r2;
+    r2.click(UiKey::Menu, kNoStops);
+    ASSERT_TRUE(r2.ui().menuOpen());
+    for (int tile = 0; tile < kMenuItems; ++tile) {
+      Rig r3;
+      r3.click(UiKey::Menu, kNoStops);
+      for (int i = 0; i < tile; ++i) {
+        r3.click(UiKey::Right, kNoStops);
+      }
+      ASSERT_EQ(tile, r3.ui().menuIndex());
+      EXPECT_EQ(UiIntent::None, r3.click(UiKey::Ok, c)) << "tile " << tile;
+      EXPECT_TRUE(r3.ui().menuOpen()) << "tile " << tile;
+      EXPECT_EQ(UiFocus::Menu, r3.focus()) << "tile " << tile;
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, NoSettingCanBeAdjustedWhileMoving) {
+  // The other half of "inert": not just no focus change, but no VALUE change.
+  // The arrows are included here because although they keep their stopping
+  // halves, they may never step a setting - so this walks them from inside each
+  // widget the operator could have had open when the machine started.
+  const UiFocus widgets[] = {UiFocus::JogSpeed, UiFocus::Rate, UiFocus::Mode,
+                             UiFocus::Stops, UiFocus::DroDatum};
+  const UiKey steppers[] = {UiKey::Left, UiKey::Right, UiKey::EncoderCw,
+                            UiKey::EncoderCcw};
+  for (UiFocus f : widgets) {
+    for (const UiContext& c : kUnderPower) {
+      for (UiKey k : steppers) {
+        for (UiKeyEvent ev : kEveryEvent) {
+          Rig r;
+          r.enterFocus(f);
+          ASSERT_EQ(f, r.focus());
+          EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
+              << "focus=" << f << " event=" << ev;
+        }
+      }
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, TheDeadManTerminatorStillWorksUnderPower) {
+  // SAFETY-CRITICAL, and the first of the two arrow functions the lockout must
+  // not touch. A hold-to-jog is only safe if letting go ALWAYS stops it, so the
+  // Release must emit JogStop no matter what the context says - and a jog IS
+  // motion, so an under-power context is the NORMAL case for this release, not
+  // an edge one. If the lockout ever swallows it, m_jogDir is stranded and the
+  // carriage keeps running with no JogStop ever emitted.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    for (const UiContext& c : kUnderPower) {
+      Rig r;
+      ASSERT_EQ(k == UiKey::Left ? UiIntent::JogLeftStart
+                                 : UiIntent::JogRightStart,
+                r.key(k, UiKeyEvent::Press, kNoStops));
+      EXPECT_EQ(UiIntent::JogStop, r.key(k, UiKeyEvent::Release, c))
+          << "letting go must stop the carriage under power";
+      // Genuinely over: the terminator does not re-fire, and a fresh press
+      // starts a new jog once the machine is back at rest.
+      EXPECT_EQ(UiIntent::None, r.key(k, UiKeyEvent::Release, c));
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, TheOppositeArrowReleaseAlsoTerminatesUnderPower) {
+  // The terminator is not direction-matched, and the lockout must not have
+  // made it so.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    ASSERT_EQ(UiIntent::JogLeftStart,
+              r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+    EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Right, UiKeyEvent::Release, c));
+  }
+}
+
+TEST(UiStateMotionLockout, ARunCanStillBeCancelledUnderPower) {
+  // The second arrow function the lockout must not touch. A powered run to a
+  // stop is exactly why underPower() is true, so a rule that inhibited the only
+  // way to abort a run whenever a run was in progress would be no rule at all.
+  // Either arrow, Click or Hold (§7 - the cancel is unconditional on direction).
+  const UiKey started[] = {UiKey::Left, UiKey::Right};
+  const UiKey cancelled[] = {UiKey::Left, UiKey::Right};
+  const UiKeyEvent acting[] = {UiKeyEvent::Click, UiKeyEvent::Hold};
+  for (UiKey s : started) {
+    for (UiKey k : cancelled) {
+      for (UiKeyEvent ev : acting) {
+        Rig r;
+        const UiContext running = ctx(true, true, /*motionEnabled=*/false,
+                                      /*motionActive=*/true);
+        ASSERT_EQ(s == UiKey::Left ? UiIntent::RunToLeftStop
+                                   : UiIntent::RunToRightStop,
+                  r.click(s, kBothStops));
+        // The run is now confirmed by a context that reports it moving.
+        ASSERT_EQ(UiIntent::None, r.key(k, UiKeyEvent::Press, running));
+        EXPECT_EQ(UiIntent::CancelMotion, r.key(k, ev, running))
+            << "started=" << (s == UiKey::Left ? "L" : "R")
+            << " cancelled=" << (k == UiKey::Left ? "L" : "R")
+            << " event=" << ev;
+        // Once, not twice: the latch is gone, so the Release is inert.
+        EXPECT_EQ(UiIntent::None, r.key(k, UiKeyEvent::Release, running));
+      }
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, ArrowsMayNotStartMotionUnderPower) {
+  // The other side of the arrow refinement: they stop things, they never start
+  // them. With no run in flight, no arrow event under power may emit a jog or
+  // a run - including the Hold and Click that would otherwise run to a stop.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    for (const UiContext& c : kUnderPower) {
+      for (UiKeyEvent ev : kEveryEvent) {
+        Rig r;
+        EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
+            << "key=" << (k == UiKey::Left ? "Left" : "Right")
+            << " event=" << ev;
+        EXPECT_EQ(UiFocus::Jog, r.focus());
+      }
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, HaltIsCompletelyUnaffected) {
+  // "except halt and enable". HALT from every focus, every acting event, every
+  // under-power context.
+  const UiKeyEvent acting[] = {UiKeyEvent::Press, UiKeyEvent::Click,
+                               UiKeyEvent::Hold};
+  for (UiFocus f : kAllFocuses) {
+    for (const UiContext& c : kUnderPower) {
+      for (UiKeyEvent ev : acting) {
+        Rig r;
+        r.enterFocus(f);
+        EXPECT_EQ(UiIntent::CancelMotion, r.key(UiKey::Halt, ev, c))
+            << "focus=" << f << " event=" << ev;
+        EXPECT_EQ(UiFocus::Jog, r.focus()) << "focus=" << f;
+        EXPECT_FALSE(r.ui().menuOpen()) << "focus=" << f;
+      }
+      Rig rel;
+      EXPECT_EQ(UiIntent::None, rel.key(UiKey::Halt, UiKeyEvent::Release, c));
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, EnableIsCompletelyUnaffected) {
+  // The other exception, and the one that makes the lockout survivable: ENABLE
+  // must still disengage. From Jog it toggles directly; from anything else it
+  // dismisses first and toggles on the second press, exactly as at rest.
+  for (const UiContext& c : kUnderPower) {
+    Rig jog;
+    EXPECT_EQ(UiIntent::ToggleEngage, jog.click(UiKey::Enable, c));
+    EXPECT_EQ(UiFocus::Jog, jog.focus());
+
+    for (UiFocus f : kAllFocuses) {
+      if (f == UiFocus::Jog) {
+        continue;
+      }
+      Rig r;
+      r.enterFocus(f);  // opened at rest; the machine then starts moving
+      EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable, c)) << "focus=" << f;
+      EXPECT_EQ(UiFocus::Jog, r.focus()) << "focus=" << f;
+      EXPECT_FALSE(r.ui().menuOpen()) << "focus=" << f;
+      EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable, c))
+          << "focus=" << f;
+    }
+  }
+}
+
+TEST(UiStateMotionLockout, EverythingIsLiveAgainOnceTheCarriageIsAtRest) {
+  // THE CONTROL. Without it every test above would pass on a state machine
+  // that had simply been broken - the lockout must be a state, not a latch, and
+  // the panel must come straight back the moment the machine stops.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/true);
+
+  Rig mode;
+  ASSERT_EQ(UiIntent::None, mode.click(UiKey::Mode, moving));
+  mode.click(UiKey::Mode, kNoStops);
+  EXPECT_EQ(UiFocus::Mode, mode.focus());
+  EXPECT_EQ(UiIntent::ModeNext, mode.click(UiKey::Right, kNoStops));
+
+  Rig rate;
+  ASSERT_EQ(UiIntent::None, rate.click(UiKey::Rate, moving));
+  rate.click(UiKey::Rate, kNoStops);
+  EXPECT_EQ(UiFocus::Rate, rate.focus());
+  EXPECT_EQ(UiIntent::PitchNext, rate.click(UiKey::Right, kNoStops));
+
+  Rig stops;
+  ASSERT_EQ(UiIntent::None, stops.click(UiKey::Stops, moving));
+  stops.click(UiKey::Stops, kNoStops);
+  EXPECT_EQ(UiFocus::Stops, stops.focus());
+  EXPECT_EQ(UiIntent::SetLeftStop, stops.click(UiKey::Left, kNoStops));
+
+  Rig menu;
+  ASSERT_EQ(UiIntent::None, menu.click(UiKey::Menu, moving));
+  menu.click(UiKey::Menu, kNoStops);
+  EXPECT_TRUE(menu.ui().menuOpen());
+  EXPECT_EQ(UiIntent::MenuNext, menu.click(UiKey::Right, kNoStops));
+
+  Rig ok;
+  ASSERT_EQ(UiIntent::None, ok.click(UiKey::Ok, moving));
+  ok.click(UiKey::Ok, kNoStops);
+  EXPECT_EQ(UiFocus::JogSpeed, ok.focus());
+
+  Rig zero;
+  ASSERT_EQ(UiIntent::None, zero.hold(UiKey::Ok, moving));
+  EXPECT_EQ(UiIntent::ZeroDro, zero.hold(UiKey::Ok, kNoStops));
+
+  Rig knob;
+  ASSERT_EQ(UiIntent::None,
+            knob.key(UiKey::EncoderCw, UiKeyEvent::Click, moving));
+  EXPECT_EQ(UiIntent::PitchNext,
+            knob.key(UiKey::EncoderCw, UiKeyEvent::Click, kNoStops));
+
+  Rig jog;
+  ASSERT_EQ(UiIntent::None, jog.key(UiKey::Left, UiKeyEvent::Press, moving));
+  EXPECT_EQ(UiIntent::JogLeftStart,
+            jog.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+}
+
+TEST(UiStateMotionLockout, AnInertKeyStillReconcilesACompletedRun) {
+  // The lockout sits BELOW the run-phase reconciliation, and this is why. A run
+  // ends by itself at the stop and nothing tells UiState; the latch is retired
+  // by whatever key event next sees the machine at rest. If the lockout were
+  // moved above the reconciliation, every keypress made while the carriage was
+  // running would stop reconciling, and the "eaten click" the latch exists to
+  // prevent would come back.
+  Rig r;
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  const UiContext idle = ctx(true, false, /*motionEnabled=*/false,
+                             /*motionActive=*/false);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
+  // A locked-out key pressed WHILE the run is live: inert, but it must still
+  // hold the latch at Confirmed...
+  ASSERT_EQ(UiIntent::None, r.key(UiKey::Mode, UiKeyEvent::Click, running));
+  // ...and one pressed after the run has finished must retire it. (A Mode
+  // PRESS, because at rest MODE is live again and its Click would take focus -
+  // the event has to stay inert for the observation below to be about the
+  // latch and nothing else.)
+  ASSERT_EQ(UiIntent::None, r.key(UiKey::Mode, UiKeyEvent::Press, idle));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  // Something is moving again by the time the operator reaches for an arrow.
+  // A latch left standing would answer CancelMotion and eat this click.
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, running));
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
+}
+
+// ---------------------------------------------------------------------------
+// CLOSE-ON-MOTION (OWNER RULING): "any open widgets, if they can survive into
+// motion, should probably be closed on motion."
+//
+// Deliberately NOT justified by reachability. The lockout already makes an open
+// widget inert under power and no panel gesture can open one there, so this is
+// belt to the lockout's braces - but a reachability argument is only true until
+// someone adds a path, and it fails silently when they do. A picker on screen
+// over a moving carriage is made impossible by construction instead.
+//
+// It lives in tick(), which now takes a UiContext, because motion very often
+// starts with NO key event: the web UI, a spindle-driven feed, the natural end
+// of a run. tick() is the only call that happens every display pass regardless.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateCloseOnMotion, EveryOpenFocusClosesToJogWhenMotionStarts) {
+  // Every focus that is not already Jog, including the carousel and the two
+  // read-only screens that are otherwise exempt from every automatic dismissal.
+  const UiFocus opened[] = {UiFocus::JogSpeed,    UiFocus::Rate,
+                            UiFocus::Mode,        UiFocus::Stops,
+                            UiFocus::Menu,        UiFocus::DroDatum,
+                            UiFocus::Diagnostics, UiFocus::About};
+  for (UiFocus f : opened) {
+    for (const UiContext& c : kUnderPower) {
+      Rig r;
+      r.enterFocus(f);
+      ASSERT_EQ(f, r.focus()) << "setup failed for " << f;
+      EXPECT_TRUE(r.tick(c)) << f << " must close on motion";
+      EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+      EXPECT_FALSE(r.ui().menuOpen()) << f;
+    }
+  }
+}
+
+TEST(UiStateCloseOnMotion, ClosesImmediatelyNotAfterTheIdleTimeout) {
+  // The idle timeout is not what does this, and must not be what does this: the
+  // read-only screens and the carousel never expire, and four seconds of a
+  // picker over a moving carriage is four seconds too many.
+  Rig r;
+  r.enterFocus(UiFocus::Menu);
+  ASSERT_TRUE(r.ui().menuOpen());
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/true);
+  EXPECT_TRUE(r.tick(moving)) << "no clock advance at all";
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_FALSE(r.ui().menuOpen());
+}
+
+TEST(UiStateCloseOnMotion, ReportsTheChangeOnlyOnce) {
+  // tick()'s contract: true is a redraw TRIGGER, so it means "focus changed on
+  // this call", not "focus is wrong". A second tick under the same motion has
+  // nothing left to close.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    r.enterFocus(UiFocus::Rate);
+    ASSERT_TRUE(r.tick(c));
+    EXPECT_FALSE(r.tick(c)) << "already closed - no second redraw";
+    EXPECT_FALSE(r.tick(c));
+    EXPECT_EQ(UiFocus::Jog, r.focus());
+  }
+}
+
+TEST(UiStateCloseOnMotion, IsInertWhenNothingIsOpen) {
+  // The common case by far: at Jog with the carriage running, every pass of the
+  // display loop calls tick() and it must report no change.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    ASSERT_EQ(UiFocus::Jog, r.focus());
+    EXPECT_FALSE(r.tick(c));
+    r.advance(kTimeout * 10);
+    EXPECT_FALSE(r.tick(c));
+    EXPECT_EQ(UiFocus::Jog, r.focus());
+  }
+}
+
+TEST(UiStateCloseOnMotion, DoesNotFireAtRest) {
+  // The control. Without it this whole block would pass on a tick() that had
+  // simply been made to close everything unconditionally - which would break
+  // the read-only screens' exemption and every widget the operator is using.
+  const UiFocus opened[] = {UiFocus::Rate, UiFocus::Menu, UiFocus::Diagnostics};
+  for (UiFocus f : opened) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_FALSE(r.tick(kNoStops)) << f;
+    EXPECT_EQ(f, r.focus()) << f << " must survive a tick at rest";
+  }
+}
+
+TEST(UiStateCloseOnMotion, DoesNotDisturbAnInFlightJog) {
+  // A dead-man jog IS motion, so this branch runs on every display pass for the
+  // whole duration of one. It must not touch m_jogDir: the Release still has to
+  // emit JogStop afterwards, or the carriage runs on with nothing to stop it.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart,
+            r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  const UiContext jogging = ctx(false, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  r.tick(jogging);
+  r.tick(jogging);
+  r.tick(jogging);
+  EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Left, UiKeyEvent::Release, jogging));
+}
+
+TEST(UiStateCloseOnMotion, DoesNotDisturbAPoweredRun) {
+  // Same for the run latch: a run to a stop keeps the context powered for its
+  // whole duration, and the arrows must still cancel it afterwards.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  r.tick(running);
+  r.tick(running);
+  EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, running));
+}
+
+TEST(UiStateCloseOnMotion, TakesTheConfirmBarWithIt) {
+  // The bar is drawn over the STOPS widget, so closing the widget must empty
+  // it - a full bar floating over the rest screen would promise a clear that
+  // cannot happen.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(600);
+  ASSERT_EQ(600, r.ui().stopsConfirmPermille(r.now()));
+  const UiContext moving = ctx(true, true, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  EXPECT_TRUE(r.tick(moving));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+}
+
+TEST(UiStateCloseOnMotion, TheIdleTimeoutStillWorksAfterwards) {
+  // The two reasons tick() can move focus must not have been collapsed into
+  // one: with the carriage back at rest, the ordinary 4 s expiry is unchanged.
+  Rig r;
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/true);
+  r.enterFocus(UiFocus::Rate);
+  ASSERT_TRUE(r.tick(moving));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+
+  r.click(UiKey::Rate, kNoStops);
+  ASSERT_EQ(UiFocus::Rate, r.focus());
+  r.advance(kTimeout - 1);
+  EXPECT_FALSE(r.tick(kNoStops));
+  r.advance(1);
+  EXPECT_TRUE(r.tick(kNoStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMotionLockout, AConfirmBarIsNotLeftPinnedWhenMotionStarts) {
+  // The bar is only ever drawn for a gesture that would succeed. If the machine
+  // starts while a STOPS hold is in progress, the gesture is refused from that
+  // instant, so the bar must empty rather than sit full on screen - the same
+  // self-healing the "any other key" path gives it.
+  Rig r;
+  const UiContext moving = ctx(true, true, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(400);
+  ASSERT_EQ(400, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, moving));
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
 }
 
 }  // namespace

@@ -69,11 +69,20 @@ inline bool underPower(const UiContext& ctx) {
 
 // No stop may be edited while the carriage is under power - §4's rule, so the
 // per-arrow edits and the clear-both gesture can never drift apart.
+//
+// SUBSUMED by the motion lockout in handleKey(): the STOPS key can no longer
+// take focus under power, and the arrows are gated before the Stops branch is
+// reached, so every call site below is unreachable from the panel. It stays -
+// see the note on the lockout - because it is the enforceable statement of the
+// rule at the point where a stop would actually be edited, and because the
+// clear-both hold re-checks it against a context a whole second fresher than
+// the one that armed the bar.
 inline bool stopEditsInhibited(const UiContext& ctx) { return underPower(ctx); }
 
-// The knob does nothing at all while the carriage is under power - see the
-// encoder branch for why this is a blanket rule and not the arrows' per-focus
-// one.
+// The knob does nothing at all while the carriage is under power. Now SUBSUMED
+// by the motion lockout, which returns before the encoder branch is reached
+// from any panel input; kept because it states the rule at the point of use and
+// costs one predicate call on a path that is already returning None.
 inline bool encoderInhibited(const UiContext& ctx) { return underPower(ctx); }
 
 // --- The powered-run latch, m_runPhase ------------------------------------
@@ -269,6 +278,75 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
+  // THE MOTION LOCKOUT (OWNER RULING). While the carriage is under power, the
+  // only functions the panel still answers are the ones that STOP things.
+  //
+  //   "every button except halt and enable should be disabled whilst moving.
+  //    So it shouldn't be possible to open a menu or tile while moving. When
+  //    moving, all of the operator's attention should be on the tool and
+  //    workpiece, not the screen/menus."
+  //
+  // WHERE IT SITS, and why exactly here:
+  //   * BELOW HALT and the dead-man jog terminator, which must stay the first
+  //     two things in the ladder. Both are stop functions and both are
+  //     unconditional; neither may acquire a precondition, least of all one
+  //     that is true precisely when the machine is moving.
+  //   * BELOW the run-phase reconciliation, so a run that ended by itself is
+  //     still retired by whatever key event happens to be in flight - including
+  //     the ones this gate is about to swallow. Put the gate above it and every
+  //     inert keypress under power stops reconciling, and the eaten-click
+  //     symptom the latch exists to prevent comes back the moment the operator
+  //     presses anything while the carriage is running.
+  //   * BELOW ENABLE, which is "unchanged, exactly as now" by the same ruling:
+  //     dismiss on the first press, toggle on the second, under power as at
+  //     rest. Disengaging must not be harder than engaging was.
+  //   * ABOVE everything else - the encoder, MENU, the menu branch, the
+  //     selectors, STOPS, OK and the per-focus arrow switch. One gate, checked
+  //     once, instead of the five separate "moving, X disabled" rules this
+  //     replaces.
+  //
+  // THE ARROWS ARE THE ONE REFINEMENT, and it is safety-critical. Disabling
+  // them wholesale would delete two gestures whose entire purpose is to stop
+  // the machine:
+  //   * the dead-man terminator. Already handled above, unconditionally, and
+  //     that placement is the reason it is not mentioned again here.
+  //   * cancelling a powered run to a stop. Handled below, because the run is
+  //     the reason underPower() is true in the first place - a rule that
+  //     inhibits the only way to abort a run whenever a run is in progress is
+  //     no rule at all.
+  // So: the arrows may not START motion, take focus, or step any setting while
+  // under power. They may still terminate a jog and cancel a run. Stated in one
+  // line: while moving, the only live functions are the ones that stop things.
+  // -------------------------------------------------------------------------
+  if (underPower(ctx)) {
+    // A clear-both confirm cannot survive into motion. The bar is only ever
+    // drawn for a gesture that would succeed, and from here it cannot, so it
+    // must not stay pinned on screen. The top of handleKey() already does this
+    // for every OTHER key; this covers STOPS' own events, which it exempts.
+    m_stopsConfirming = false;
+
+    if (key == UiKey::Left || key == UiKey::Right) {
+      // The run cancel (§7). Deliberately NOT conditioned on m_focus, unlike
+      // the copy in the Jog branch below: a run can only be STARTED from Jog
+      // focus and focus cannot be moved under power, so the two are equivalent
+      // through the panel - but if a widget is somehow open over a live run
+      // (motion started from the web UI while a picker was up), the arrow that
+      // stops it must not be the thing that finds itself in the wrong focus.
+      // Erring towards "stop" is the same bargain the terminator above makes.
+      //
+      // Click and Hold only. Press must stay inert or the press of a cancelling
+      // tap would fire before its own Click; Release must stay inert or the
+      // release of that same tap would fire a second time.
+      if (m_runPhase != RunPhase::None &&
+          (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold)) {
+        m_runPhase = RunPhase::None;
+        return UiIntent::CancelMotion;
+      }
+    }
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
   // The rotary encoder. One detent = one discrete step of whatever the current
   // focus owns, with two deliberate departures from what the arrows do:
   //
@@ -291,33 +369,28 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // not touch stops at all. Setting an endstop stays a deliberate keypress.
   //
   // MOTION INHIBIT: while the carriage is under power the knob does NOTHING,
-  // in every focus, including the menu (OWNER RULING). This used to inherit the
-  // arrows' inhibit focus by focus - dead at Jog, live in Rate / Mode /
-  // JogSpeed - and that is exactly what changed. Three reasons the blanket rule
-  // is the right one, and one accepted cost:
+  // in every focus, including the menu. This was the knob's own blanket rule
+  // before the motion lockout above generalised it to the whole panel, and the
+  // reasoning that justified it there is what the lockout now says once:
   //   * A knob is the input most easily disturbed by accident on a running
   //     machine: a sleeve, a chip, a knock on the panel. A key has to be
   //     pressed; a knob only has to be brushed.
-  //   * Unlike the arrows, the knob has no job to do during motion. The arrows
-  //     MUST stay live under power - they cancel a powered run and they are the
-  //     dead-man terminator for a jog - so their inhibit has to be stated focus
-  //     by focus. Nothing the knob emits is ever needed while metal is moving,
-  //     so the broad rule costs no capability at all.
+  //   * Nothing the knob emits is ever needed while metal is moving, so the
+  //     broad rule costs no capability at all. (The arrows were the exception
+  //     that had to be stated separately then, and still are now - they cancel
+  //     a powered run and they are the dead-man terminator for a jog.)
   //   * "The knob is dead while the machine is running" is a rule an operator
-  //     can hold in their head. "Dead on the rest screen, live inside three of
-  //     the four widgets" is not.
-  // The cost: the knob is dead inside a widget the operator opened on purpose,
-  // e.g. RATE while engaged. That is the accepted trade - the KEYS are
-  // untouched, so RATE + arrows still changes pitch mid-cut
-  // (UiStateSelectors.SelectorsStillWorkWhileMotionEnabled), which is the
-  // capability §3 actually requires. Only the knob is inhibited.
+  //     can hold in their head.
+  // encoderInhibited() below is therefore UNREACHABLE from the panel: the
+  // lockout returns first, for every focus and every context that would satisfy
+  // it. It stays as the local statement of the rule.
   //
   // The predicate is underPower() - motionEnabled OR motionActive - not
   // motionEnabled alone. The engaged feed is not the only state worth
   // protecting: the powered run to a stop, the interactive jog and the
   // deceleration tail are all "the carriage is moving", which is precisely when
   // a stray step of pitch or mode is most costly, and none of them are
-  // MM_ENABLED. It is the same predicate the stop edits use.
+  // MM_ENABLED. It is the same predicate the lockout and the stop edits use.
   // -------------------------------------------------------------------------
   if (isEncoder(key)) {
     if (ev != UiKeyEvent::Click) {
@@ -787,6 +860,10 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // --- Focus is Jog: the arrows drive the carriage (§3). -------------------
 
   // Inhibited entirely while the leadscrew is engaged. The state bar says why.
+  // UNREACHABLE from the panel since the motion lockout: underPower() is
+  // motionEnabled OR motionActive, so any context that satisfies this one has
+  // already returned above. Kept as the local statement of §3's rule on the one
+  // branch that actually commands carriage motion.
   if (ctx.motionEnabled) {
     return UiIntent::None;
   }
@@ -857,7 +934,49 @@ int UiState::stopsConfirmPermille(unsigned long nowMs) const {
   return (int)((elapsed * 1000UL) / kStopsConfirmMs);
 }
 
-bool UiState::tick(unsigned long nowMs) {
+bool UiState::tick(const UiContext& ctx, unsigned long nowMs) {
+  // -------------------------------------------------------------------------
+  // CLOSE-ON-MOTION (OWNER RULING), checked before the idle timeout because it
+  // overrides it: "any open widgets, if they can survive into motion, should
+  // probably be closed on motion."
+  //
+  // The lockout in handleKey() already makes everything on an open widget inert
+  // while the carriage moves, and no panel gesture can open one under power -
+  // ENABLE dismisses before it engages, the arrows are owned by an open widget
+  // so cannot start a jog from inside one, and a run to a stop starts only from
+  // Jog focus. So this path is, today, unreachable through the panel.
+  //
+  // It exists anyway, and deliberately. A reachability argument is only true
+  // until someone adds a path, and it fails silently when they do: nothing here
+  // would catch it. A picker on screen over a moving carriage is the state this
+  // whole feature set exists to forbid, so it is made impossible BY
+  // CONSTRUCTION rather than by an argument a future change can invalidate.
+  // That is the same call the dead-man terminator makes above - unconditional
+  // rather than "safe because nothing can reach it" - and this branch is not
+  // free of reachable cases either: motion can start with no key event at all,
+  // from the web UI or a spindle-driven feed, while a widget is open.
+  //
+  // Focus goes to Jog and the carousel closes, so the display falls back to the
+  // main readout - travel, position, machine state - which is the information
+  // worth having on screen while metal is moving.
+  //
+  // It touches NOTHING else. m_jogDir and m_runPhase are deliberately not
+  // cleared: the dead-man terminator and the run cancel are the two gestures
+  // that survive the lockout, and both read state this must not disturb. A jog
+  // in flight is precisely a case where this branch runs (the jog IS the
+  // motion) and its Release must still emit JogStop afterwards.
+  if (underPower(ctx)) {
+    // The confirm bar goes with the widget it is drawn over; the gesture behind
+    // it is refused under power anyway.
+    m_stopsConfirming = false;
+    if (!m_menuOpen && m_focus == UiFocus::Jog) {
+      return false;  // already at rest state - no transition, no redraw
+    }
+    m_menuOpen = false;
+    m_focus = UiFocus::Jog;
+    return true;
+  }
+
   // Only the selector widgets expire - the five of isWidgetFocus(), DroDatum
   // included. Jog is the rest state (nothing to fall back to), Menu leaves on
   // MENU or HALT only (§1), and Diagnostics / About are read-only screens the

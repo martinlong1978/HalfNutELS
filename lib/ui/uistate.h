@@ -72,12 +72,41 @@ enum class UiFocus {
 // used to reach past the focus model entirely and drive the pitch directly out
 // of src/keyarray.cpp, so turning it inside any widget silently stepped the
 // pitch behind the operator's back. Routing it through handleKey() means it
-// obeys focus, the idle timeout and the motion inhibit like everything else -
-// and that inhibit is a blanket one: while the carriage is under power the knob
-// does nothing in ANY focus (see the encoder branch in uistate.cpp).
+// obeys focus, the idle timeout and the motion lockout like everything else.
 // src/buttonpad.cpp delivers exactly one Click per detent (no Press/Release -
 // a detent is instantaneous, there is nothing to hold), and every other event
 // on these two keys is inert.
+//
+// THE MOTION LOCKOUT (OWNER RULING) cuts across every key in this enum, so it
+// is stated here once rather than key by key. While the carriage is under power
+// - motionEnabled OR motionActive, i.e. underPower() in uistate.cpp - the panel
+// answers only the gestures that STOP things:
+//
+//   Halt                 unchanged. Unconditional, from every focus.
+//   Enable               unchanged. Dismiss-then-toggle, exactly as at rest.
+//   Left / Right         ONLY their stopping halves: the Release that ends an
+//                        in-flight hold-to-jog, and the Click/Hold that cancels
+//                        a powered run to a stop. They may not start motion,
+//                        move focus, or step any setting.
+//   everything else      INERT. Mode, Rate, Stops, Menu, Ok and both encoder
+//                        keys do nothing at all: no focus change, no widget, no
+//                        carousel, no setting, no ZeroDro.
+//
+// The owner's words: "every button except halt and enable should be disabled
+// whilst moving... When moving, all of the operator's attention should be on
+// the tool and workpiece, not the screen/menus." The arrows are the one place
+// that needed refining, because disabling them wholesale would delete the
+// dead-man terminator and the run-cancel - the two gestures whose entire job is
+// to stop the machine.
+//
+// This replaces five separate "moving, X disabled" rules with one, and it is
+// deliberately BROADER than the guards it subsumes rather than a rewiring of
+// them: menuTileBlock()'s motion arm, the Stops focus gate, the DroDatum arrow
+// gate and the clear-both confirm re-check all remain in place below it, on
+// paths the panel can no longer reach, because each of them is judged against
+// a context the panel is not the only source of (the web UI and a spindle-
+// driven feed can both move the carriage) and because a safety gate that is
+// merely unreachable is not the same thing as one that is wrong.
 enum class UiKey {
   Mode, Rate, Stops, Left, Ok, Right, Halt, Menu, Enable,
   EncoderCw, EncoderCcw
@@ -158,9 +187,28 @@ class UiState {
   UiIntent handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
                      unsigned long nowMs);
 
-  // Call periodically from the display task. Returns true if the focus timeout
-  // fired and focus changed, so the caller can use it as a redraw trigger.
-  bool tick(unsigned long nowMs);
+  // Call periodically from the display task, with a context sampled from the
+  // machine exactly as handleKey()'s is. Returns true if focus CHANGED, so the
+  // caller can use it as a redraw trigger.
+  //
+  // Two things can change focus here, and the return contract is the same for
+  // both: true only on the transition, false on every later call that finds
+  // nothing left to do.
+  //   * the 4 s idle timeout (§1), which applies to the widget focuses only;
+  //   * CLOSE-ON-MOTION (OWNER RULING): the instant the carriage is under
+  //     power, any open widget, read-only screen or carousel is closed and
+  //     focus returns to Jog.
+  //
+  // Why the context is a parameter rather than something UiState remembers from
+  // the last key event: motion very often starts with no key event at all - the
+  // web UI, a spindle-driven feed, the natural end of a run - and reconciling
+  // on the next handleKey() would leave a picker on screen over a moving
+  // carriage for as long as the operator did not touch the panel, which is
+  // exactly the state the ruling exists to forbid. This is the only call that
+  // happens unconditionally, every display pass, so it is the only place the
+  // close can be guaranteed. The cost is one extra argument at the single call
+  // site (src/buttonpad.cpp), which already builds a context each pass.
+  bool tick(const UiContext& ctx, unsigned long nowMs);
 
   // How far through the "hold STOPS to clear BOTH stops" gesture we are, in
   // permille: 0 at the instant of the press, 1000 when the hold fires (§4,

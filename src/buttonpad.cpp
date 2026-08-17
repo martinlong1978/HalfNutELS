@@ -171,8 +171,13 @@ void ButtonPad::handle() {
   }
 
   // Must run every pass, not only when a key arrived: this is what expires the
-  // focus back to Jog after UiState::kFocusTimeoutMs of no input (Sec. 1).
-  m_ui.tick(now);
+  // focus back to Jog after UiState::kFocusTimeoutMs of no input (Sec. 1), and
+  // it is also the ONLY place close-on-motion can be guaranteed to happen -
+  // motion frequently starts with no key event at all (the web UI, a
+  // spindle-driven feed, the natural end of a run), and a picker must not be
+  // left on screen over a moving carriage until the operator next touches the
+  // panel. Hence the fresh context, built the same way as the ones above.
+  m_ui.tick(buildContext(), now);
 }
 
 void ButtonPad::applyIntent(UiIntent intent) {
