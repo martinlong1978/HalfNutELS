@@ -80,6 +80,47 @@ ink baked into their I1 palettes and sit on coloured state rectangles, so they w
 for the pervasive "engaged" state. Caught in review, fixed by FS-H2 restoring explicit recolour.
 The lesson is that the doc's ordering was load-bearing, not decorative.
 
+## Decisions from the review session
+
+Settled with Martin after the overnight run. These supersede anything below that disagrees.
+
+### The governing principle
+
+**Lathe geometry is web-only and must never be writable from the device.** Encoder PPR, stepper
+PPR, gearbox ratio and leadscrew pitch are commissioning values — set once, over Wi-Fi, with the
+lathe offline. The on-device menu covers only what you would genuinely tweak *during a session*.
+
+This is not just policy, it fixes three logged defects at a stroke. `ButtonPad` currently
+reconstructs all nine geometry fields from the derived config and rewrites every one of them to
+flash on a theme toggle. Under the new rule the on-device save re-reads the stored config and
+overwrites **only the two preference bytes**. Geometry is then never sourced from RAM, which
+removes the `sizeof` padding blind spot, the two-sources-of-truth wart, and the
+null-config-writes-defaults path together.
+
+### Settled
+
+| # | Decision |
+|---|---|
+| 1 | **Geometry web-only.** On-device save touches only preference bytes (above). |
+| 2 | **Auto-return is rejected outright** — see below. Not deferred; it cannot work on this machine. |
+| 3 | **Zero-on-set**, new preference: setting a stop zeroes the DRO there, but **only for the stop that matches the datum preference**. The preference stays in charge; this just saves a separate zeroing gesture. |
+| 4 | **Encoder**: drives pitch at rest, acts as ◀/▶ inside a widget or menu, and is **inert in STOPS focus** — a knob is far easier to nudge than a key, and setting an endstop stays a deliberate keypress. |
+| 5 | **Dead-man jog**: poll the matrix while a jog is in flight and stop the moment the key is no longer down. The real fix, not the time-cap approximation. |
+| 6 | **Imperial feed 1000× bug: leave it.** Stays a documented known bug, not a to-do. Do not "tidy" it. |
+| 7 | **Menu editing**: `OK` on a tile closes the menu and opens the matching overlay. No editing sub-state — one grammar, and it reuses the overlays that already exist. |
+| 8 | **Stale leadscrew speed after arrest**: fix by decaying on the gated path. |
+| 9 | **Clear-both-stops**: build it as specced, with the 1 s confirm bar. |
+| 10 | **New antialiased mode glyphs**, and delete the nine dead assets (~16 KB of flash). |
+| 11 | **ENABLE with a widget open**: the first press closes the widget *only*; a second press engages. You cannot commit to a cut while your attention is still in a picker. |
+| 12 | **Diagnostics tile** shows live position error, spindle vs leadscrew rates, and sync anchor state. The old serial debug path stays dead. |
+
+### Why auto-return is off the table
+
+Worth recording because it is a machining fact, not a UI preference. Automatically running back
+to the other stop after a pass **only works if there is a servo on the cross-slide to retract the
+tool first**. Without one the return pass is still cutting, and it mars the thread you just made.
+On this machine it would destroy work. Do not re-propose it.
+
 ## Decisions taken while you were away
 
 These were judgement calls made to keep moving. All are cheap to reverse — say the word.
