@@ -1,6 +1,6 @@
 #include "WebSettings.h"
 #include "WebServer.h"
-#include <globalstate.h>   // motion-mode guard in saveLatheSettings()
+#include <globalstate.h>   // motion-mode guard in saveLathePreferences()
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <cstdlib>
@@ -23,7 +23,7 @@ constexpr uint32_t address = 0x3000;
 constexpr uint32_t latheaddress = address + sizeof(WebSettings);
 
 // --- Sector budget --------------------------------------------------------
-// setValues() and saveLatheSettings() both erase exactly ONE sector,
+// setValues() and saveLathePreferences() both erase exactly ONE sector,
 // (NVM_Offset + address) / 4096, and then write BOTH structs into it. That is
 // only correct while both structs fit inside that single sector. If they ever
 // stop fitting, LatheConfig spills into the next sector, which is never
@@ -322,19 +322,47 @@ void setValues() {
 
 }
 
-// Persist lathe settings written from the DEVICE itself (theme, DRO datum -
-// see the declaration in WebSettings.h for the full rationale). Unlike
-// setValues() (posted from the web form, which already has a fresh
-// WebSettings in hand from the request body), this entry point is only ever
-// given a LatheConfig - so it must re-read the WebSettings half of the
-// shared sector itself before erasing, or a theme toggle from the device
-// would silently wipe the saved Wi-Fi SSID/password/OTA URL.
-bool saveLatheSettings(LatheConfig* config) {
-    if (config == nullptr) {
-        Serial.println("saveLatheSettings: null config, aborting");
+// --- Device-writable preferences ------------------------------------------
+// Theme and DRO datum, and nothing else - see the declarations in
+// WebSettings.h for why geometry never crosses this boundary.
+
+// Reads the stored LatheConfig onto the stack (no heap, unlike
+// getLatheSettings(): these run from a menu press on the DisplayTask and have
+// no reason to allocate). Returns true only when flash actually held a blob
+// this firmware recognises. On false, `out` holds nothing trustworthy - the
+// read may have half-filled it - so a false return means "use your own
+// defaults, and do not write this back". Both callers below do exactly that.
+static bool readStoredLatheConfig(LatheConfig& out) {
+    // `check` is the one member with no in-class initialiser, so clear it
+    // before the read: a failed or partial flashRead must never leave an
+    // indeterminate sentinel that could happen to compare equal to CHECKVALUE.
+    out.check = 0;
+    // alignof(LatheConfig) == 4 (asserted in latheconfig.h), so &out satisfies
+    // flashRead's 4-byte-aligned uint32_t* contract.
+    if (!ESP.flashRead(NVM_Offset + latheaddress, (uint32_t*)&out,
+                       sizeof(LatheConfig))) {
         return false;
     }
+    return out.check == CHECKVALUE;
+}
 
+bool readLathePreferences(uint8_t& theme, DroDatumPreference& droDatum) {
+    LatheConfig stored;
+    if (!readStoredLatheConfig(stored)) {
+        // Unreachable in normal operation: main.cpp enters AP setup rather
+        // than starting the machine when the stored blob fails this same
+        // check, so nothing that could call this exists. Answer with the
+        // defaults anyway rather than with whatever was on the stack.
+        theme = THEME_DARK;
+        droDatum = DroDatumPreference::Left;
+        return false;
+    }
+    theme = normaliseTheme(stored.theme);
+    droDatum = toDroDatumPreference(stored.droDatum);
+    return true;
+}
+
+bool saveLathePreferences(uint8_t theme, DroDatumPreference droDatum) {
     // A flash erase takes the flash lock and disables the instruction cache on
     // BOTH cores. Nothing in main.cpp or lib/leadscrew is IRAM_ATTR (only the
     // keyarray timer ISR is), so the SpindleTask on core 0 freezes for the
@@ -342,18 +370,41 @@ bool saveLatheSettings(LatheConfig* config) {
     // step generation stops dead. Mid-cut that loses spindle sync and ruins
     // the thread.
     //
-    // setValues(), the only previous writer, was safe because it runs solely
-    // in AP config mode where no motion exists. This one is called from the
-    // running machine's menu, so it has to defend itself. See docs/
-    // ux-redesign.md for the caller-side story.
+    // setValues(), the only other writer, is safe because it runs solely in AP
+    // config mode where no motion exists. This one is called from the running
+    // machine's menu, so it has to defend itself. See docs/ux-redesign.md for
+    // the caller-side story.
+    //
+    // Checked first, before any flash access at all: if the answer is "no",
+    // nothing else needs doing.
     GlobalMotionMode motion = GlobalState::getInstance()->getMotionMode();
     if (motion != GlobalMotionMode::MM_DISABLED &&
         motion != GlobalMotionMode::MM_UNSET) {
-        Serial.println("saveLatheSettings: refused, carriage under power");
+        Serial.println("saveLathePreferences: refused, carriage under power");
         return false;
     }
 
-    // Read-modify-write step 1: pull the CURRENT WebSettings out of flash so
+    // Read-modify-write step 1a: the stored LatheConfig. THIS is what carries
+    // the user's commissioned geometry across the erase - it is read back out
+    // of flash and written straight back, so the nine geometry fields make the
+    // round trip without this code, or its caller, ever holding an opinion
+    // about what they should be.
+    //
+    // Refuse if it is not a blob we recognise. Rewriting it would leave those
+    // unknown bytes in place with our two preference bytes on top; stamping
+    // CHECKVALUE onto them would be worse still, promoting garbage to valid
+    // geometry. Neither is worth doing for a theme toggle.
+    LatheConfig stored;
+    if (!readStoredLatheConfig(stored)) {
+        Serial.println("saveLathePreferences: refused, no valid stored settings");
+        return false;
+    }
+
+    // The modify. Two bytes, normalised; see applyLathePreferences() in
+    // lib/config, which is where this rule is host-tested.
+    applyLathePreferences(stored, theme, droDatum);
+
+    // Read-modify-write step 1b: pull the CURRENT WebSettings out of flash so
     // they can be rewritten unchanged. getWebSettings() always returns a
     // (heap-allocated) struct - even pre-first-run, it is just whatever
     // bytes are presently in that sector (valid, or unconfigured/garbage
@@ -362,23 +413,15 @@ bool saveLatheSettings(LatheConfig* config) {
     // to branch on webSettings->check here.
     WebSettings* webSettings = getWebSettings();
 
-    // This function's whole purpose is to persist `config` as the new saved
-    // lathe settings, so any call to it implies the caller wants it marked
-    // valid - there is no scenario where saveLatheSettings() should write a
-    // config that then reads back as invalid. Setting unconditionally (vs.
-    // only when unset) is behaviourally identical for this int32 field and
-    // simpler to read.
-    config->check = CHECKVALUE;
-
     // Step 2/3: erase the shared 4 KB sector once, then rewrite BOTH structs
-    // - the preserved WebSettings and the caller's new LatheConfig - into
-    // it. Erasing without immediately rewriting both would leave a window
-    // where a reset/power-loss loses everything in the sector; there is no
-    // safer ordering available with a single-sector, erase-as-a-unit flash
+    // - the preserved WebSettings and the preserved-plus-two-bytes LatheConfig
+    // - into it. Erasing without immediately rewriting both would leave a
+    // window where a reset/power-loss loses everything in the sector; there is
+    // no safer ordering available with a single-sector, erase-as-a-unit flash
     // region.
     ESP.flashEraseSector((NVM_Offset + address) / 4096);
     ESP.flashWrite(NVM_Offset + address, (uint32_t*)webSettings, sizeof(WebSettings));
-    ESP.flashWrite(NVM_Offset + latheaddress, (uint32_t*)config, sizeof(LatheConfig));
+    ESP.flashWrite(NVM_Offset + latheaddress, (uint32_t*)&stored, sizeof(LatheConfig));
 
     // getWebSettings() hands us an owned pointer - free it rather than
     // leaking it (see the known leak at main.cpp:124-125, which this must

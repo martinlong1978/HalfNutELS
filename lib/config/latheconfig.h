@@ -79,6 +79,16 @@ typedef struct LatheConfig {
 //     match a moved member - that is the bug the assert exists to catch.
 //   * The total must still fit the shared 4 KB sector alongside WebSettings -
 //     see the sector asserts in src/WebSettings.cpp.
+//
+// KNOWN BLIND SPOT in the size assert, which is why the offset asserts below
+// are the load-bearing ones: the struct currently ends in two bytes of trailing
+// padding (theme and droDatum occupy 40 and 41 of 44), so up to two more
+// uint8_t fields can be appended with sizeof(LatheConfig) unchanged and this
+// assert still passing. It catches a RESHAPE, not an addition. src/buttonpad.cpp
+// used to carry a copy of this assert as its guard that a field-by-field copy of
+// the struct was still complete; that guard was unsound for exactly this reason,
+// and it is gone along with the copy - device-side saves now carry geometry
+// through from flash and never enumerate the fields at all.
 static_assert(sizeof(LatheConfig) == 44, "LatheConfig is a flash layout: size changed");
 static_assert(alignof(LatheConfig) == 4, "LatheConfig alignment changed");
 static_assert(offsetof(LatheConfig, check) == 0, "LatheConfig flash offset moved");
@@ -109,6 +119,53 @@ DroDatumPreference toDroDatumPreference(uint8_t storedValue);
 
 // Inverse mapping, for building the byte to persist.
 uint8_t fromDroDatumPreference(DroDatumPreference pref);
+
+// --- Device-writable preferences ------------------------------------------
+// `theme` and `droDatum` are the ONLY two LatheConfig fields the device itself
+// may write (docs/ux-redesign.md section 6). Everything else in the struct is
+// lathe geometry: commissioning values, set once over Wi-Fi with the machine
+// offline, and never writable from the keypad. The helpers below are the whole
+// vocabulary the device side needs - normalise, toggle, and apply-onto-a-
+// stored-blob - so that no device-side code ever has to build a LatheConfig of
+// its own (which is what used to let a theme toggle rewrite geometry from a
+// stale in-RAM copy).
+//
+// They live here, in lib/config, rather than in src/WebSettings.cpp so they
+// are host-testable: src/ is not built for the native env, so the flash side
+// of the save cannot be tested, but this - the part that decides which bytes
+// change - can be, and is (test/test_latheconfig).
+
+// Normalises a stored `theme` byte, on exactly the same reasoning as
+// toDroDatumPreference() above: flash can hold any byte, and only THEME_LIGHT
+// means light. Anything else - garbage, a short-read blob, a theme id written
+// by some future firmware - resolves to the safe default, THEME_DARK. Returned
+// as uint8_t rather than an enum because Display::setTheme() takes the raw
+// stored byte.
+uint8_t normaliseTheme(uint8_t storedValue);
+
+// The Theme tile's action: normalise, then flip. Garbage in therefore gives
+// THEME_LIGHT out (garbage normalises to dark, and dark toggles to light),
+// which is a defined result rather than a coin toss.
+uint8_t toggleTheme(uint8_t storedValue);
+
+// The DRO datum tile's action. Takes and returns the enum, not the stored
+// byte, so an unnormalised value cannot reach it in the first place.
+DroDatumPreference toggleDroDatum(DroDatumPreference current);
+
+// Overwrites ONLY the two device-writable preference bytes of `stored`, in
+// their normalised form. Every geometry field - and `check` - is left exactly
+// as the caller found it.
+//
+// `stored` is meant to be a LatheConfig that was JUST read back from flash, so
+// that a device-side save carries the user's commissioned geometry through
+// from flash rather than from any in-RAM reconstruction of it. Deliberately
+// does not stamp `check`: blessing a blob this firmware did not recognise
+// would promote unknown bytes to "valid geometry", which is precisely the
+// failure this whole path exists to prevent. The caller decides whether the
+// blob was valid before it ever gets here (saveLathePreferences(),
+// src/WebSettings.cpp).
+void applyLathePreferences(LatheConfig& stored, uint8_t theme,
+                           DroDatumPreference droDatum);
 
 
 class LatheConfigDerived {
@@ -141,6 +198,21 @@ public:
     int jogSpeed() const; //mm/s
     int leadscrewAcceleration() const; //mm/s2
     int leadscrewMaxSpeed() const; // mm/s
+
+    // BOOT-TIME values only. Unlike everything above them, these two are
+    // device-writable (the Theme / DRO datum menu tiles), and a device-side
+    // save writes FLASH - it does not write back through this view, which is
+    // read-only by design and, more to the point, must stay read-only: a
+    // general setter here would let a caller change leadscrewPitchMm and leave
+    // every precomputed value below stale. So after a toggle these accessors
+    // still report what was stored at boot.
+    //
+    // That is fine for their one legitimate use - seeding the live value at
+    // construction time (Display's constructor) - and wrong for anything else.
+    // If you need the CURRENT theme or datum at runtime, read it from whoever
+    // owns the live value (Display::m_palette / Display::m_droDatum), or, if
+    // you need the persisted one, from flash via readLathePreferences()
+    // (src/WebSettings.h). Do not add a runtime reader here.
     uint8_t theme() const;
     DroDatumPreference droDatum() const;
 

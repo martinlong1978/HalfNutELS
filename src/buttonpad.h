@@ -32,23 +32,14 @@ class ButtonPad {
   // nothing, and its constructor initialises all of its own fields.
   UiState m_ui;
 
-  // Working copy of the persisted lathe settings, so the Theme and DRO datum
-  // menu tiles have something to hand saveLatheSettings() (WebSettings.h).
-  //
-  // A COPY, and unavoidably so. The live LatheConfig is a local in main.cpp's
-  // setup(); the only handle on it anywhere else is LatheConfigDerived, which
-  // keeps its LatheConfig* private and exposes read-only accessors. And
-  // getLatheSettings() is not an alternative: it heap-allocates a FRESH struct
-  // read straight out of flash on every call, so writing through that would
-  // both leak and diverge from the running configuration.
-  //
-  // Seeded in the constructor from LatheConfigDerived's accessors, which mirror
-  // every LatheConfig member one-for-one (lib/config/latheconfig.cpp), so this
-  // copy starts byte-identical to the live struct. The two tiles then mutate
-  // and persist it. Because it is a copy, a save that is REFUSED must roll the
-  // field back - otherwise the copy silently disagrees with flash and the next
-  // successful save would write a value the user never chose.
-  LatheConfig m_settings;
+  // NOTE: there is deliberately NO LatheConfig member here. The Theme and DRO
+  // datum tiles used to mutate a working copy of the whole struct and hand it
+  // to saveLatheSettings(), which wrote all of it - so a theme toggle rewrote
+  // the user's commissioned geometry out of that copy. Geometry is now web-only
+  // and carried through flash by saveLathePreferences() (src/WebSettings.h);
+  // the tiles read the current preferences with readLathePreferences() at the
+  // moment of the press and pass two values. Nothing to cache, and nothing to
+  // roll back when a save is refused.
 
   // Matrix code (ELS_*_BUTTON, lib/config/board.h) -> UiKey. Returns false for
   // 0 / unknown codes and for ENABLE, which is not part of the focus model.

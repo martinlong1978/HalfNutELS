@@ -208,6 +208,140 @@ TEST(LatheConfigDroDatumMapping, EveryByteResolvesAndOnlyOneMapsToRight) {
   }
 }
 
+// --- Device-writable preferences ------------------------------------------
+// `theme` and `droDatum` are the only two LatheConfig fields the device itself
+// may write; everything else is commissioning geometry, set over Wi-Fi only.
+// The flash side of that (saveLathePreferences(), src/WebSettings.cpp) is NOT
+// host-testable - src/ is not built for the native env and ESP.flashRead/
+// flashEraseSector/flashWrite have no native stub. What IS testable, and is
+// tested here, is the part that decides which bytes change.
+
+TEST(LatheConfigTheme, NormaliseAcceptsTheTwoKnownThemes) {
+  EXPECT_EQ(normaliseTheme(THEME_DARK), (uint8_t)THEME_DARK);
+  EXPECT_EQ(normaliseTheme(THEME_LIGHT), (uint8_t)THEME_LIGHT);
+}
+
+// Same hazard as the droDatum byte: flash can hold anything, and an unknown
+// value must resolve to the safe default rather than being trusted.
+TEST(LatheConfigTheme, NormaliseFallsBackToDarkForUnknownBytes) {
+  EXPECT_EQ(normaliseTheme(2), (uint8_t)THEME_DARK);
+  EXPECT_EQ(normaliseTheme(0x7F), (uint8_t)THEME_DARK);
+  EXPECT_EQ(normaliseTheme(0xFF), (uint8_t)THEME_DARK);
+}
+
+// ...and ONLY the THEME_LIGHT byte may produce light, across the whole range.
+TEST(LatheConfigTheme, EveryByteNormalisesAndOnlyOneMapsToLight) {
+  for (int b = 0; b <= 0xFF; ++b) {
+    const uint8_t expected = (b == THEME_LIGHT) ? THEME_LIGHT : THEME_DARK;
+    EXPECT_EQ(normaliseTheme((uint8_t)b), expected) << "stored byte " << b;
+  }
+}
+
+TEST(LatheConfigTheme, ToggleFlipsBetweenTheTwoThemes) {
+  EXPECT_EQ(toggleTheme(THEME_DARK), (uint8_t)THEME_LIGHT);
+  EXPECT_EQ(toggleTheme(THEME_LIGHT), (uint8_t)THEME_DARK);
+  // Toggling twice is the identity for both valid values - a menu tile pressed
+  // an even number of times must land where it started.
+  EXPECT_EQ(toggleTheme(toggleTheme(THEME_DARK)), (uint8_t)THEME_DARK);
+  EXPECT_EQ(toggleTheme(toggleTheme(THEME_LIGHT)), (uint8_t)THEME_LIGHT);
+}
+
+// A garbage stored byte normalises to dark, so toggling it yields light - a
+// defined outcome, not whatever the raw byte happened to compare against.
+TEST(LatheConfigTheme, ToggleOfAnUnknownByteYieldsLight) {
+  EXPECT_EQ(toggleTheme(0xFF), (uint8_t)THEME_LIGHT);
+  EXPECT_EQ(toggleTheme(42), (uint8_t)THEME_LIGHT);
+}
+
+TEST(LatheConfigDroDatumMapping, ToggleFlipsBetweenTheTwoDatums) {
+  EXPECT_EQ(toggleDroDatum(DroDatumPreference::Left), DroDatumPreference::Right);
+  EXPECT_EQ(toggleDroDatum(DroDatumPreference::Right), DroDatumPreference::Left);
+  EXPECT_EQ(toggleDroDatum(toggleDroDatum(DroDatumPreference::Left)),
+            DroDatumPreference::Left);
+}
+
+// THE test for this whole mechanism. applyLathePreferences() is what a
+// device-side save applies to the LatheConfig it just read back out of flash,
+// so it must touch the two preference bytes and NOTHING else: every geometry
+// field must survive byte-for-byte, or a theme toggle would rewrite the user's
+// commissioned machine. Deliberately uses non-default geometry throughout - a
+// default-valued config would pass even if the function replaced the struct
+// wholesale, which is exactly the bug being guarded against.
+TEST(LatheConfigPreferences, ApplyChangesOnlyThemeAndDatum) {
+  LatheConfig cfg;
+  cfg.check = CHECKVALUE;
+  cfg.spindleEncoderPpr = 2048;
+  cfg.stepperPpr = 800;
+  cfg.invertDirection = false;
+  cfg.gearboxRatioNumerator = 5;
+  cfg.gearboxRatioDenominator = 3;
+  cfg.leadscrewPitchMm = 3.175f;
+  cfg.jogSpeed = 17;
+  cfg.leadscrewAcceleration = 275;
+  cfg.leadscrewMaxSpeed = 22;
+  cfg.theme = THEME_DARK;
+  cfg.droDatum = DRO_DATUM_LEFT;
+
+  applyLathePreferences(cfg, THEME_LIGHT, DroDatumPreference::Right);
+
+  // The two bytes it is allowed to write.
+  EXPECT_EQ(cfg.theme, (uint8_t)THEME_LIGHT);
+  EXPECT_EQ(cfg.droDatum, (uint8_t)DRO_DATUM_RIGHT);
+
+  // ...and every commissioning value, unchanged.
+  EXPECT_EQ(cfg.spindleEncoderPpr, 2048);
+  EXPECT_EQ(cfg.stepperPpr, 800);
+  EXPECT_FALSE(cfg.invertDirection);
+  EXPECT_EQ(cfg.gearboxRatioNumerator, 5);
+  EXPECT_EQ(cfg.gearboxRatioDenominator, 3);
+  EXPECT_FLOAT_EQ(cfg.leadscrewPitchMm, 3.175f);
+  EXPECT_EQ(cfg.jogSpeed, 17);
+  EXPECT_EQ(cfg.leadscrewAcceleration, 275);
+  EXPECT_EQ(cfg.leadscrewMaxSpeed, 22);
+}
+
+// The validity sentinel is NOT the caller's to change here. Stamping CHECKVALUE
+// on a blob this firmware did not recognise would promote unknown bytes to
+// "valid geometry"; the decision to trust a blob is made before this point.
+TEST(LatheConfigPreferences, ApplyLeavesTheCheckValueAlone) {
+  LatheConfig valid;
+  valid.check = CHECKVALUE;
+  applyLathePreferences(valid, THEME_LIGHT, DroDatumPreference::Right);
+  EXPECT_EQ((uint32_t)valid.check, (uint32_t)CHECKVALUE);
+
+  LatheConfig unrecognised;
+  unrecognised.check = 0x12345678;
+  applyLathePreferences(unrecognised, THEME_LIGHT, DroDatumPreference::Right);
+  EXPECT_EQ((uint32_t)unrecognised.check, 0x12345678u);
+}
+
+// The bytes written are normalised, so a garbage theme byte cannot be laundered
+// into flash by passing it straight through.
+TEST(LatheConfigPreferences, ApplyNormalisesTheThemeByteItWrites) {
+  LatheConfig cfg;
+  cfg.check = CHECKVALUE;
+  applyLathePreferences(cfg, 0xFF, DroDatumPreference::Left);
+
+  EXPECT_EQ(cfg.theme, (uint8_t)THEME_DARK);
+  EXPECT_EQ(cfg.droDatum, (uint8_t)DRO_DATUM_LEFT);
+}
+
+// Round trip: what applyLathePreferences() writes is what readLathePreferences()
+// would read back out of the same struct (the flash hop in between is the part
+// that has to be verified on device).
+TEST(LatheConfigPreferences, WrittenBytesReadBackAsTheSamePreferences) {
+  LatheConfig cfg;
+  cfg.check = CHECKVALUE;
+
+  applyLathePreferences(cfg, THEME_LIGHT, DroDatumPreference::Right);
+  EXPECT_EQ(normaliseTheme(cfg.theme), (uint8_t)THEME_LIGHT);
+  EXPECT_EQ(toDroDatumPreference(cfg.droDatum), DroDatumPreference::Right);
+
+  applyLathePreferences(cfg, THEME_DARK, DroDatumPreference::Left);
+  EXPECT_EQ(normaliseTheme(cfg.theme), (uint8_t)THEME_DARK);
+  EXPECT_EQ(toDroDatumPreference(cfg.droDatum), DroDatumPreference::Left);
+}
+
 // --- Flash layout ---------------------------------------------------------
 // LatheConfig is blitted raw into flash (src/WebSettings.cpp), so its size and
 // member offsets are the on-disk format. latheconfig.h carries static_asserts
@@ -239,6 +373,21 @@ TEST(LatheConfigFlashLayout, NewFieldsSitPastThePreRedesignStructSize) {
   // ...and the struct still ends 4-byte aligned, which is what keeps the
   // flashWrite length legal and LatheConfig's flash offset aligned.
   EXPECT_EQ(sizeof(LatheConfig) % 4, 0u);
+}
+
+// Pins the KNOWN BLIND SPOT in the sizeof assert, so nobody mistakes it for a
+// guard against fields being added. droDatum ends at byte 42 and the struct is
+// 44 bytes, so two more uint8_t fields fit in the trailing padding with
+// sizeof(LatheConfig) unchanged - the size assert would stay silent. That is
+// why the per-member offset asserts are the load-bearing ones, and why
+// src/buttonpad.cpp no longer relies on a size assert to prove that a
+// field-by-field copy of this struct is complete: it no longer makes one.
+TEST(LatheConfigFlashLayout, SizeAssertCannotSeeFieldsAppendedIntoTrailingPad) {
+  const size_t lastUsedByte = offsetof(LatheConfig, droDatum) + 1;
+  EXPECT_EQ(lastUsedByte, 42u);
+  EXPECT_EQ(sizeof(LatheConfig) - lastUsedByte, 2u)
+      << "trailing padding: this many uint8_t fields could be appended without "
+         "sizeof(LatheConfig) changing";
 }
 
 // A settings blob is only trusted when check == CHECKVALUE. Erased flash reads

@@ -43,46 +43,20 @@ ButtonPad::ButtonPad(Spindle* spindle, Leadscrew* leadscrew, KeyArray* pad)
   : m_spindle(spindle),
   m_leadscrew(leadscrew),
   m_pad(pad),
-  m_ui(),
-  m_settings() {
+  m_ui() {
   // ButtonPad is heap-allocated (`new ButtonPad` in main.cpp) and the heap is
   // NOT zeroed, so every member is initialised explicitly - see CLAUDE.md
   // ("Constructors must initialise all members"); relying on implicit zeroing
-  // has shipped real bugs in this repo. `m_settings()` above value-initialises
-  // it to LatheConfig's in-class defaults, which the block below then replaces
-  // with the machine's actual configuration.
-
-  // Seed the settings working copy from the LIVE configuration (see the member
-  // comment in buttonpad.h for why it has to be a copy). Every field, not just
-  // the two the menu edits: saveLatheSettings() writes the whole struct, so a
-  // field left at its compiled-in default here would silently overwrite the
-  // user's web-configured value the first time the Theme tile is used.
+  // has shipped real bugs in this repo. Every member is in the init list above:
+  // the three pointers, and m_ui, whose own constructor initialises its fields.
   //
-  // This static_assert is the guard on exactly that. It cannot check that the
-  // list below is complete, but it does fail the build the moment LatheConfig
-  // changes size - which is the only way a field can appear that this misses.
-  static_assert(sizeof(LatheConfig) == 44,
-    "LatheConfig changed size - re-check that the seeding below still copies "
-    "EVERY member, or the next device-side save writes defaults over the "
-    "user's configuration");
-  const LatheConfigDerived* cfg =
-    (leadscrew != nullptr) ? leadscrew->getConfig() : nullptr;
-  if (cfg != nullptr) {
-    m_settings.spindleEncoderPpr = cfg->spindleEncoderPpr();
-    m_settings.stepperPpr = cfg->stepperPpr();
-    m_settings.invertDirection = cfg->invertDirection();
-    m_settings.gearboxRatioNumerator = cfg->gearboxRatioNumerator();
-    m_settings.gearboxRatioDenominator = cfg->gearboxRatioDenominator();
-    m_settings.leadscrewPitchMm = cfg->leadscrewPitchMm();
-    m_settings.jogSpeed = cfg->jogSpeed();
-    m_settings.leadscrewAcceleration = cfg->leadscrewAcceleration();
-    m_settings.leadscrewMaxSpeed = cfg->leadscrewMaxSpeed();
-    m_settings.theme = cfg->theme();
-    m_settings.droDatum = fromDroDatumPreference(cfg->droDatum());
-  }
-  // saveLatheSettings() stamps this itself on every write; set it here too so
-  // the copy is a valid blob from the outset rather than only after a save.
-  m_settings.check = CHECKVALUE;
+  // There is no settings copy to seed any more. The old constructor rebuilt an
+  // entire LatheConfig here from LatheConfigDerived's accessors, because
+  // saveLatheSettings() wrote sizeof(LatheConfig) and any field missed by that
+  // list would have been written back as a compiled-in default - overwriting
+  // the user's commissioned geometry. Geometry is now web-only and carried
+  // through flash by saveLathePreferences(), so the copy, the seeding, and the
+  // size assert that guarded it are all gone (see buttonpad.h).
 
   // GlobalState still constructs with the pad LOCKED, and nothing toggles the
   // lock any more: this feature set removed the LOCK key with the rest of the
@@ -348,7 +322,7 @@ void ButtonPad::activateMenuTile() {
   // a queued burst drains.
   //
   // "Under power" is the same predicate UiContext::motionActive carries and the
-  // same one saveLatheSettings() refuses on: motionMode is neither MM_DISABLED
+  // same one saveLathePreferences() refuses on: motionMode is neither MM_DISABLED
   // nor MM_UNSET, so it covers the engaged feed, the powered run to a stop, the
   // interactive jog AND the deceleration tail.
   const GlobalMotionMode motionMode = globalState->getMotionMode();
@@ -383,40 +357,61 @@ void ButtonPad::activateMenuTile() {
     break;
 
   case MENU_THEME: {
-    // Persist FIRST, apply second. saveLatheSettings() can refuse (see below),
-    // and a display that had already switched theme would then be showing a
-    // setting the machine did not keep - it would silently revert on the next
-    // boot.
-    const uint8_t previous = m_settings.theme;
-    m_settings.theme = (previous == THEME_LIGHT) ? THEME_DARK : THEME_LIGHT;
-    if (!saveLatheSettings(&m_settings)) {
-      // Refused - the carriage is under power (a 4 KB sector erase disables the
-      // instruction cache on both cores and stalls the spindle loop for tens of
-      // milliseconds). Roll the working copy back so it never diverges from
-      // flash. Reaching this is a RACE, not the normal refusal path: the gate
-      // above tests the same condition, so motion must have started in the
-      // microseconds since. The operator sees the tile go dim on the next
-      // display tick, because that same condition is now true there too.
-      m_settings.theme = previous;
+    // Read what is actually STORED, toggle that, persist, and only then apply.
+    //
+    // Read from flash, not from a copy: flash is the authority for what is
+    // persisted, and re-reading is what makes it impossible for this tile to
+    // write back a value the user never chose. It costs one small SPI read on
+    // the DisplayTask, immediately before an erase that costs a thousand times
+    // more. If nothing valid is stored, readLathePreferences() answers with
+    // the defaults and the save below refuses anyway.
+    //
+    // Both preferences are read because saveLathePreferences() takes both -
+    // the datum has to be passed through unchanged, or persisting a theme
+    // would revert it.
+    uint8_t theme = THEME_DARK;
+    DroDatumPreference datum = DroDatumPreference::Left;
+    (void)readLathePreferences(theme, datum);
+
+    // Persist FIRST, apply second. saveLathePreferences() can refuse, and a
+    // display that had already switched theme would then be showing a setting
+    // the machine did not keep - it would silently revert on the next boot.
+    const uint8_t next = toggleTheme(theme);
+    if (!saveLathePreferences(next, datum)) {
+      // Refused. Nothing to undo: no state changed anywhere, because the value
+      // being toggled came from flash rather than from anything held here.
+      //
+      // The refusal that matters is "the carriage is under power" - a 4 KB
+      // sector erase disables the instruction cache on both cores and stalls
+      // the spindle loop for tens of milliseconds - and reaching it here is a
+      // RACE, not the normal path: the gate above tests the same condition, so
+      // motion must have started in the microseconds since. The operator sees
+      // the tile go dim on the next display tick, because that same condition
+      // is now true there too. (saveLathePreferences() also refuses when flash
+      // holds no settings blob this firmware recognises, which cannot happen on
+      // a machine that got as far as running: main.cpp would have entered AP
+      // setup instead.)
       break;
     }
     if (display != nullptr) {
-      display->setTheme(m_settings.theme);
+      display->setTheme(next);
     }
     break;
   }
 
   case MENU_DRO_DATUM: {
-    // Same save-then-apply order, and the same rollback, as Theme above.
-    const uint8_t previous = m_settings.droDatum;
-    m_settings.droDatum =
-      (previous == DRO_DATUM_RIGHT) ? DRO_DATUM_LEFT : DRO_DATUM_RIGHT;
-    if (!saveLatheSettings(&m_settings)) {
-      m_settings.droDatum = previous;
+    // Same read-toggle-persist-apply order as Theme above, and the same reason
+    // for each step. Nothing to roll back on a refusal, for the same reason.
+    uint8_t theme = THEME_DARK;
+    DroDatumPreference datum = DroDatumPreference::Left;
+    (void)readLathePreferences(theme, datum);
+
+    const DroDatumPreference next = toggleDroDatum(datum);
+    if (!saveLathePreferences(theme, next)) {
       break;
     }
     if (display != nullptr) {
-      display->setDroDatum(toDroDatumPreference(m_settings.droDatum));
+      display->setDroDatum(next);
     }
     // Sec. 8 also has re-picking the datum CLEAR a manual zero. Not implemented,
     // and deliberately not faked: there is no manual-zero store anywhere yet
