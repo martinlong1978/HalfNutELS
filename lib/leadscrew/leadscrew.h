@@ -114,7 +114,9 @@ public:
   }
 
   // Exposes the derived config so the display can format units without a
-  // separate global.
-  LatheConfigDerived* getConfig() { return config; }
+  // separate global. const-qualified return: config is fixed at runtime
+  // (see the LatheConfigDerived class comment in latheconfig.h) and callers
+  // outside Leadscrew have no business mutating it through this pointer.
+  const LatheConfigDerived* getConfig() { return config; }
 
 };

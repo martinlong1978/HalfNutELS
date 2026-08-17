@@ -90,26 +90,30 @@ private:
 public:
     LatheConfigDerived(LatheConfig* config);
 
-    int spindleEncoderPpr();
-    int stepperPpr();
-    bool invertDirection(); // true => right = 1. 
-    int gearboxRatioNumerator();
-    int gearboxRatioDenominator();
-    float leadscrewPitchMm(); //mm per turn
-    int jogSpeed(); //mm/s
-    int leadscrewAcceleration(); //mm/s2
-    int leadscrewMaxSpeed(); // mm/s
-    uint8_t theme();
-    DroDatumPreference droDatum();
+    // All accessors below are pure reads of the cached members (or, for the
+    // first block, of the LatheConfig* they merely mirror) - const because
+    // config is fixed at runtime (see the class comment above) and callers
+    // like Leadscrew::getConfig() hand this out as a read-only view.
+    int spindleEncoderPpr() const;
+    int stepperPpr() const;
+    bool invertDirection() const; // true => right = 1.
+    int gearboxRatioNumerator() const;
+    int gearboxRatioDenominator() const;
+    float leadscrewPitchMm() const; //mm per turn
+    int jogSpeed() const; //mm/s
+    int leadscrewAcceleration() const; //mm/s2
+    int leadscrewMaxSpeed() const; // mm/s
+    uint8_t theme() const;
+    DroDatumPreference droDatum() const;
 
-    float leadscrewStepsPerMm();
-    float jogSpeedPps();
-    float leadscrewMaxSpeedPps();
-    float accellerationPulseSec();
-    float leadscrewInitialPulseDelay();
-    float gearboxRatio();
-    int dirRight();
-    int dirLeft();
+    float leadscrewStepsPerMm() const;
+    float jogSpeedPps() const;
+    float leadscrewMaxSpeedPps() const;
+    float accellerationPulseSec() const;
+    float leadscrewInitialPulseDelay() const;
+    float gearboxRatio() const;
+    int dirRight() const;
+    int dirLeft() const;
 
 };
 

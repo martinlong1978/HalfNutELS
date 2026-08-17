@@ -281,6 +281,52 @@ void setValues() {
 
 }
 
+// Persist lathe settings written from the DEVICE itself (theme, DRO datum -
+// see the declaration in WebSettings.h for the full rationale). Unlike
+// setValues() (posted from the web form, which already has a fresh
+// WebSettings in hand from the request body), this entry point is only ever
+// given a LatheConfig - so it must re-read the WebSettings half of the
+// shared sector itself before erasing, or a theme toggle from the device
+// would silently wipe the saved Wi-Fi SSID/password/OTA URL.
+void saveLatheSettings(LatheConfig* config) {
+    if (config == nullptr) {
+        Serial.println("saveLatheSettings: null config, aborting");
+        return;
+    }
+
+    // Read-modify-write step 1: pull the CURRENT WebSettings out of flash so
+    // they can be rewritten unchanged. getWebSettings() always returns a
+    // (heap-allocated) struct - even pre-first-run, it is just whatever
+    // bytes are presently in that sector (valid, or unconfigured/garbage
+    // with check != CHECKVALUE) - and either way, writing those same bytes
+    // back after the erase is a no-op on their meaning, so there is no need
+    // to branch on webSettings->check here.
+    WebSettings* webSettings = getWebSettings();
+
+    // This function's whole purpose is to persist `config` as the new saved
+    // lathe settings, so any call to it implies the caller wants it marked
+    // valid - there is no scenario where saveLatheSettings() should write a
+    // config that then reads back as invalid. Setting unconditionally (vs.
+    // only when unset) is behaviourally identical for this int32 field and
+    // simpler to read.
+    config->check = CHECKVALUE;
+
+    // Step 2/3: erase the shared 4 KB sector once, then rewrite BOTH structs
+    // - the preserved WebSettings and the caller's new LatheConfig - into
+    // it. Erasing without immediately rewriting both would leave a window
+    // where a reset/power-loss loses everything in the sector; there is no
+    // safer ordering available with a single-sector, erase-as-a-unit flash
+    // region.
+    ESP.flashEraseSector((NVM_Offset + address) / 4096);
+    ESP.flashWrite(NVM_Offset + address, (uint32_t*)webSettings, sizeof(WebSettings));
+    ESP.flashWrite(NVM_Offset + latheaddress, (uint32_t*)config, sizeof(LatheConfig));
+
+    // getWebSettings() hands us an owned pointer - free it rather than
+    // leaking it (see the known leak at main.cpp:124-125, which this must
+    // not replicate).
+    delete webSettings;
+}
+
 void reset() {
     ESP.restart();
 }

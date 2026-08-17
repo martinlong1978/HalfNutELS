@@ -17,37 +17,37 @@ LatheConfigDerived::LatheConfigDerived(LatheConfig* config) {
 }
 
 
-int   LatheConfigDerived::spindleEncoderPpr() {
+int   LatheConfigDerived::spindleEncoderPpr() const {
     return config->spindleEncoderPpr;
 }
-int   LatheConfigDerived::stepperPpr() {
+int   LatheConfigDerived::stepperPpr() const {
     return config->stepperPpr;
 }
-bool  LatheConfigDerived::invertDirection() {
+bool  LatheConfigDerived::invertDirection() const {
     return config->invertDirection;
 }
-int   LatheConfigDerived::gearboxRatioNumerator() {
+int   LatheConfigDerived::gearboxRatioNumerator() const {
     return config->gearboxRatioNumerator;
 }
-int   LatheConfigDerived::gearboxRatioDenominator() {
+int   LatheConfigDerived::gearboxRatioDenominator() const {
     return config->gearboxRatioDenominator;
 }
-float LatheConfigDerived::leadscrewPitchMm() {
+float LatheConfigDerived::leadscrewPitchMm() const {
     return config->leadscrewPitchMm;
 }
-int   LatheConfigDerived::jogSpeed() {
+int   LatheConfigDerived::jogSpeed() const {
     return config->jogSpeed;
 }
-int   LatheConfigDerived::leadscrewAcceleration() {
+int   LatheConfigDerived::leadscrewAcceleration() const {
     return config->leadscrewAcceleration;
 }
-int   LatheConfigDerived::leadscrewMaxSpeed() {
+int   LatheConfigDerived::leadscrewMaxSpeed() const {
     return config->leadscrewMaxSpeed;
 }
-uint8_t LatheConfigDerived::theme() {
+uint8_t LatheConfigDerived::theme() const {
     return config->theme;
 }
-DroDatumPreference LatheConfigDerived::droDatum() {
+DroDatumPreference LatheConfigDerived::droDatum() const {
     return toDroDatumPreference(config->droDatum);
 }
 
@@ -72,19 +72,19 @@ uint8_t fromDroDatumPreference(DroDatumPreference pref) {
 }
 
 // steps per mm of leadscrew travel = (motor steps per leadscrew turn) / (mm per leadscrew turn)
-float LatheConfigDerived::leadscrewStepsPerMm() { return m_leadscrewStepsPerMm; }
+float LatheConfigDerived::leadscrewStepsPerMm() const { return m_leadscrewStepsPerMm; }
 
-float LatheConfigDerived::jogSpeedPps() { return m_jogSpeedPps; }
+float LatheConfigDerived::jogSpeedPps() const { return m_jogSpeedPps; }
 
-float LatheConfigDerived::leadscrewMaxSpeedPps() { return m_leadscrewMaxSpeedPps; }
+float LatheConfigDerived::leadscrewMaxSpeedPps() const { return m_leadscrewMaxSpeedPps; }
 
-float LatheConfigDerived::accellerationPulseSec() { return m_accellerationPulseSec; }
+float LatheConfigDerived::accellerationPulseSec() const { return m_accellerationPulseSec; }
 
-float LatheConfigDerived::leadscrewInitialPulseDelay() { return m_leadscrewInitialPulseDelay; }
+float LatheConfigDerived::leadscrewInitialPulseDelay() const { return m_leadscrewInitialPulseDelay; }
 
-float LatheConfigDerived::gearboxRatio() { return m_gearboxRatio; }
+float LatheConfigDerived::gearboxRatio() const { return m_gearboxRatio; }
 
-int LatheConfigDerived::dirRight() { return m_dirRight; }
-int LatheConfigDerived::dirLeft() { return m_dirLeft; }
+int LatheConfigDerived::dirRight() const { return m_dirRight; }
+int LatheConfigDerived::dirLeft() const { return m_dirLeft; }
 
 
