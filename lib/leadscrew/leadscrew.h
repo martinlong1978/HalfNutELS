@@ -157,6 +157,23 @@ public:
    * more arm on the switch that already selects the anchor's carriage position.
    */
   void setSyncPoint();
+
+  /**
+   * Which anchor the helix is currently pinned to, for the Diagnostics screen.
+   *
+   * GlobalThreadSyncState only says synced / not synced; this says WHERE the
+   * anchor came from — a stop (LEFT/RIGHT), an explicit setSyncPoint() (MANUAL),
+   * or nothing yet (UNSET). Nothing else in the system exposes it, so a thread
+   * that will not pick up looks identical on screen to one that will.
+   *
+   * Read-only, and read from the DisplayTask; the SpindleTask is the only
+   * writer. A single aligned enum read, so no lock (see CLAUDE.md, cross-task
+   * state) — and it is not called from update().
+   */
+  LeadscrewSpindleSyncPositionState getSyncAnchorState() const {
+    return m_stopSync.syncPositionState;
+  }
+
   LeadscrewStopState getStopPositionState(LeadscrewStopPosition position);
   void unsetStopPosition(LeadscrewStopPosition position);
   int getStopPosition(LeadscrewStopPosition position);
