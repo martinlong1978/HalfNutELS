@@ -47,6 +47,8 @@ struct UiContext {
   bool leftStopSet;
   bool rightStopSet;
   bool motionEnabled;   // true when the leadscrew is engaged (MM_ENABLED)
+  bool motionActive;   // the carriage is under power right now:
+                       // motionMode is neither MM_DISABLED nor MM_UNSET
 };
 
 class UiState {

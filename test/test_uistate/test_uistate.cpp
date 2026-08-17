@@ -81,11 +81,13 @@ namespace {
 const unsigned long kTimeout = UiState::kFocusTimeoutMs;
 const int kMenuItems = UiState::kMenuItemCount;
 
-UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false) {
+UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false,
+              bool motionActive = false) {
   UiContext c;
   c.leftStopSet = leftStopSet;
   c.rightStopSet = rightStopSet;
   c.motionEnabled = motionEnabled;
+  c.motionActive = motionActive;
   return c;
 }
 
@@ -361,6 +363,74 @@ TEST(UiStateJog, ArrowsDoNotChangeFocus) {
   EXPECT_EQ(UiFocus::Jog, r.focus());
   r.key(UiKey::Right, UiKeyEvent::Press, kNoStops);
   EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenIfMotionBecameActive) {
+  // The new ctx.motionActive field (D2 fix) must not open a new hole in the
+  // dead-man terminator, the same way ctx.motionEnabled did before D2's own
+  // review pass (see ReleaseAlwaysStopsAnInFlightJogEvenIfMotionBecameEnabled
+  // above).
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Left, UiKeyEvent::Release,
+                  ctx(false, false, /*motionEnabled=*/false, /*motionActive=*/true)));
+}
+
+// ---------------------------------------------------------------------------
+// Defect 2 (FS-D2 review, HIGH): m_runToStopDir is UiState's own duplicate of
+// "a powered run is in flight", set on the click that starts a run and (pre-
+// D2) cleared only by an arrow gesture or HALT. But a run also ends BY ITSELF
+// when the carriage reaches the stop, and nothing told UiState. So the first
+// arrow click after any naturally-completed run used to return CancelMotion
+// instead of starting the next run, and the click was silently eaten - run
+// left to the stop, click ▶ to come back, nothing happens, click again.
+//
+// The fix reconciles the latch against ctx.motionActive: whenever the caller
+// reports motionActive false, the latch is cleared, so a naturally-completed
+// run leaves no stale state and the very next arrow click starts a fresh run.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateJog, NaturallyCompletedLeftRunStartsAFreshRunOnTheNextClick) {
+  Rig r;
+  // The run starts, and motionActive is (or becomes) true while it is
+  // genuinely in flight.
+  UiContext running = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+
+  // The carriage reaches the stop on its own - no key event from the
+  // operator - and the next context the display hands to UiState reflects
+  // that motion is no longer active.
+  UiContext idle = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/false);
+
+  // The very next arrow click must start a fresh run, NOT cancel a stale one.
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
+}
+
+TEST(UiStateJog, NaturallyCompletedRightRunStartsAFreshRunOnTheNextClick) {
+  Rig r;
+  UiContext running = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, running));
+  UiContext idle = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/false);
+  EXPECT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, idle));
+}
+
+TEST(UiStateJog, InFlightRunStillCancelsOnTheNextClick) {
+  // Control for the reconciliation fix above: while motionActive genuinely
+  // stays true (the run has not completed), the existing cancel-on-second-
+  // click behaviour (spec §7) must be unchanged - the reconciliation must not
+  // make every powered run uncancellable.
+  Rig r;
+  UiContext running = ctx(true, false, /*motionEnabled=*/false, /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+  EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, running));
+}
+
+TEST(UiStateJog, InFlightRightRunStillCancelsOnTheNextClick) {
+  Rig r;
+  UiContext running = ctx(false, true, /*motionEnabled=*/false, /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToRightStop, r.click(UiKey::Right, running));
+  EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Right, running));
 }
 
 // ===========================================================================
@@ -693,6 +763,113 @@ TEST(UiStateStops, TheStopsWidgetStillOpensWhileMotionEnabled) {
   // mid-cut. The widget must still take focus and still time out normally.
   Rig r;
   UiContext c = ctx(true, true, /*motionEnabled=*/true);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+  r.advance(kTimeout);
+  EXPECT_TRUE(r.tick());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+// ---------------------------------------------------------------------------
+// Defect 1 (FS-D2 review, CRITICAL): ctx.motionEnabled means MM_ENABLED only.
+// A powered run-to-stop is MM_JOG_LEFT/MM_JOG_RIGHT, so motionEnabled is FALSE
+// for the whole run - the block above does not cover it. Three ordinary
+// keypresses (click an arrow to start a run-to-stop, press STOPS, hold the
+// same arrow) would otherwise clear the stop the carriage is travelling
+// towards while it is still under power; hitLeftEndstop() is the SOLE arrest
+// for that run (leadscrew.cpp:233) and unsetStop sets the position to
+// INT32_MIN, so the run would never terminate. ctx.motionActive is the
+// broader "something is moving under power right now" signal (engaged feed,
+// powered run-to-stop, interactive jog, deceleration) and must gate stop
+// edits the same way motionEnabled does.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateStops, ClickDoesNotSetAStopWhileMotionActive) {
+  // The powered-run case: motionEnabled is false (it is a JOG mode, not
+  // ENABLED) but motionActive is true. This is the crash bug - without the
+  // gate, this click clears/sets a stop while the carriage runs toward it.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    Rig r;
+    UiContext c = ctx(false, false, /*motionEnabled=*/false, /*motionActive=*/true);
+    r.click(UiKey::Stops, c);
+    ASSERT_EQ(UiFocus::Stops, r.focus());
+    EXPECT_EQ(UiIntent::None, r.click(k, c))
+        << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
+  }
+}
+
+TEST(UiStateStops, HoldDoesNotClearAStopWhileMotionActive) {
+  // The dangerous half, during a powered run: clearing the stop the carriage
+  // is travelling towards deletes the only thing that arrests it.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    Rig r;
+    UiContext c = ctx(true, true, /*motionEnabled=*/false, /*motionActive=*/true);
+    r.click(UiKey::Stops, c);
+    ASSERT_EQ(UiFocus::Stops, r.focus());
+    EXPECT_EQ(UiIntent::None, r.hold(k, c))
+        << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
+  }
+}
+
+TEST(UiStateStops, NoStopEditIsPossibleWhileMotionActive) {
+  // Exhaustive: every arrow, every event, every stop state, motionActive true
+  // and motionEnabled explicitly false throughout - this is the case the
+  // pre-D2 gate (`if (ctx.motionEnabled)`) completely misses.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  const UiKeyEvent events[] = {UiKeyEvent::Press, UiKeyEvent::Release,
+                               UiKeyEvent::Click, UiKeyEvent::Hold};
+  const bool stopStates[] = {false, true};
+  for (UiKey k : arrows) {
+    for (bool ls : stopStates) {
+      for (bool rs : stopStates) {
+        for (UiKeyEvent ev : events) {
+          Rig r;
+          UiContext c = ctx(ls, rs, /*motionEnabled=*/false, /*motionActive=*/true);
+          r.click(UiKey::Stops, c);
+          ASSERT_EQ(UiFocus::Stops, r.focus());
+          EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
+              << "arrow=" << (k == UiKey::Left ? "Left" : "Right")
+              << " event=" << ev << " left=" << ls << " right=" << rs;
+        }
+      }
+    }
+  }
+}
+
+TEST(UiStateStops, TheMotionActiveInhibitLiftsWhenBothFlagsAreFalse) {
+  // The control: with motionEnabled AND motionActive both false, the exact
+  // same gestures that were just proven inert above must still work. Without
+  // this, the tests above would pass on a state machine that had simply
+  // broken STOPS outright rather than correctly gating it.
+  const UiContext atRest = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/false);
+  const UiContext atRestSet = ctx(true, true, /*motionEnabled=*/false,
+                                  /*motionActive=*/false);
+
+  Rig setL;
+  setL.click(UiKey::Stops, atRest);
+  EXPECT_EQ(UiIntent::SetLeftStop, setL.click(UiKey::Left, atRest));
+
+  Rig setR;
+  setR.click(UiKey::Stops, atRest);
+  EXPECT_EQ(UiIntent::SetRightStop, setR.click(UiKey::Right, atRest));
+
+  Rig clearL;
+  clearL.click(UiKey::Stops, atRestSet);
+  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.hold(UiKey::Left, atRestSet));
+
+  Rig clearR;
+  clearR.click(UiKey::Stops, atRestSet);
+  EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, atRestSet));
+}
+
+TEST(UiStateStops, TheStopsWidgetStillOpensWhileMotionActive) {
+  // As with motionEnabled, only the edits are inhibited, not the view: the
+  // travel bar is exactly what you want on screen during a powered run.
+  Rig r;
+  UiContext c = ctx(true, true, /*motionEnabled=*/false, /*motionActive=*/true);
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
   EXPECT_EQ(UiFocus::Stops, r.focus());
   r.advance(kTimeout);
