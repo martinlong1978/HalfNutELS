@@ -105,15 +105,41 @@ private:
   // required
   volatile int m_resyncPulseCount;
 
+  // Per-(unit, mode-type) remembered pitch-select index, per
+  // docs/ux-redesign.md Sec. 4 ("MODE"): four independent slots so switching
+  // feed mode / unit restores the last index used for that slot instead of
+  // resetting to the default. Indexed [unit][isThread]; FM_THREAD_REVERSE
+  // shares the "thread" slot for the current unit (same pitch tables).
+  // Read/written from both RTOS tasks (via setFeedSelect/getFeedSelect
+  // callers on each side), so volatile like the other cross-task scalars.
+  volatile int m_pitchMemory[2][2];
+
+  static int pitchMemoryUnitIndex(GlobalUnitMode unit) {
+    return unit == METRIC ? 0 : 1;
+  }
+  static int pitchMemoryTypeIndex(GlobalFeedMode mode) {
+    return (mode == FM_THREAD || mode == FM_THREAD_REVERSE) ? 1 : 0;
+  }
+
   GlobalState() {
-    setUnitMode(DEFAULT_UNIT_MODE);
+    // Order matters: m_feedMode and m_unitMode must be valid before any call
+    // that reads them (getCurrentFeedSelectArraySize(), pitchMemory index
+    // helpers), and m_pitchMemory must be initialised before setFeedSelect()
+    // writes back into it.
+    m_feedMode = DEFAULT_FEED_MODE;
+    m_unitMode = DEFAULT_UNIT_MODE;
+
+    m_pitchMemory[pitchMemoryUnitIndex(METRIC)][0] = DEFAULT_METRIC_FEED_PITCH_IDX;
+    m_pitchMemory[pitchMemoryUnitIndex(METRIC)][1] = DEFAULT_METRIC_THREAD_PITCH_IDX;
+    m_pitchMemory[pitchMemoryUnitIndex(IMPERIAL)][0] = DEFAULT_IMPERIAL_FEED_PITCH_IDX;
+    m_pitchMemory[pitchMemoryUnitIndex(IMPERIAL)][1] = DEFAULT_IMPERIAL_THREAD_PITCH_IDX;
+
     setButtonLock(LK_LOCKED);
-    setFeedSelect(-1);
+    setFeedSelect(DEFAULT_METRIC_FEED_PITCH_IDX);
     setThreadSyncState(SS_UNSYNC);
     m_motionMode = MM_DISABLED;
     m_resyncPulseCount = 0;
     m_jogSpeed = 5;
-    m_feedMode = DEFAULT_FEED_MODE;
   }
 
 public:

@@ -151,50 +151,47 @@ TEST(FeedMode, PrevFeedPitchClampsAtBottomWithoutWrapping) {
   EXPECT_EQ(gs->getFeedSelect(), 0);
 }
 
-// Exercises today's (soon to be deleted) FM_JOG special-case inside
-// next/prevFeedPitch(). It is only reachable because IncFeedMode()'s CURRENT
-// cycle still includes FM_JOG (see FeedMode.CycleNeverReachesJog above, which
-// pins the fix that removes it). Once IncFeedMode() no longer cycles through
-// FM_JOG, the ASSERT_EQ(..., FM_JOG) precondition below can never be
-// satisfied via the public API any more, and this test should be deleted
-// alongside the FM_JOG dispatch in next/prevFeedPitch() - at that point
-// "regardless of feed mode" is fully covered by exercising the three
-// remaining reachable modes (FM_FEED/FM_THREAD/FM_THREAD_REVERSE), which is
-// already what every other test in this file does.
-TEST(FeedMode, NextPrevFeedPitchIgnoreJogSpeedEvenInJogMode) {
+// FeedMode.NextPrevFeedPitchIgnoreJogSpeedEvenInJogMode used to live here. It
+// reached FM_JOG by cycling IncFeedMode() around the old 4-way cycle and then
+// asserted getFeedMode() == FM_JOG as a precondition. Once FM_JOG left the
+// mode cycle (see CycleNeverReachesJog above), FM_JOG became unreachable via
+// the public API - GlobalState has no setFeedMode() - so that precondition
+// can never be satisfied again. Deleted rather than left as a permanently
+// failing trap; do not re-add it. The FM_JOG dispatch it exercised inside
+// next/prevFeedPitch() is gone too, for the same reason (dead code, provably
+// unreachable). The still-meaningful half of the old test - that
+// next/prevFeedPitch() return the NEW index and never touch jog speed -
+// survives below, exercised over the modes that remain reachable.
+TEST(FeedMode, NextPrevFeedPitchReturnNewIndexAndLeaveJogSpeedAlone) {
   GlobalState* gs = GlobalState::getInstance();
   gs->setUnitMode(METRIC);
 
-  // Reach FM_JOG via today's cycle: FEED -> THREAD -> THREAD_REVERSE -> JOG.
-  toFeed(gs);
-  gs->IncFeedMode();
-  gs->IncFeedMode();
-  gs->IncFeedMode();
-  ASSERT_EQ(gs->getFeedMode(), FM_JOG);
+  for (GlobalFeedMode mode : {FM_FEED, FM_THREAD}) {
+    toMode(gs, mode);
+    ASSERT_EQ(gs->getFeedMode(), mode);
 
-  // Make sure the pitch index has room to move in both directions.
-  gs->setFeedSelect(1);
-  int pitchIdxBefore = gs->getFeedSelect();
-  ASSERT_EQ(pitchIdxBefore, 1);
-  int jogIdxBefore = gs->getJogIndex();
+    // Make sure the pitch index has room to move in both directions.
+    gs->setFeedSelect(1);
+    int pitchIdxBefore = gs->getFeedSelect();
+    ASSERT_EQ(pitchIdxBefore, 1);
+    int jogIdxBefore = gs->getJogIndex();
 
-  int returned = gs->nextFeedPitch();
-  EXPECT_EQ(gs->getJogIndex(), jogIdxBefore)
-      << "nextFeedPitch() must not change jog speed, even while feed mode is "
-         "JOG";
-  EXPECT_EQ(returned, pitchIdxBefore + 1)
-      << "nextFeedPitch() must return the NEW pitch index";
-  EXPECT_EQ(gs->getFeedSelect(), pitchIdxBefore + 1);
+    int returned = gs->nextFeedPitch();
+    EXPECT_EQ(gs->getJogIndex(), jogIdxBefore)
+        << "nextFeedPitch() must not change jog speed";
+    EXPECT_EQ(returned, pitchIdxBefore + 1)
+        << "nextFeedPitch() must return the NEW pitch index";
+    EXPECT_EQ(gs->getFeedSelect(), pitchIdxBefore + 1);
 
-  int pitchIdxNow = gs->getFeedSelect();
-  int jogIdxNow = gs->getJogIndex();
-  int returned2 = gs->prevFeedPitch();
-  EXPECT_EQ(gs->getJogIndex(), jogIdxNow)
-      << "prevFeedPitch() must not change jog speed, even while feed mode is "
-         "JOG";
-  EXPECT_EQ(returned2, pitchIdxNow - 1)
-      << "prevFeedPitch() must return the NEW pitch index";
-  EXPECT_EQ(gs->getFeedSelect(), pitchIdxNow - 1);
+    int pitchIdxNow = gs->getFeedSelect();
+    int jogIdxNow = gs->getJogIndex();
+    int returned2 = gs->prevFeedPitch();
+    EXPECT_EQ(gs->getJogIndex(), jogIdxNow)
+        << "prevFeedPitch() must not change jog speed";
+    EXPECT_EQ(returned2, pitchIdxNow - 1)
+        << "prevFeedPitch() must return the NEW pitch index";
+    EXPECT_EQ(gs->getFeedSelect(), pitchIdxNow - 1);
+  }
 }
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.

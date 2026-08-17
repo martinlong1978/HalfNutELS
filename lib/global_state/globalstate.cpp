@@ -52,6 +52,9 @@ void GlobalState::IncFeedMode() {
   switch (m_feedMode) {
   case FM_UNSET:
   case FM_JOG:
+    // FM_JOG is no longer produced by this cycle (docs/ux-redesign.md Sec.
+    // 3: "FM_JOG disappears from the mode cycle"); this branch only exists
+    // as a defensive fallback for FM_UNSET/leftover FM_JOG state.
     m_feedMode = FM_FEED;
     break;
   case FM_FEED:
@@ -61,13 +64,14 @@ void GlobalState::IncFeedMode() {
     m_feedMode = FM_THREAD_REVERSE;
     break;
   case FM_THREAD_REVERSE:
-    m_feedMode = FM_JOG;
+    m_feedMode = FM_FEED;
     break;
   }
 
-  // when switching feed modes ensure that the default for the next mode is
-  // selected via setFeedSelect - depends on the fallback in the function
-  setFeedSelect(-1);
+  // Restore the remembered pitch index for this (unit, mode-type) slot
+  // instead of resetting to the mode/unit default every time.
+  setFeedSelect(
+      m_pitchMemory[pitchMemoryUnitIndex(m_unitMode)][pitchMemoryTypeIndex(m_feedMode)]);
 }
 
 GlobalFeedMode GlobalState::getFeedMode() { return m_feedMode; }
@@ -81,7 +85,7 @@ int GlobalState::getJogIndex() {
 }
 
 void GlobalState::incJogSpeed() {
-  m_jogSpeed = min(5, m_jogSpeed + 1);
+  m_jogSpeed = min((int)ARRAY_SIZE(jogSpeeds) - 1, m_jogSpeed + 1);
 }
 void GlobalState::decJogSpeed() {
   m_jogSpeed = max(0, m_jogSpeed - 1);
@@ -132,6 +136,11 @@ void GlobalState::setFeedSelect(int select) {
       }
     }
   }
+
+  // Keep this (unit, mode-type) slot's remembered index in sync so a later
+  // mode/unit switch back to it restores what was just set here.
+  m_pitchMemory[pitchMemoryUnitIndex(m_unitMode)][pitchMemoryTypeIndex(m_feedMode)] =
+      m_feedSelect;
 }
 
 float GlobalState::getCurrentFeedPitch() {
@@ -156,9 +165,7 @@ float GlobalState::getCurrentFeedPitch() {
 }
 
 int GlobalState::nextFeedPitch() {
-  if (m_feedMode == FM_JOG) {
-    incJogSpeed();
-  } else   if (m_feedSelect != getCurrentFeedSelectArraySize() - 1) {
+  if (m_feedSelect != getCurrentFeedSelectArraySize() - 1) {
     setFeedSelect(m_feedSelect + 1);
   }
 
@@ -166,9 +173,7 @@ int GlobalState::nextFeedPitch() {
 }
 
 int GlobalState::prevFeedPitch() {
-  if (m_feedMode == FM_JOG) {
-    decJogSpeed();
-  } else if (m_feedSelect != 0) {
+  if (m_feedSelect != 0) {
     setFeedSelect(m_feedSelect - 1);
   }
 
@@ -179,7 +184,15 @@ void GlobalState::setMotionMode(GlobalMotionMode mode) { m_motionMode = mode; }
 
 GlobalMotionMode GlobalState::getMotionMode() { return m_motionMode; }
 
-void GlobalState::setUnitMode(GlobalUnitMode mode) { m_unitMode = mode; }
+void GlobalState::setUnitMode(GlobalUnitMode mode) {
+  m_unitMode = mode;
+  // Restore the remembered pitch index for the newly-selected unit's slot
+  // (same mode-type), bounds-checked by setFeedSelect() against the array
+  // for the new unit - keeps getFeedSelect()/getCurrentFeedPitch() sane
+  // regardless of pitch-table sizes.
+  setFeedSelect(
+      m_pitchMemory[pitchMemoryUnitIndex(m_unitMode)][pitchMemoryTypeIndex(m_feedMode)]);
+}
 
 GlobalUnitMode GlobalState::getUnitMode() { return m_unitMode; }
 
