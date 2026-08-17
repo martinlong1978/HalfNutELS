@@ -447,6 +447,44 @@ TEST_F(SyncPointTest, HelixSurvivesDisengagementAndAFractionalTurn) {
   }
 }
 
+// The same, for a LEFT-HAND / reverse thread (negative pitch, hence a negative
+// ratio and a negative divisor in the gate's phase computation).
+//
+// ReverseThreadCarriageReturnsEveryWholePitch above does NOT cover this: it
+// never disengages, so - exactly as the file header warns - it only exercises
+// the relative feed and cannot tell a correct anchor from a wrong one. (Proved
+// by mutation: inverting the sign of the MANUAL arm leaves that test green.)
+// Since a negative ratio is the case most likely to be subtly wrong in the sign
+// or origin of the anchor, it needs a test that actually gates on the anchor.
+TEST_F(SyncPointTest, ReverseThreadHelixSurvivesDisengagement) {
+  const double ratio = ratioFor(-kPitchMm);
+  const int L0 = -300;
+
+  for (int pps : kSpeeds) {
+    buildRig();
+    ls->setTargetPitchMM(-kPitchMm);
+    placeCarriage(L0);
+    turnSpindleToPhase(500, pps);
+    const int phi0 = spindle->getCurrentPosition();
+    ls->setSyncPoint();
+    ASSERT_EQ(gs->getThreadSyncState(), GlobalThreadSyncState::SS_SYNC);
+
+    gs->setMotionMode(GlobalMotionMode::MM_ENABLED);
+    driveSpindle(2 * encoderPPR(), pps);  // cut a pass
+    settle();
+
+    disengageAndReEngage(/*spindleOffset=*/137,
+                         /*spindlePulses=*/3 * encoderPPR(), pps);
+
+    EXPECT_NEAR(helixErrorPulses(ls->getCurrentPosition(),
+                                 spindle->getCurrentPosition(), L0, phi0, ratio,
+                                 encoderPPR()),
+                0.0, kHelixTol)
+        << "left-hand thread re-engaged onto a DIFFERENT helix at " << pps
+        << " PPS";
+  }
+}
+
 // A sync taken with the spindle dead stopped must still hold once it spins up:
 // the anchor is an angle + a position, not anything speed-derived.
 TEST_F(SyncPointTest, SyncTakenAtRestHoldsOnceTheSpindleSpinsUp) {
@@ -734,6 +772,79 @@ TEST_F(SyncPointTest, ExplicitSyncSurvivesClearingTheLastStop) {
               0.0, kHelixTol)
       << "clearing the last stop dropped the explicit sync anchor - the phase "
       << "gate is gone and the tool re-engaged at an arbitrary angle";
+}
+
+// ---------------------------------------------------------------------------
+// Taking a sync while the re-sync gate is HOLDING the axis.
+//
+// This is the case that makes setSyncPoint() unable to raise SS_SYNC itself.
+// While the gate holds (syncArmed() && SS_UNSYNC) update() keeps accumulating
+// spindle motion into m_expectedPosition with the carriage frozen, so the
+// following error grows - up to a whole pitch over one spindle revolution.
+// Firing the gate is what DISCARDS that accumulation. Anything that flags the
+// thread synced without going through the gate releases the axis with the error
+// still in it, and it closes that error at maximum speed: a lurch of up to
+// 1.27 mm straight into the work.
+// ---------------------------------------------------------------------------
+
+TEST_F(SyncPointTest, SyncTakenWhileTheGateIsHoldingDoesNotLurch) {
+  const double ratio = ratioFor(kPitchMm);
+  const int L0 = 0;
+
+  for (int pps : kSpeeds) {
+    buildRig();
+    placeCarriage(L0);
+    turnSpindleToPhase(0, pps);
+    ls->setSyncPoint();
+
+    // Disengage, come to rest, then take the spindle half a revolution off the
+    // sync angle so the carriage at L0 is decidedly NOT on the anchored helix.
+    gs->setMotionMode(GlobalMotionMode::MM_DISABLED);
+    settle();
+    driveSpindle(encoderPPR() / 2, pps);
+    ASSERT_EQ(gs->getThreadSyncState(), GlobalThreadSyncState::SS_UNSYNC);
+    const int frozenAt = ls->getCurrentPosition();
+    ASSERT_EQ(frozenAt, L0);
+
+    // Engage. The gate must hold the axis while the spindle closes on the sync
+    // angle - and while it holds, m_expectedPosition silently runs away from the
+    // frozen carriage. A quarter revolution is short enough to stay clear of the
+    // point at which the gate fires of its own accord: it fires EARLY, by the
+    // acceleration lead pulsesToTargetSpeed, and that lead grows with speed.
+    gs->setMotionMode(GlobalMotionMode::MM_ENABLED);
+    driveSpindle(encoderPPR() / 4, pps);
+    ASSERT_EQ(ls->getCurrentPosition(), frozenAt)
+        << "the gate did not hold the axis at " << pps << " PPS";
+    ASSERT_EQ(gs->getThreadSyncState(), GlobalThreadSyncState::SS_UNSYNC);
+    ASSERT_GT(std::fabs(ls->getPositionError()), 100.0f)
+        << "test setup: no following error accumulated, so this test would "
+           "pass vacuously";
+
+    // The operator declares sync HERE. The carriage has not moved and is, by
+    // that declaration, in the groove - so it must STAY WHERE IT IS. The
+    // accumulated error is not travel that is owed to anybody; it is the
+    // bookkeeping of a hold, and declaring sync must discard it.
+    const int phi0 = spindle->getCurrentPosition();
+    ls->setSyncPoint();
+    settle();
+
+    EXPECT_NEAR(ls->getCurrentPosition(), frozenAt, kTravelTol)
+        << "the carriage lurched " << (ls->getCurrentPosition() - frozenAt)
+        << " pulses when sync was taken at " << pps << " PPS - the following "
+        << "error accumulated while the gate was holding was never discarded";
+    EXPECT_EQ(gs->getThreadSyncState(), GlobalThreadSyncState::SS_SYNC)
+        << "the gate did not pick up the freshly declared anchor";
+
+    // And the anchor that took effect is the declared one: cut on, and the tool
+    // must ride the helix through (frozenAt, phi0).
+    driveSpindle(3 * encoderPPR(), pps);
+    settle();
+    EXPECT_NEAR(helixErrorPulses(ls->getCurrentPosition(),
+                                 spindle->getCurrentPosition(), frozenAt, phi0,
+                                 ratio, encoderPPR()),
+                0.0, kHelixTol)
+        << "not on the helix declared mid-hold at " << pps << " PPS";
+  }
 }
 
 }  // namespace

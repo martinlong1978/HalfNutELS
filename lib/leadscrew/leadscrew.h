@@ -104,7 +104,11 @@ public:
    *    the caller must not be able to sample the two coordinates separately (or
    *    at a different time) and hand in a skewed pair.
    *  - sets GlobalThreadSyncState to SS_SYNC (at the instant of the call the
-   *    carriage is on the helix by definition).
+   *    carriage is on the helix by definition), and zeroes the following error
+   *    first. Raising SS_SYNC is what releases update()'s re-sync gate, and the
+   *    error accumulated while that gate was holding the axis must be discarded
+   *    in the same breath or the carriage lurches up to a whole pitch to close
+   *    it. Full reasoning at the definition in leadscrew.cpp.
    *  - works with NO stops set, and must not create, move or clear either stop.
    *  - the anchor it records is its OWN (carriage, spindle-phase) pair, not a
    *    stop-derived one, so it must survive setStop()/unsetStop() untouched -
