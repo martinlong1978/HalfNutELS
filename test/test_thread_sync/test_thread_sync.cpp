@@ -505,6 +505,87 @@ class ArrestedThreadTest : public ThreadSyncTest {
     return fabsf(ratioFor(pitch)) * (float)encoderPPR();
   }
 
+  // Pump update() with the spindle DEAD STILL for `microseconds` of virtual
+  // time, and return how long the commanded leadscrew speed took to reach zero
+  // (0 if it was already there, the full window if it never did).
+  //
+  // Deliberately not settle(): settle() returns as soon as the carriage
+  // position stops changing, which is true from the first iteration here - the
+  // whole point is that nothing moves while an internal state variable is
+  // supposed to be running down.
+  uint64_t idleForMeasuringRunDown(uint64_t microseconds) {
+    uint64_t runDown = 0;
+    for (uint64_t t = 0; t < microseconds; t += kDt) {
+      advanceMockMicros(kDt);
+      ls->update();
+      if (ls->getLeadscrewSpeedPulsesPerSecond() > 0) runDown = t + kDt;
+    }
+    return runDown;
+  }
+
+  // The operator arrests on a stop and then switches the lathe OFF. Nothing
+  // rotates again; only time passes. The acceleration planner's commanded speed
+  // must run down to a hard zero.
+  //
+  // It did not: the arrest publishes MM_DISABLED + SS_UNSYNC together, the
+  // re-sync gate's short-circuit return then skips sendPulse(), and
+  // m_leadscrewSpeed used to be decayed ONLY inside sendPulse()'s if-body. With
+  // the spindle stopped the re-sync search can never fire (it needs the spindle
+  // to turn the phase onto the anchor), so the residual speed the arrest left
+  // behind was frozen for ever - measured 0 / 6.9 / 142.5 PPS at 300 / 1200 /
+  // 3000 PPS spindle, still present after 20 s of idle.
+  //
+  // Consequences: the next jog starts part-way up the ramp instead of from
+  // rest, and getStoppingDistanceInPulses() (quadratic in this value) plans a
+  // stopping distance for motion that is not happening.
+  void runSpeedRunsDownAfterArrest(float pitch, LeadscrewStopPosition stop,
+                                   const char *tag) {
+    for (size_t i = 0; i < std::size(kSpeeds); ++i) {
+      const int pps = kSpeeds[i];
+      buildRig();
+      ls->setTargetPitchMM(pitch);
+      // Anchor at the stop and LEAVE IT SET, so syncArmed() is still true when
+      // the arrest raises SS_UNSYNC - that pair is what holds the gate.
+      establishSyncAt(stop);
+
+      gs->setMotionMode(GlobalMotionMode::MM_ENABLED);
+      driveSpindle(+6000, pps);  // thread OUT, away from the sync stop
+      settle();
+      ASSERT_TRUE(driveUntilArrest(pps))
+          << tag << ": endstop did not arrest the thread at speed " << pps;
+
+      const float speedAtArrest = ls->getLeadscrewSpeedPulsesPerSecond();
+
+      // Lathe off. 20 s of virtual time, not one encoder count.
+      const uint64_t runDownMicros = idleForMeasuringRunDown(20ull * 1000000ull);
+
+      const float speedAfterIdle = ls->getLeadscrewSpeedPulsesPerSecond();
+      // NB: no "[ ... ]" prefix - PlatformIO's googletest output parser treats
+      // a leading bracketed word as a test status and aborts the run.
+      std::printf(
+          "MEASURE %-9s pitch %+.2f mm, spindle %4d PPS: leadscrew speed at "
+          "arrest %8.3f PPS, after 20 s idle %8.3f PPS (ran down in %.1f ms)\n",
+          tag, pitch, pps, speedAtArrest, speedAfterIdle,
+          (double)runDownMicros / 1000.0);
+
+      EXPECT_FLOAT_EQ(speedAfterIdle, 0.0f)
+          << tag << ": leadscrew speed frozen at " << speedAfterIdle
+          << " PPS twenty seconds after the arrest at spindle speed " << pps
+          << " (it was " << speedAtArrest
+          << " PPS at the arrest). Nothing has turned since; the planner must "
+             "have run down to rest.";
+
+      // The axis must be genuinely at rest, not merely reporting zero speed:
+      // direction released, following error pinned, still disabled.
+      EXPECT_EQ(ls->getCurrentDirection(), LeadscrewDirection::UNKNOWN)
+          << tag << ": direction still latched at rest, speed " << pps;
+      EXPECT_NEAR(ls->getPositionError(), 0.0f, 0.001f)
+          << tag << ": following error not pinned at rest, speed " << pps;
+      EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED)
+          << tag << ": axis re-enabled itself while idle, speed " << pps;
+    }
+  }
+
   void runArrestedSpindleKeepsTurning(float pitch, LeadscrewStopPosition stop,
                                       const char *tag) {
     const float onePitch = onePitchInPulses(pitch);
@@ -582,6 +663,25 @@ TEST_F(ArrestedThreadTest, LH_SpindleKeptTurningAfterArrestDoesNotWindUpError) {
 // assertion, not the absolute bound, is the one that matters.
 TEST_F(ArrestedThreadTest, CoarsePitchArrestErrorIsBoundedByOneRevolution) {
   runArrestedSpindleKeepsTurning(1.5f, LeadscrewStopPosition::LEFT, "RH-coarse");
+}
+
+// The other half of the arrest story: the operator STOPS the lathe. Swept over
+// both hands and all three speeds because the residual speed the arrest leaves
+// is speed-dependent (it is whatever the discrete deceleration ramp had left
+// when the endstop latched), so a single speed proves nothing.
+TEST_F(ArrestedThreadTest, RH_SpeedRunsDownToZeroWhenTheSpindleStops) {
+  runSpeedRunsDownAfterArrest(0.25f, LeadscrewStopPosition::LEFT, "RH");
+}
+
+TEST_F(ArrestedThreadTest, LH_SpeedRunsDownToZeroWhenTheSpindleStops) {
+  runSpeedRunsDownAfterArrest(-0.25f, LeadscrewStopPosition::RIGHT, "LH");
+}
+
+// Coarse pitch reliably leaves a large residual (hundreds of PPS), so this is
+// the point of the sweep where a frozen speed does the most damage to the next
+// stopping-distance plan.
+TEST_F(ArrestedThreadTest, CoarsePitch_SpeedRunsDownToZeroWhenTheSpindleStops) {
+  runSpeedRunsDownAfterArrest(1.5f, LeadscrewStopPosition::LEFT, "RH-coarse");
 }
 
 }  // namespace

@@ -60,6 +60,34 @@ private:
   bool sendPulse();
   int getStoppingDistanceInPulses();
   int getTargetSpeedDistanceInPulses();
+
+  /**
+   * ONE deceleration step of the acceleration planner: the exact rule the
+   * pulse-emitting path in update() has always used, factored out so the
+   * re-sync gate's short-circuit path can run the same ramp without pretending
+   * a pulse was sent.
+   *
+   * The rule is "one decrement of accel * dt per pulse INTERVAL", with dt taken
+   * as min(m_currentPulseDelay, initialPulseDelay) - i.e. constant deceleration
+   * in real time, with the timestep capped at the slowest interval the planner
+   * ever uses so the pulse delay cannot run away as the speed approaches zero.
+   * Callers are responsible for only calling it once per m_currentPulseDelay of
+   * elapsed time (both callers gate on the same
+   * `(tm - m_lastPulseTimestamp) < m_currentPulseDelay` test), which is what
+   * makes the decay rate identical on both paths.
+   *
+   * Header-inline, no branches beyond the two clamps: this is on the core-0 hot
+   * loop.
+   */
+  inline void decelerationStep() {
+    m_leadscrewSpeed -= m_leadscrewAccel * min(m_currentPulseDelay, initialPulseDelay) / US_PER_SECOND;
+    m_leadscrewSpeed = max(m_leadscrewSpeed, (float)0);  // don't let this go below zero
+    m_currentPulseDelay = m_leadscrewSpeed == 0 ? initialPulseDelay : US_PER_SECOND / m_leadscrewSpeed;
+    if (m_currentPulseDelay > initialPulseDelay) {
+      m_currentPulseDelay = initialPulseDelay;
+    }
+  }
+
   uint64_t jogMicros;
 
   int debugPulseCount;
@@ -137,6 +165,13 @@ public:
   void update();
   float getPositionError();
   LeadscrewDirection getCurrentDirection();
+
+  // The acceleration planner's commanded speed, in leadscrew pulses/second.
+  // Read-only observation point (tests / telemetry); nothing in update() calls
+  // it. This is planner STATE, not a measurement of the motor: it is what the
+  // next jog or feed ramps from, and what getStoppingDistanceInPulses() plans
+  // against, so "the axis is at rest" must mean this is a hard zero.
+  float getLeadscrewSpeedPulsesPerSecond() const { return m_leadscrewSpeed; }
   float getEstimatedVelocityInMillimetersPerSecond();
 
   // Carriage position in millimetres, converted from getCurrentPosition()

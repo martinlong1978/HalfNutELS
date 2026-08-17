@@ -441,12 +441,61 @@ void Leadscrew::update() {
    * - Our current direction is unknown
    * - The last pulse was sent recently i.e: less than the current pulse delay
    * - the sync position was previously set and we are currently not synced with the spindle
+   *
+   * The first two arms are unchanged (same tests, same order, same cost). The
+   * third - the re-sync gate - is split out below because leaving through it
+   * must not freeze the acceleration planner.
    */
   if (m_currentDirection == LeadscrewDirection::UNKNOWN
-    || (tm - m_lastPulseTimestamp) < m_currentPulseDelay
-    || (m_stopSync.syncArmed()
-      && m_globalState->getThreadSyncState() == SS_UNSYNC
-      && !jogMode)) {
+    || (tm - m_lastPulseTimestamp) < m_currentPulseDelay) {
+    return;
+  }
+
+  /**
+   * The re-sync gate is holding the axis: the helix anchor is armed and we are
+   * out of sync, so no step may be emitted until the spindle brings the phase
+   * back round to the anchor.
+   *
+   * We are past the pulse-interval test above, so a full pulse interval of real
+   * time has elapsed. The axis is NOT moving, so the planner's commanded speed
+   * must run down exactly as it would have on the deceleration ramp - one
+   * decelerationStep() per pulse interval, the identical rule the pulse path
+   * uses (see decelerationStep() in leadscrew.h). We advance
+   * m_lastPulseTimestamp for the same reason the pulse path does: it is what
+   * paces the ramp at one step per interval. No pulse is sent and
+   * m_currentPosition is untouched - we are running the ramp down, not
+   * pretending to move.
+   *
+   * WHY THIS IS NEEDED. The endstop arrest above publishes MM_DISABLED and
+   * SS_UNSYNC together, and m_leadscrewSpeed used to decay ONLY inside
+   * `if (sendPulse())`, which this path skips. With the spindle then stopped
+   * the re-sync search never fires (it needs rotation to bring the phase onto
+   * the anchor), so whatever speed the discrete deceleration ramp had left at
+   * the arrest - measured up to ~310 PPS - stayed there indefinitely. The next
+   * jog then started part-way up the ramp instead of from rest, and
+   * getStoppingDistanceInPulses(), which is quadratic in this value, planned a
+   * stopping distance for motion that was not happening. Pinned by
+   * ArrestedThreadTest.*_SpeedRunsDownToZeroWhenTheSpindleStops.
+   *
+   * Reaching zero here is also what re-arms the MM_DISABLED/MM_DECELLERATE
+   * re-pin near the top of update() (guarded on m_leadscrewSpeed == 0), which
+   * then releases the direction latch and pins m_expectedPosition to
+   * m_currentPosition - so the axis settles properly instead of sitting with a
+   * stale following error.
+   *
+   * The `m_leadscrewSpeed > 0` guard keeps this a strict no-op once at rest:
+   * an axis already stopped behind a held gate (the ordinary "engaged, waiting
+   * for the phase to come round" case) sees exactly the old behaviour,
+   * including leaving m_lastPulseTimestamp stale so the first step after the
+   * gate fires goes out immediately.
+   */
+  if (m_stopSync.syncArmed()
+    && m_globalState->getThreadSyncState() == SS_UNSYNC
+    && !jogMode) {
+    if (m_leadscrewSpeed > 0) {
+      decelerationStep();
+      m_lastPulseTimestamp = tm;
+    }
     return;
   }
 
@@ -510,9 +559,11 @@ void Leadscrew::update() {
 
 
     if (shouldStop) {
-      m_leadscrewSpeed -= m_leadscrewAccel * min(m_currentPulseDelay, initialPulseDelay) / US_PER_SECOND;
-      m_leadscrewSpeed = max(m_leadscrewSpeed, (float)0); // don't let this go below zero 
-      m_currentPulseDelay = m_leadscrewSpeed == 0 ? initialPulseDelay : US_PER_SECOND / m_leadscrewSpeed;
+      // Same single deceleration rule the held-gate path above runs; the
+      // upper clamp it applies to m_currentPulseDelay is the one repeated at
+      // the bottom of this block, so this is behaviour-identical to the three
+      // lines it replaces.
+      decelerationStep();
     } else {
       m_leadscrewSpeed += m_leadscrewAccel * min(m_currentPulseDelay, initialPulseDelay) / US_PER_SECOND;
       m_leadscrewSpeed = min(m_leadscrewSpeed, config->leadscrewMaxSpeedPps());
