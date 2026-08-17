@@ -2,6 +2,7 @@
 
 #include <globalstate.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -120,6 +121,25 @@ bool LeadscrewStopSync::setStop(LeadscrewStopPosition position, int stopPosition
   return false;
 }
 
+/**
+ * Explicit "I am in the groove here" anchor (see Leadscrew::setSyncPoint).
+ *
+ * WRITE ORDER IS LOAD BEARING. This runs on the DisplayTask (core 1) while the
+ * SpindleTask (core 0) may be inside Leadscrew::update() reading these same
+ * fields with no lock. update() only ever looks at manualSyncPosition /
+ * spindleSyncPosition through syncPositionState, so the state enum is published
+ * LAST, after both coordinates are in memory: an observer either sees the whole
+ * previous anchor or the whole new one, never MANUAL against a half-written
+ * pair. The fence is a compiler barrier only (no instructions emitted) - it
+ * stops the compiler sinking the coordinate stores below the state store.
+ */
+void LeadscrewStopSync::setSyncPoint(int currentLeadscrewPosition, int spindlePosition) {
+  manualSyncPosition = currentLeadscrewPosition;
+  spindleSyncPosition = spindlePosition;
+  std::atomic_signal_fence(std::memory_order_release);
+  syncPositionState = LeadscrewSpindleSyncPositionState::MANUAL;
+}
+
 void Leadscrew::unsetStopPosition(LeadscrewStopPosition position) {
   m_stopSync.unsetStop(position, m_ratio, encoderPPR);
 }
@@ -138,6 +158,21 @@ void Leadscrew::setStopPosition(LeadscrewStopPosition position, int stopPosition
                          m_spindle->getCurrentPosition())) {
     m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_SYNC);
   }
+}
+
+/**
+ * Anchor the thread helix to the CURRENT carriage position and the CURRENT
+ * spindle angle. Cold path: menu action only. Contract in leadscrew.h.
+ *
+ * Both coordinates are sampled here, in one call, precisely so a caller cannot
+ * read them at two different instants and hand in a skewed pair (half a pitch of
+ * error that only shows up in the metal). No stop is created, moved or cleared.
+ * The thread is flagged synced because at this instant the carriage is on the
+ * declared helix by definition.
+ */
+void Leadscrew::setSyncPoint() {
+  m_stopSync.setSyncPoint(m_currentPosition, m_spindle->getCurrentPosition());
+  m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_SYNC);
 }
 
 LeadscrewStopState Leadscrew::getStopPositionState(LeadscrewStopPosition position) {
@@ -305,6 +340,12 @@ void Leadscrew::update() {
       break;
     case LeadscrewSpindleSyncPositionState::RIGHT:
       syncPosition = m_stopSync.rightStopPosition;
+      break;
+    case LeadscrewSpindleSyncPositionState::MANUAL:
+      // Explicit sync point: the anchor owns its carriage coordinate rather
+      // than borrowing a stop's. Must NOT fall into the UNSET arm below, which
+      // returns m_currentPosition and so has no phase gate at all.
+      syncPosition = m_stopSync.manualSyncPosition;
       break;
     case LeadscrewSpindleSyncPositionState::UNSET:  // Can we even hit this???
       // position does not matter

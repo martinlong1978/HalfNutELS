@@ -113,17 +113,18 @@ public:
    *    not apply here. An explicit user sync outranks an incidental one.
    *  - the last call wins.
    *
-   * Cold path (menu / button event only) - when implemented this belongs
-   * out-of-line in leadscrew.cpp next to setStopPosition(), NOT inline here, and
-   * must not add anything to Leadscrew::update().
+   * Implemented as a LeadscrewSpindleSyncPositionState::MANUAL anchor, which
+   * carries its own carriage coordinate (LeadscrewStopSync::manualSyncPosition)
+   * rather than borrowing a stop's. That is what makes it independent of the
+   * stop machinery: setStop()'s "latch only when the anchor is UNSET" guard and
+   * unsetStop()'s "only re-anchor a LEFT/RIGHT anchor" guards both leave a
+   * MANUAL anchor alone without any extra code.
+   *
+   * Cold path (menu / button event only): defined out-of-line in leadscrew.cpp
+   * next to setStopPosition(). It adds nothing to Leadscrew::update() beyond one
+   * more arm on the switch that already selects the anchor's carriage position.
    */
-  void setSyncPoint() {
-    // ***** NOT IMPLEMENTED *****
-    // Deliberate no-op stub: it exists only so test/test_sync_point compiles and
-    // links, and fails on assertions rather than at link time. Every property
-    // this must satisfy is written down as a failing test in
-    // test/test_sync_point/test_sync_point.cpp - implement against those.
-  }
+  void setSyncPoint();
   LeadscrewStopState getStopPositionState(LeadscrewStopPosition position);
   void unsetStopPosition(LeadscrewStopPosition position);
   int getStopPosition(LeadscrewStopPosition position);
