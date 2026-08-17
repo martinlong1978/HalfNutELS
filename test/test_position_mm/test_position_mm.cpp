@@ -160,6 +160,11 @@ TEST_F(PositionMMTest, GetConfigReturnsNonNull) {
 
 TEST_F(PositionMMTest, GetConfigMatchesConstructedDerivedConfig) {
   ASSERT_NE(ls->getConfig(), nullptr);
+  // Pointer identity, not just value equality: getConfig() must hand back the
+  // exact LatheConfigDerived the Leadscrew was constructed with, not merely
+  // one that happens to compute the same numbers (which a stray second
+  // instance with identical defaults would also satisfy).
+  EXPECT_EQ(ls->getConfig(), derived);
   EXPECT_FLOAT_EQ(ls->getConfig()->leadscrewStepsPerMm(),
                    derived->leadscrewStepsPerMm());
 }
