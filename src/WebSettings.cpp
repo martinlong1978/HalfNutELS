@@ -646,7 +646,12 @@ void redirectToPortal() {
 }
 
 // REACHABILITY - relied on by the factory reset above, so it is written down
-// here rather than assumed. This function is called from exactly one place:
+// here rather than assumed. Derived from the call graph below, and separately
+// CONFIRMED BY THE OWNER: the web page is AP-only by design, not by accident.
+// Treat it as an invariant to preserve, not an observation that happened to
+// hold when this was written.
+//
+// This function is called from exactly one place:
 // runWifiSettings() in src/main.cpp, which setup() enters only when H2 is held,
 // when the stored settings fail their CHECKVALUE test, or when the menu asked
 // for setup. That branch never constructs the Spindle/Leadscrew objects and
