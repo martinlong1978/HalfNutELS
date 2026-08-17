@@ -223,18 +223,13 @@ void setup() {
     pinMode(ELS_STEPPER_ENA, OUTPUT);
     digitalWrite(ELS_STEPPER_ENA, 0);
 
-#ifdef ELS_USE_BUTTON_ARRAY
-#else
-    pinMode(ELS_RATE_INCREASE_BUTTON, INPUT_PULLUP);  // rate Inc
-    pinMode(ELS_RATE_DECREASE_BUTTON, INPUT_PULLUP);  // rate Dec
-    pinMode(ELS_MODE_CYCLE_BUTTON, INPUT_PULLUP);     // mode cycle
-    pinMode(ELS_THREAD_SYNC_BUTTON, INPUT_PULLUP);    // thread sync
-    pinMode(ELS_HALF_NUT_BUTTON, INPUT_PULLUP);       // half nut
-    pinMode(ELS_ENABLE_BUTTON, INPUT_PULLUP);         // enable toggle
-    pinMode(ELS_LOCK_BUTTON, INPUT_PULLUP);           // lock toggle
-    pinMode(ELS_JOG_LEFT_BUTTON, INPUT_PULLUP);       // jog left
-    pinMode(ELS_JOG_RIGHT_BUTTON, INPUT_PULLUP);      // jog right
-#endif
+    // The discrete-button #else branch that used to sit here has been deleted.
+    // It configured nine GPIOs from ELS_*_BUTTON names that no longer exist,
+    // and ELS_USE_BUTTON_ARRAY is defined unconditionally in board.h, so it had
+    // not been compiled in a long time. Worse than merely dead: after the Mk2
+    // remap the ELS_*_BUTTON names are MATRIX CODES, not GPIO numbers, so
+    // ELS_ENABLE_BUTTON would still have resolved here and quietly configured
+    // the wrong pin. There is no discrete-button hardware left to support.
 
     // Display Initalisation
 
