@@ -15,6 +15,7 @@
 #include "config.h"
 #include "display.h"
 #include "keyarray.h"
+#include "setupmode.h"
 
 //#define FULLMONITOR
 #include <esp_task_wdt.h>
@@ -41,6 +42,29 @@ int cyclecount;
 int finalcyclecount;
 bool configMode = false;
 bool apClientConnected = false;
+
+// Runtime path into config/AP mode (see docs/ux-redesign.md section 6).
+//
+// This can't be a flash-backed flag: WebSettings and LatheConfig share one 4 KB
+// sector that is erased as a unit (see WebSettings.cpp), so a boot-flag write there
+// would risk the stored Wi-Fi credentials and burn a flash erase/write cycle on
+// every normal boot. RTC slow memory is the right lifetime instead: RTC_DATA_ATTR
+// variables survive ESP.restart() (so a menu-triggered reboot can carry the
+// request across) but are cleared by a true power cycle, which is exactly the
+// "one-shot, this session only" behaviour we want. It also costs no flash wear.
+// Do NOT change this to a flash write.
+//
+// RTC memory is not guaranteed to be zeroed on a cold boot, so a plain 0/false
+// flag could false-trigger on garbage. Use a distinctive magic value instead of
+// 0 or 0xFFFFFFFF (the two values most likely to show up as uninitialised RTC
+// garbage) and compare against it explicitly.
+#define BOOT_TO_SETUP_MAGIC 0xE15B0071u
+RTC_DATA_ATTR uint32_t bootToSetup;
+
+void requestSetupOnNextBoot() {
+  bootToSetup = BOOT_TO_SETUP_MAGIC;
+  ESP.restart();
+}
 
 
 // have to handle the leadscrew updates in a timer callback so we can update the
@@ -124,9 +148,16 @@ void setup() {
   WebSettings* webSettings = getWebSettings();
   LatheConfig* config = getLatheSettings();
 
-  bool checks = (webSettings->check == CHECKVALUE) && (config->check == CHECKVALUE); 
+  bool checks = (webSettings->check == CHECKVALUE) && (config->check == CHECKVALUE);
 
-  if (digitalRead(ELS_PAD_H2) == 1 || !checks) {
+  // Capture and clear the RTC-memory setup request immediately, before we
+  // might branch into runWifiSettings() (which never returns to the normal
+  // boot path) — otherwise a menu-triggered reboot into setup would loop
+  // back into setup mode forever on every subsequent boot.
+  bool wantSetup = (bootToSetup == BOOT_TO_SETUP_MAGIC);
+  bootToSetup = 0;
+
+  if (digitalRead(ELS_PAD_H2) == 1 || !checks || wantSetup) {
     display = new Display();
     Serial.println("AP setting mode\n");
     runWifiSettings();
