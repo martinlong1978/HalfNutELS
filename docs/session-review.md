@@ -84,6 +84,39 @@ That last pattern is why every safety-relevant change now gets deliberately brok
 
 ---
 
+## 5b. The panel locks out while moving
+
+Added last, and it simplified more than it restricted. **While the carriage is under power, only
+`HALT`, `ENABLE` and the arrows' *stopping* functions are live.** No menu, no widget, no tile, no
+setting, no DRO zero. Your reasoning: the operator's attention belongs on the tool and the
+workpiece, not the screen.
+
+It replaced **five separate "moving, X disabled" states** with one rule, and it means the screen
+during motion always shows the travel bar and machine state rather than whatever picker was open.
+
+**The one refinement:** the arrows keep the two functions that *stop* things — the dead-man
+release and the run cancel. Disabling them wholesale would have meant letting go of a jog no
+longer stopping the carriage, which would have inverted the principle the rule states.
+
+Two things worth knowing:
+
+- **The gate's position in the ladder is load-bearing.** It sits *below* the run-phase
+  reconciliation; above it, every inert keypress made while running stops reconciling and the
+  "eaten click" the latch exists to prevent comes back. Pinned by a test.
+- **Open widgets now close when motion starts.** Unreachable through the panel, but genuinely
+  reachable from the web UI or a spindle-driven feed — so this closes a real gap, not just a
+  theoretical one. Done in `tick()`, because motion often starts with no keypress at all.
+
+### One decision left for you
+
+Four display hints are now unreachable: the carousel's "stop the carriage first", the STOPS
+widget's edit-locked message, the DRO-datum equivalent, and the confirm bar under power.
+
+The **gates** stay regardless — defence in depth on a safety path, and `saveLathePreferences()`
+refuses independently of anything the UI does. But the *rendering* for states that can no longer
+occur is dead code, and this codebase has already produced four pieces of that (§4). Left in
+place for now, recorded here rather than silently kept.
+
 ## 6. Still open — needs you
 
 **The dropped-`Release` keypad hazard.** You chose "poll the matrix"; it is **not built**. `keyarray.cpp` can drop a key release entirely — a sub-10 ms tap emits `Press` with no `Release`, and `handleTimer()` emits a release against button `0` if a second key is touched mid-hold. A dead-man jog that never receives its release cannot stop itself. Pre-existing, not a regression, but the redesign leans on hold-to-jog far harder than the old firmware did.
@@ -129,10 +162,10 @@ It is a multi-minute cold build with shared mutable state in `link.rsp`. **Run o
 
 | | Start of session | Now |
 |---|---|---|
-| Host tests | 54 | **354** |
+| Host tests | 54 | **376** |
 | Suites | 7 | 12 |
 | Flash | 74.1% | 75.9% |
 | Rendered screens | 0 | **41** |
-| Commits on branch | 0 | **67** |
+| Commits on branch | 0 | **72** |
 
-New host-tested libraries: `lib/ui` (focus model, 204 cases) and `lib/dro` (datum resolution, 26 cases) — both pure C++, both created specifically so the logic could be tested at all, since the native runner never builds `src/`.
+New host-tested libraries: `lib/ui` (focus model, 226 cases) and `lib/dro` (datum resolution, 26 cases) — both pure C++, both created specifically so the logic could be tested at all, since the native runner never builds `src/`.
