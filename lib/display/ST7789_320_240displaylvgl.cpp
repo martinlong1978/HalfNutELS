@@ -197,6 +197,11 @@ static const int TRAVEL_POS_X = 90;    // right-aligned box 90..200
 static const int TRAVEL_POS_W = 110;   // "-300.00" @26 = 100px -> ink from 100
 static const int TRAVEL_POS_UNIT_X = 204;  // "mm" @14 = 30px -> 234
 static const int TRAVEL_LEFT_X = 12;       // "L 888.88" @14 = 60px -> 72
+static const int TRAVEL_LEFT_W = 74;       // 12..85; see fixLabelBox() at its
+                                           // creation. Worst realistic string is
+                                           // "L -1200.00" @14 = 69px; beyond that
+                                           // it CLIPS rather than growing into
+                                           // travelPosLabel's box at x 90.
 static const int TRAVEL_RIGHT_X = 238;     // right-aligned box 238..308
 static const int TRAVEL_RIGHT_W = 70;      // "888.88 R" @14 = 62px -> ink from 246
 
@@ -220,6 +225,20 @@ static const int FONT48_H = 52;
 static const int GLYPH_W = 128;
 static const int GLYPH_H = 64;
 
+// Measured advance widths of the worst-case string in each fixed slot, summed
+// from the adv_w fields of the same lv_font_montserrat_*.c files the metrics
+// above come from (adv_w is 8.4 fixed point; per-glyph px = (adv_w + 8) >> 4,
+// matching lv_font_fmt_txt_get_glyph_dsc). These exist so the horizontal
+// adjacencies below are checked against real ink extents rather than against
+// each other -- an assertion that only compares two x constants proves nothing
+// about whether the text between them fits.
+static const int TEXT14_MODE_W = 74;       // "THREAD R" (longest mode word)
+static const int TEXT14_UNIT_W = 32;       // "inch"
+static const int TEXT14_SYNC_W = 39;       // "SYNC"
+static const int TEXT14_RPM_UNIT_W = 33;   // "RPM"
+static const int TEXT26_RPM_VALUE_W = 64;  // "9999"
+static const int TEXT26_STATE_W = 161;     // "RETURNING" (longest state word)
+
 // --- Layout assertions -------------------------------------------------------
 // There is no host test for this file (lvgl is lib_ignore'd on the native env),
 // so the band arithmetic is pinned here instead: every one of these is a claim
@@ -234,6 +253,15 @@ static_assert(STATUS_RPM_VALUE_Y + FONT26_H <= BAND_STATUS_BOTTOM, "RPM value ov
 static_assert(STATUS_RPM_UNIT_Y + FONT14_H <= BAND_STATUS_BOTTOM, "RPM unit overflows band 1");
 static_assert(STATUS_RPM_VALUE_X + STATUS_RPM_VALUE_W < STATUS_RPM_UNIT_X, "RPM value box hits its unit");
 static_assert(STATUS_RPM_UNIT_X < SCREEN_W, "RPM unit off screen");
+// Band 1 is a row of four unboxed/boxed items with no layout manager between
+// them, so the only thing keeping them apart is these four x constants. Check
+// them against the measured ink, not just against each other. sync -> RPM is
+// the tightest gap on the whole screen (185 vs 186).
+static_assert(STATUS_MODE_X + TEXT14_MODE_W <= STATUS_UNIT_X, "mode text runs into the unit chip");
+static_assert(STATUS_UNIT_X + TEXT14_UNIT_W <= STATUS_SYNC_X, "unit chip runs into the sync chip");
+static_assert(STATUS_SYNC_X + TEXT14_SYNC_W <= STATUS_RPM_VALUE_X, "sync chip runs into the RPM box");
+static_assert(STATUS_RPM_UNIT_X + TEXT14_RPM_UNIT_W <= SCREEN_W, "RPM unit text off the right edge");
+static_assert(TEXT26_RPM_VALUE_W <= STATUS_RPM_VALUE_W, "RPM value wider than its box");
 // Band 2
 static_assert(PITCH_VALUE_Y > BAND_STATUS_BOTTOM, "pitch value overlaps band 1");
 static_assert(PITCH_VALUE_Y + FONT48_H <= BAND_PITCH_BOTTOM, "pitch value overflows band 2");
@@ -251,7 +279,11 @@ static_assert(TRAVEL_TRACK_Y >= TRAVEL_MARK_Y, "track sits above its markers");
 static_assert(TRAVEL_TRACK_X + TRAVEL_TRACK_W <= SCREEN_W, "travel track off the right edge");
 static_assert(TRAVEL_VALUE_Y + FONT26_H <= BAND_TRAVEL_BOTTOM, "travel value overflows band 4");
 static_assert(TRAVEL_LABEL_Y + FONT14_H <= BAND_TRAVEL_BOTTOM, "travel labels overflow band 4");
-static_assert(TRAVEL_LEFT_X < TRAVEL_POS_X, "left stop label runs into the live readout");
+// Was `TRAVEL_LEFT_X < TRAVEL_POS_X`, which is 12 < 90 and cannot fail for any
+// plausible edit -- it asserted nothing about the label actually fitting. The
+// left label is now boxed to TRAVEL_LEFT_W (like every other variable-length
+// readout on this screen), so the real constraint is checkable.
+static_assert(TRAVEL_LEFT_X + TRAVEL_LEFT_W < TRAVEL_POS_X, "left stop label box runs into the live readout");
 static_assert(TRAVEL_POS_X + TRAVEL_POS_W < TRAVEL_POS_UNIT_X, "live readout runs into its unit");
 static_assert(TRAVEL_POS_UNIT_X < TRAVEL_RIGHT_X, "live unit runs into the right stop label");
 static_assert(TRAVEL_RIGHT_X + TRAVEL_RIGHT_W <= SCREEN_W, "right stop label off the right edge");
@@ -259,6 +291,7 @@ static_assert(TRAVEL_RIGHT_X + TRAVEL_RIGHT_W <= SCREEN_W, "right stop label off
 static_assert(STATE_WORD_Y > BAND_TRAVEL_BOTTOM, "state word overlaps band 4");
 static_assert(STATE_WORD_Y + FONT26_H <= SOFTKEY_Y, "state word overlaps the hint row");
 static_assert(STATE_WORD_X + STATE_WORD_W <= SCREEN_W, "state word box off the right edge");
+static_assert(TEXT26_STATE_W <= STATE_WORD_W, "state word wider than its box");
 static_assert(STATE_DOT_Y + STATE_DOT_SIZE <= SOFTKEY_Y, "state dot overlaps the hint row");
 static_assert(STATE_DOT_X + STATE_DOT_SIZE < STATE_WORD_X, "state dot collides with the word");
 static_assert(SOFTKEY_Y + FONT14_H <= SCREEN_H, "soft-key hints off the bottom");
@@ -340,6 +373,12 @@ Display::Display(Spindle* spindle, Leadscrew* leadscrew) {
   // safe-fallback pattern latheconfig.cpp uses for droDatum.
   uint8_t theme = (leadscrew != nullptr) ? leadscrew->getConfig()->theme() : THEME_DARK;
   this->m_palette = (theme == THEME_LIGHT) ? &PALETTE_LIGHT : &PALETTE_DARK;
+  // Owned by initDisplay(), which is the only writer and runs before any read
+  // of either -- but CLAUDE.md's rule is every member, and these two are the
+  // ones the class was missing (Display is `new`ed, so they are heap garbage
+  // until then, and a stray read would be a wild pointer rather than a crash).
+  this->disp = nullptr;
+  this->draw_buf = nullptr;
   resetObjectTree();
 }
 
@@ -355,6 +394,8 @@ Display::Display() {
   this->m_leadscrew = nullptr;
   this->m_globalState = GlobalState::getInstance();
   this->m_palette = &PALETTE_DARK;  // no config available on this path -- default dark.
+  this->disp = nullptr;             // see the other constructor.
+  this->draw_buf = nullptr;
   resetObjectTree();
 }
 
@@ -549,12 +590,21 @@ void Display::showConnected(IPAddress ip) {
 }
 
 
+// One-time LVGL + panel bring-up. ALL of it is behind `initialised`, not just
+// the malloc: init() is documented (and used) as a full-rebuild path, so this
+// is reachable more than once. Re-running lv_init() and lv_tft_espi_create()
+// on a rebuild would re-initialise LVGL underneath the live object tree and
+// leak a whole lv_display_t plus its driver state every time. Nothing calls it
+// twice today -- getDisplayReset() has exactly one setter, the currently
+// unwired setTheme() -- so this is a no-op now and a prerequisite for wiring
+// the theme menu (FS-I3), which is what makes setTheme() live.
 void Display::initDisplay() {
-  if (!initialised) {
-    draw_buf = (uint32_t*)malloc(DRAW_BUF_SIZE);
-    initialised = true;
+  if (initialised) {
+    return;
   }
+  initialised = true;
 
+  draw_buf = (uint32_t*)malloc(DRAW_BUF_SIZE);
   lv_init();
   lv_tick_set_cb(my_tick);
   disp = lv_tft_espi_create(TFT_WIDTH, TFT_HEIGHT, draw_buf, DRAW_BUF_SIZE);
@@ -687,6 +737,10 @@ void Display::init() {
 
   travelLeftLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
                                 m_palette->textDim, TRAVEL_LEFT_X, TRAVEL_LABEL_Y);
+  // Boxed like its three neighbours: without this the label is auto-width and
+  // grows rightward into travelPosLabel's box as the value gets longer, which
+  // is the one place on this screen where two readouts could overlap.
+  fixLabelBox(travelLeftLabel, TRAVEL_LEFT_W, LV_TEXT_ALIGN_LEFT);
   travelRightLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
                                  m_palette->textDim, TRAVEL_RIGHT_X, TRAVEL_LABEL_Y);
   fixLabelBox(travelRightLabel, TRAVEL_RIGHT_W, LV_TEXT_ALIGN_RIGHT);
