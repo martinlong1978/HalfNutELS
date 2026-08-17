@@ -325,6 +325,43 @@ TEST(DroEdge, StopAtZeroIsStillADatum) {
   EXPECT_EQ(Dro::relativePulses(in, -900), -900);
 }
 
+// The zero-at-pulse-0 trap applies to a manual zero too, not just a stop: "is
+// it set" comes from manualZeroSet alone, never from manualZeroPulses != 0.
+TEST(DroEdge, ManualZeroAtZeroIsStillADatum) {
+  DroInput in = bothStops(DroDatumPreference::Left);  // left 1000, right 5000
+  in.manualZeroSet = true;
+  in.manualZeroPulses = 0;
+
+  EXPECT_EQ(Dro::resolveSource(in), DroDatumSource::ManualZero);
+  EXPECT_EQ(Dro::datumPulses(in), 0);
+  EXPECT_EQ(Dro::relativePulses(in, 900), 900);
+  EXPECT_EQ(Dro::relativePulses(in, -900), -900);
+}
+
+// Realistic full-bed magnitudes, not just toy values: at the default config
+// (400 ppr, 2:1 gearbox, 2.54 mm leadscrew pitch -> ~314.96 steps/mm) a 2 m
+// bed is ~629,921 pulses end to end. Exercise the arithmetic at that scale to
+// make the "no overflow in any realistic configuration" claim concrete: an
+// int32 has room for a bed roughly 3,400x longer than this before
+// current - datum could wrap.
+TEST(DroEdge, RealisticFullBedMagnitudesNoOverflow) {
+  DroInput in = makeInput();
+  in.leftStopSet = true;
+  in.leftStopPulses = -314960;   // ~1 m left of origin
+  in.rightStopSet = true;
+  in.rightStopPulses = 314960;   // ~1 m right of origin, ~2 m span
+  in.preference = DroDatumPreference::Left;
+
+  EXPECT_EQ(Dro::resolveSource(in), DroDatumSource::LeftStop);
+  EXPECT_EQ(Dro::datumPulses(in), -314960);
+  EXPECT_EQ(Dro::relativePulses(in, 314960), 629920);   // full span, left datum
+  EXPECT_EQ(Dro::relativePulses(in, -314960), 0);
+
+  in.preference = DroDatumPreference::Right;
+  EXPECT_EQ(Dro::datumPulses(in), 314960);
+  EXPECT_EQ(Dro::relativePulses(in, -314960), -629920);  // full span, right datum
+}
+
 // Degenerate but reachable: both stops set to the same pulse position. The
 // preference still selects a source, and both give the same datum.
 TEST(DroEdge, CoincidentStopsStillResolveByPreference) {
