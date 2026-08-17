@@ -2,6 +2,30 @@
 
 Working log for the `ux-redesign` branch build-out. Written for Martin to read on return.
 
+## Read this first
+
+The branch builds clean and every host test passes. Nine of the twelve feature sets are
+complete through all three agent stages. **Nothing has been run on hardware** — everything here
+is host tests plus a clean device compile, and the parts that touch flash and RTC memory
+cannot be tested off-device at all.
+
+Three things want your decision before this goes near the lathe, in order:
+
+1. **Imperial feed is 1000× too slow.** Pre-existing, confirmed, deliberately not fixed — it
+   changes how the machine cuts and belongs in its own commit. One line plus a test. Details
+   in the section below.
+2. **The keypad can drop a key release**, so a dead-man jog can fail to stop itself.
+   Pre-existing and not a regression, but the redesign leans on hold-to-jog much harder than
+   the old firmware did. Two candidate fixes written up; neither applied.
+3. **OTA has no on-device trigger on this branch.** The half-nut hold went with the key and the
+   menu that replaces it does not exist yet.
+
+The most valuable thing the reviewers found that I had missed: **a flash erase stalls the
+spindle loop on both cores**, so saving a setting mid-cut would lose spindle sync. That one is
+fixed — `saveLatheSettings()` now refuses while the carriage is under power.
+
+If you only read one more section, make it "Safety findings from review".
+
 ## Baselines (before any change)
 
 | | Value |
@@ -167,6 +191,36 @@ Tracked, not accidental. All are consequences of removing a key before its repla
    `ButtonPad` constructor unlocks once at startup so the padlock does not sit on screen and
    so the encoder is not silently swallowed (`keyarray.cpp:102`). All of it dies with the
    display rebuild.
+
+## The existing thread-sync tests never exercised the sync anchor
+
+Found while writing the FS-E suite, and worth knowing independently of this branch.
+
+`test/test_thread_sync/`'s `establishSyncAt()` sets a stop at position 0 (which anchors), then
+immediately unsets it. With no other stop that sets `syncPositionState = UNSET`, so
+`syncArmed()` is false for the entire run. The later re-arm happens with the carriage
+elsewhere, and `setStop()` only anchors when the stop position equals the current carriage
+position — so no anchor is recorded either.
+
+**Every helix property that suite proves holds purely because the leadscrew is a faithful
+relative feed. The anchor plays no part in any of it.** The re-sync block in `update()`
+(~lines 300-327) was dead in every test in the repo; the FS-E probe was the first code to
+execute it. The good news is that it works — it lands within ~1.3 leadscrew pulses of the
+original helix across 300/1200/3000 PPS after a disengage plus a fractional turn.
+
+The reason it was invisible: **the anchor's only observable effect is where the axis resumes
+after `SS_UNSYNC`.** Nothing else in the system reads it, so any test that does not disengage
+and re-engage cannot tell a correct anchor from a missing one. That is why the new suite leans
+on a disengage/re-engage helper — worth knowing before anyone "simplifies" those tests.
+
+Two smaller notes from the same investigation:
+
+- `update()` can drop and re-raise `SS_SYNC` within a single call, so **`SS_SYNC` is not a
+  proxy for "engaged"**.
+- The `case UNSET:` arm in `update()`'s switch is dead code and its own comment says so
+  ("Can we even hit this???"). It is the natural-looking slot for a manual anchor and must not
+  be reused as-is — it returns `m_currentPosition`, which would make the anchor mean "wherever
+  you are right now", i.e. no phase gate at all.
 
 ## A landmine for whoever wires up ZeroDro
 
