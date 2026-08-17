@@ -80,6 +80,49 @@ ink baked into their I1 palettes and sit on coloured state rectangles, so they w
 for the pervasive "engaged" state. Caught in review, fixed by FS-H2 restoring explicit recolour.
 The lesson is that the doc's ordering was load-bearing, not decorative.
 
+## Post-flash findings — first time on real hardware
+
+The branch was flashed and looked at. Three things came back.
+
+### 1. It is very grey — and that is a self-inflicted wound
+
+The vivid palette in §8 has **never actually been used**. When the theme system went in, the
+acceptance criterion was that dark mode be *byte-identical to the then-current screen*, so
+`PALETTE_DARK` kept the old washed-out values (`0x008800` green, `0xCCCCCC` grey) and `init()`
+deliberately did not paint a background — leaving LVGL's default light grey `0xF5F5F5`. On glass:
+pale grey ground, black text, dim chips.
+
+That constraint was right for a safe refactor and then never lifted. **The step that applies the
+actual design was never scheduled.** It is now.
+
+### 2. The soft-key hints go
+
+`HALT / MENU / RUN` along the bottom duplicated what the physical caps will say. Removed; the
+space goes to the state readout and possibly the travel band.
+
+### 3. The menu felt disconnected — because most tiles have no destination
+
+Owner's diagnosis: *OK does nothing visible*, and *no feedback that it worked*. Both true.
+Diagnostics and About are no-ops, DRO datum has no overlay to open, and the tiles that DO fire
+(Units, Theme, Sync) change something off-screen while the menu covers it.
+
+**The rule, decided: `OK` always closes the menu, and you always land somewhere that shows the
+result.** The main screen *is* the confirmation — units redraw, the theme changes, the travel bar
+re-datums. Tiles whose effect is not visible there open their own screen instead. The single
+exception is a refused tile, which stays open with its reason, as it already does.
+
+That means building the missing destinations (Diagnostics, About, a DRO-datum overlay) and
+changing `MenuActivate`, which currently leaves the carousel open.
+
+## A screen renderer now exists (`tools/screenshot/`)
+
+Every visual claim on this branch was reasoned from coordinates and font tables and never seen —
+which is exactly how the grey shipped. LVGL is portable C, and the only reason it was excluded
+from the host build is that `TFT_eSPI` and `Arduino.h` are not. With those shimmed, the real
+`Display` renders into a buffer and writes PNGs.
+
+Use it before believing anything about the screen.
+
 ## Decisions from the review session
 
 Settled with Martin after the overnight run. These supersede anything below that disagrees.
