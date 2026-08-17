@@ -35,6 +35,40 @@ inline bool isWidgetFocus(UiFocus f) {
          f == UiFocus::Stops;
 }
 
+// --- The powered-run latch, m_runToStopDir --------------------------------
+//
+// The SIGN is the direction, exactly as uistate.h documents it: -1 left,
+// +1 right, 0 no run. The MAGNITUDE records how far the latch has got, and
+// exists only so the latch can be reconciled against the machine.
+//
+// The latch cannot simply be derived from ctx.motionActive, and it cannot
+// simply be cleared whenever ctx.motionActive is false. Both fail, in
+// opposite directions:
+//
+//   * Purely derived: DisplayTask polls at 10 Hz (main.cpp), so for up to a
+//     poll after RunToLeftStop is emitted the caller still reports
+//     motionActive == false. An arrow click inside that window would start a
+//     SECOND run instead of cancelling the first.
+//   * Cleared on every inactive context: the Release of the very tap that
+//     started the run arrives inside that same window, so the latch would be
+//     wiped before it ever meant anything and a run could never be cancelled.
+//
+// Hence two phases. A run is COMMANDED when we emit the intent, and becomes
+// CONFIRMED once the caller has actually reported motionActive. Only a
+// CONFIRMED run can be seen to end: it ended by itself at the stop, which is
+// the case UiState is never told about (defect 2). A COMMANDED run is still
+// inside the poll window, so an inactive context says nothing about it and
+// the latch is left alone.
+const int kRunCommanded = 1;
+const int kRunConfirmed = 2;
+
+inline int runPhase(int latch) { return latch < 0 ? -latch : latch; }
+
+// Same direction, new phase.
+inline int withPhase(int latch, int phase) {
+  return latch < 0 ? -phase : phase;
+}
+
 }  // namespace
 
 UiState::UiState()
@@ -95,6 +129,39 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       ev == UiKeyEvent::Release && m_jogDir != 0) {
     m_jogDir = 0;
     return UiIntent::JogStop;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reconcile the powered-run latch against the machine, before anything reads
+  // it (§7). A run does not only end because the operator cancelled it - it
+  // also ends BY ITSELF when the carriage reaches the stop, and nothing
+  // reports that to UiState. Left unreconciled, the latch outlives the run and
+  // the next arrow click returns CancelMotion for a run that is already over:
+  // the click is silently eaten. Run to the stop, click back, nothing happens.
+  //
+  // So: a CONFIRMED run plus an inactive machine means the run is over, and
+  // the latch goes. See the two-phase note above for why a COMMANDED run is
+  // deliberately left standing.
+  //
+  // This sits here, at the top of the ladder, rather than next to the latch's
+  // only reader in the Jog branch, for two reasons. Every path that consults
+  // the latch is below it, so there is no route that can read a stale one. And
+  // a run can finish while the operator is somewhere else entirely - inside
+  // the menu, in the STOPS widget, engaged - all of which return early further
+  // down; reconciling here means those keypresses still clean up, instead of
+  // the staleness surviving until the operator happens to press an arrow.
+  //
+  // It is deliberately BELOW the dead-man jog terminator. That terminator must
+  // stay the first thing after HALT and must stay unconditional: letting go of
+  // an arrow has to stop the carriage no matter what else is true. Bookkeeping
+  // never goes above it.
+  // -------------------------------------------------------------------------
+  if (m_runToStopDir != 0) {
+    if (ctx.motionActive) {
+      m_runToStopDir = withPhase(m_runToStopDir, kRunConfirmed);
+    } else if (runPhase(m_runToStopDir) == kRunConfirmed) {
+      m_runToStopDir = 0;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -215,8 +282,8 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       return left ? UiIntent::ModePrev : UiIntent::ModeNext;
 
     case UiFocus::Stops: {
-      // No stop edits while the leadscrew is engaged - ONE rule, both
-      // directions, both arrows. You must disengage to change a stop.
+      // No stop edits while the carriage is under power - ONE rule, both
+      // directions, both arrows. The machine must be at rest to change a stop.
       //
       // Clearing is the dangerous half. `hitLeftEndstop()` is
       // `leftStopState == SET && pos <= leftStopPosition`
@@ -242,8 +309,19 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       //
       // No workflow in the spec needs it: §4's gestures and §6's Sync tile are
       // all at-rest operations. The cost of the rule is one press of ENABLE.
-      if (ctx.motionEnabled) {
-        return UiIntent::None;  // display says "disengage to change stops"
+      //
+      // motionEnabled alone is NOT enough, and the gap is not academic. It
+      // means MM_ENABLED only, while a powered run to a stop is MM_JOG_LEFT /
+      // MM_JOG_RIGHT - so for the whole duration of a run the engaged inhibit
+      // is false and every edit above is live. Three ordinary presses (click
+      // an arrow to start the run, press STOPS, hold the same arrow) then
+      // clear the stop the carriage is travelling towards under power, which
+      // is that run's ONLY arrest (leadscrew.cpp:233); unsetStop writes
+      // INT32_MIN, so the run does not overshoot, it never terminates.
+      // motionActive is the broader signal - engaged feed, powered run,
+      // interactive jog, deceleration - and gates the edits the same way.
+      if (ctx.motionEnabled || ctx.motionActive) {
+        return UiIntent::None;  // display says "stop the carriage to edit stops"
       }
 
       // The deliberate asymmetry of §4: setting a stop is cheap to undo,
@@ -284,7 +362,9 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
 
   const int dir = arrowDir(key);
 
-  // A powered run is in flight: the next discrete gesture on EITHER arrow
+  // A powered run is in flight - either confirmed, or commanded and still
+  // inside the poll window; the reconciliation above has already discarded any
+  // run that ended by itself. The next discrete gesture on EITHER arrow
   // cancels it (§7 - cancellable by any of three keys). The opposite arrow
   // cancels rather than reversing: one gesture, one effect. Press and Release
   // stay inert, so the Release of the cancelling tap does not also fire, and
@@ -304,7 +384,10 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     // Click follows a Hold. Press/Release must be inert: a Release must never
     // abort the powered run its own Click just started.
     if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
-      m_runToStopDir = dir;
+      // COMMANDED, not yet confirmed: the caller has not had a chance to move
+      // the machine, let alone report it. The reconciliation above promotes
+      // this to CONFIRMED on the first context that says motionActive.
+      m_runToStopDir = dir * kRunCommanded;
       return (dir < 0) ? UiIntent::RunToLeftStop : UiIntent::RunToRightStop;
     }
     return UiIntent::None;
