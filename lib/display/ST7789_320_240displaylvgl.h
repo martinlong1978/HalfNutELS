@@ -17,22 +17,13 @@
 LV_IMAGE_DECLARE(feedSymbol);
 LV_IMAGE_DECLARE(threadSymbol);
 LV_IMAGE_DECLARE(threadSymbolReverse);
-// The eight 32x32 status icons below are NOT drawn by the redesigned main
-// screen (docs/ux-redesign.md section 8): the stop/sync/enable/lock chips they
-// used to fill are gone -- their information now lives in the status bar, the
-// carriage-travel band and the state bar as text and colour. The declarations
-// are kept because the assets are still compiled in and the overlays/menu
-// (FS-I3) are the obvious next consumer; if that turns out not to be the case
-// they, and lib/display/icons/*.c, can be deleted together.
-LV_IMAGE_DECLARE(leftstop);
-LV_IMAGE_DECLARE(rightstop);
-LV_IMAGE_DECLARE(unlocked);   // lock is removed from the design (section 7) --
-LV_IMAGE_DECLARE(locked);     // these two have no remaining consumer at all.
-LV_IMAGE_DECLARE(left);
-LV_IMAGE_DECLARE(right);
-LV_IMAGE_DECLARE(pauseSymbol);
-LV_IMAGE_DECLARE(syncSymbol);
-LV_IMAGE_DECLARE(jog);
+// These three are the only images left. The eight 32x32 status icons
+// (leftstop/rightstop/locked/unlocked/left/right/pause/sync) and the 128x64
+// jog glyph are gone: the chips they filled were replaced in the redesign
+// (docs/ux-redesign.md section 8) by text and colour in the status bar, the
+// carriage-travel band and the state bar, and FM_JOG left the mode cycle
+// (section 3), so none of them had a consumer. The three above are generated
+// by scripts/make_glyphs.py -- edit that, not the .c files.
 
 #define DRAW_BUF_SIZE ((TFT_WIDTH * TFT_HEIGHT / 10) * (LV_COLOR_DEPTH / 8))
 

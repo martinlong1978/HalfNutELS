@@ -1658,18 +1658,19 @@ void Display::drawMode() {
   const GlobalFeedMode mode = m_globalState->getFeedMode();
   const void* src;
   switch (mode) {
-  case FM_JOG:
-    src = &jog;
-    break;
   case FM_THREAD:
-    // Right-hand thread: upright helix.
+    // Right-hand thread: crests lean "\" (a right-hand helix's front-facing
+    // crests run top-left to bottom-right).
     src = &threadSymbol;
     break;
   case FM_THREAD_REVERSE:
-    // Left-hand / reverse thread: vertically-flipped helix (a pre-flipped
-    // asset -- this LVGL has no image-flip API).
+    // Left-hand / reverse thread: the same glyph with the crests leaning "/"
+    // (a separate generated asset -- this LVGL has no image-flip API).
     src = &threadSymbolReverse;
     break;
+  // FM_JOG had its own glyph here. It stopped being reachable when jog left
+  // the mode cycle (IncFeedMode(), section 3), and nothing else ever assigns
+  // it, so it falls through to feedSymbol with the rest of default:.
   case FM_FEED:
   default:
     src = &feedSymbol;
