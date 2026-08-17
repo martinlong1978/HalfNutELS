@@ -95,8 +95,21 @@ static const DisplayPalette PALETTE_LIGHT = {
   lv_color_hex(0x00ABFF), // colourCaution, see swap working above.
   lv_color_hex(0x303BFF), // colourFault, see swap working above.
   lv_color_hex(0x80726B), // colourDisabled, see swap working above.
-  lv_color_hex(0xFFFFFF), // iconInk: white, same reasoning as dark -- reads
-                          // against all four state chip colours above.
+  // iconInk: BLACK here, unlike dark's white -- R==B, no swap needed.
+  //
+  // The status icons are recoloured to iconInk and drawn ON TOP of the state
+  // chips above, so this pairing is what has to be legible, not the ink
+  // against the screen background. Dark's chips are the old dim hues
+  // (0x008800 green), which white reads well against. Light's chips are the
+  // design doc's vivid hues, and white on those is washed out -- measured
+  // contrast is 2.24:1 on colourRun and 1.90:1 on colourCaution, both under
+  // the 3:1 minimum for UI glyphs. Black against the same two is roughly
+  // 9.8:1 and 12:1.
+  //
+  // This is the same class of mistake the I1->A8 icon conversion already made
+  // once (black ink landing on the green "engaged" chip), so it is spelled out
+  // rather than left to be rediscovered.
+  lv_color_hex(0x000000),
 };
 
 static uint32_t my_tick(void) {
