@@ -1,31 +1,60 @@
 #ifdef ELS_USE_BUTTON_ARRAY
+#ifndef ELS_BUTTONPAD_H
+#define ELS_BUTTONPAD_H
+
 #include <leadscrew.h>
 #include <spindle.h>
 #include <keyarray.h>
+#include <uistate.h>
 
+/**
+ * Glue between the physical keypad (KeyArray) and the UI focus state machine
+ * (lib/ui/uistate.h), per docs/ux-redesign.md Sec. 1-6.
+ *
+ * Deliberately thin: this class translates matrix codes and ButtonStates into
+ * (UiKey, UiKeyEvent), asks UiState what to do, and executes the single
+ * returned UiIntent. Every decision - what focus is, what an arrow means, when
+ * a stop may be edited - lives in UiState, which is pure C++ and covered by
+ * host tests (`pio test -e native`). Nothing in src/ is host-testable, so no
+ * new decision logic belongs here.
+ *
+ * Runs on the DisplayTask (core 1, priority 1, 100 ms loop - main.cpp), never
+ * on the spindle hot loop.
+ */
 class ButtonPad {
  private:
   Spindle *m_spindle;
   Leadscrew *m_leadscrew;
   KeyArray *m_pad;
 
-  void rateIncreaseHandler(ButtonInfo press);
-  void rateDecreaseHandler(ButtonInfo press);
-  void modeCycleHandler(ButtonInfo press);
-  void threadSyncHandler(ButtonInfo press);
-  void halfNutHandler(ButtonInfo press);
+  // Focus / menu state machine. Value member: it owns no resources, allocates
+  // nothing, and its constructor initialises all of its own fields.
+  UiState m_ui;
+
+  // Matrix code (ELS_*_BUTTON, lib/config/board.h) -> UiKey. Returns false for
+  // 0 / unknown codes and for ENABLE, which is not part of the focus model.
+  static bool codeToKey(int code, UiKey &key);
+
+  // KeyArray ButtonState -> UiKeyEvent. Returns false for states UiState has no
+  // vocabulary for (BS_NONE, BS_DOUBLE_CLICKED - the latter is never emitted).
+  static bool stateToEvent(int buttonState, UiKeyEvent &ev);
+
+  // Machine state UiState needs to decide. Sampled fresh on every key event.
+  UiContext buildContext();
+
+  void applyIntent(UiIntent intent);
+
+  // ENABLE sits outside the focus model (it is machine state, not a focus
+  // target), so it is handled here rather than by UiState.
   void enableHandler(ButtonInfo press);
-  void lockHandler(ButtonInfo press);
-
-  enum JogDirection { LEFT = -1, RIGHT = 1 };
-
-  void jogDirectionHandler(ButtonInfo direction);
-  void jogHandler(ButtonInfo press);
 
  public:
   ButtonPad(Spindle *spindle, Leadscrew *leadscrew, KeyArray *pad);
 
-  volatile int keycode;
   void handle();
+
+  // Read by the display so it can render the focus outline / open widget.
+  const UiState &ui() const { return m_ui; }
 };
+#endif
 #endif

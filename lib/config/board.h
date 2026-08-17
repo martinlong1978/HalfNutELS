@@ -32,15 +32,42 @@
 
 #define ELS_STEPPER_ENA 17
 
-#define ELS_RATE_INCREASE_BUTTON 17
-#define ELS_RATE_DECREASE_BUTTON 9
-#define ELS_MODE_CYCLE_BUTTON 33
-#define ELS_THREAD_SYNC_BUTTON 10
-#define ELS_HALF_NUT_BUTTON 18
-#define ELS_ENABLE_BUTTON 34
-#define ELS_LOCK_BUTTON 12
-#define ELS_JOG_LEFT_BUTTON 20
-#define ELS_JOG_RIGHT_BUTTON 36
+// ---------------------------------------------------------------------------
+// Keypad matrix codes (Mk2 layout, docs/ux-redesign.md Sec. 2)
+//
+// These are NOT GPIO numbers. The 3x3 matrix scan in KeyArray::getCodeFromArray()
+// (src/keyarray.cpp:125,137-138) builds `code = a | b << 3`, where `a` is the H
+// bitmask and `b` the V bitmask. Physical ROWS run along H and physical COLUMNS
+// along V, so the codes read:
+//
+//            V1 (left)   V2 (centre)  V3 (right)
+//   H1 (top)      9           17          33
+//   H2 (mid)     10           18          34
+//   H3 (bot)     12           20          36
+//
+// Mk2 assignment - selectors on top, the two actuators plus OK in the middle
+// where the thumbs sit, machine state along the bottom:
+//
+//   MODE   RATE   STOPS
+//    <-     OK     ->
+//   HALT   MENU  ENABLE
+//
+// MODE / RATE / STOPS choose what the arrows drive (the focus, lib/ui/uistate.h);
+// the arrows are the only actuators. ENABLE is machine state and is handled
+// outside the focus model, in ButtonPad directly.
+//
+// Code 18 must stay the centre key: src/main.cpp:144-160 samples
+// ELS_PAD_H2 / ELS_PAD_V2 (i.e. code 18) at boot to enter Wi-Fi setup mode.
+// Putting OK there keeps that gesture as "hold OK at power-on for setup".
+#define ELS_MODE_BUTTON 9
+#define ELS_RATE_BUTTON 17
+#define ELS_STOPS_BUTTON 33
+#define ELS_LEFT_BUTTON 10
+#define ELS_OK_BUTTON 18
+#define ELS_RIGHT_BUTTON 34
+#define ELS_HALT_BUTTON 12
+#define ELS_MENU_BUTTON 20
+#define ELS_ENABLE_BUTTON 36
 #define ELS_USE_BUTTON_ARRAY
 
 
