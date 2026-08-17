@@ -192,6 +192,82 @@ Tracked, not accidental. All are consequences of removing a key before its repla
    so the encoder is not silently swallowed (`keyarray.cpp:102`). All of it dies with the
    display rebuild.
 
+## The Sync menu gate — investigated, NOT defeatable
+
+**Resolved: the leak does not occur.** Peak following error after an arrest is always about one
+revolution of feed and never more, at every speed and pitch tested, and it always settles to
+exactly zero. Left- and right-hand threads mirror exactly. Carriage drift ≤ 3 pulses (0.01 mm)
+over twenty revolutions.
+
+But the reasoning on both sides was wrong in interesting ways, so it is worth recording rather
+than deleting.
+
+**The review's caveat was false.** It hinged on "if the deceleration planner always lands on
+exactly zero speed there is no leak". It does not: 0 at 300 PPS, but **6.9 at 1200 and 142.5 at
+3000**, at its own example pitch. The accumulation genuinely happens.
+
+**What actually saves it** is something neither of us spotted: the re-sync *search* runs
+**before** the short-circuit return. It re-fires within one spindle revolution, and its re-pin
+discards the accumulated error and re-opens the gate — after which `sendPulse()` decays the
+speed and everything latches. The error is discarded, never closed, so nothing lurches.
+
+**And the guard is not vacuous** — mutating the re-sync condition to never fire reproduces
+exactly the predicted failure: error growing 785.7 → 1573.6 pulses over 10 → 20 revolutions at
+0.25 mm, which is precisely one pitch per revolution. Notably 300 PPS still passed under that
+mutation, because that is the one speed where the planner really does land on zero. The
+review's instinct that this would be "intermittent and much nastier" was right about the shape,
+just not the outcome.
+
+The existing arrest tests never exercised any of this: `RH_DecelerationLandsOnLeftEndstop`
+unsets its stop, which drops the anchor, so `syncArmed()` is false throughout and the gate is
+never live. Three new cases now cover it.
+
+### A real, milder finding that came out of it
+
+If the lathe is **stopped** right after an arrest that left residual speed, nothing drives the
+phase onto the gate, so the rescue never runs and `m_leadscrewSpeed` stays frozen at its arrest
+value **indefinitely** — measured still present after 20 s of idle. Re-engaging is safe (the
+gate still holds, and its firing discards the error), but the next jog starts from a stale
+non-zero speed instead of ramping from rest, and `getStoppingDistanceInPulses()` over-estimates
+until it decays.
+
+Related fragility: the rescue rests on an **exact-equality** phase match, so if the encoder ever
+advances more than one count between `update()` iterations (high RPM plus a stalled loop), the
+rescue is deferred a revolution at a time.
+
+Either of two one-line changes closes both — decay the speed on the short-circuit path, or drop
+the `m_leadscrewSpeed == 0` condition on the re-pin. **Not applied**: neither is needed for
+safety, and both change motion behaviour, so they are yours to call.
+
+## Superseded: the original defeat argument
+
+The final review defeated one of the three safety gates, and the argument is worth reading
+because it is not a coding slip.
+
+`motionActive` — the predicate behind every gate — derives "is the carriage under power" from
+the **commanded** motion mode. There appears to be a reachable state where that reads
+`MM_DISABLED` while `Leadscrew::update()` is still accumulating into `m_expectedPosition`:
+
+1. Setting a stop latches `syncPositionState`, so `syncArmed()` is permanently true.
+2. A thread cut arrests on the endstop, setting `MM_DISABLED` **and** `SS_UNSYNC`.
+3. `jogMode` is now false, so the accumulate keeps running every iteration.
+4. The re-pin that would neutralise it is guarded by `m_leadscrewSpeed == 0`.
+5. `m_leadscrewSpeed` only decays inside `sendPulse()` — and the re-sync gate's short-circuit
+   `return` skips `sendPulse()` entirely.
+
+If the arrest leaves **any** residual speed the state is self-sustaining: the following error
+grows by a pitch per revolution, indefinitely, while the UI honestly reports "not under power".
+Sync then renders live, fires, and races the lost-update window the code itself documents as
+"only reachable while ENGAGED".
+
+**The caveat that decides it:** if the deceleration planner always lands on exactly zero, the
+re-pin fires every iteration and there is no leak. That could not be settled by inspection, so
+it is being settled by a host test across several speeds and both thread hands — if it leaks at
+some speeds and not others it is intermittent, which is worse.
+
+**The predicate is the real lesson.** "Commanded mode" and "axis is quiescent" are different
+questions, and only `Leadscrew` can answer the second. A gate built on the first is guessing.
+
 ## The sync action nearly shipped a carriage lurch
 
 Worth reading even if you skip the rest, because it is the clearest case tonight of tests
