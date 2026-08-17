@@ -160,6 +160,15 @@ private:
   lv_obj_t* overlayStopsLeftLabel;
   lv_obj_t* overlayStopsRightLabel;
   lv_obj_t* overlayStopsPosLabel;
+  // The clear-both confirm bar (docs/ux-redesign.md section 4: "STOPS hold -
+  // clear both, after a 1 s confirm bar"). Three objects, all hidden at rest
+  // and shown only while UiState::stopsConfirmPermille() is non-zero: a
+  // full-width colourDisabled track, a colourFault fill that grows across it
+  // with the hold, and a static "CLEARING BOTH STOPS" label in chipInk on top
+  // -- the words ride ON the bar so the fill and the meaning cannot separate.
+  lv_obj_t* overlayStopsConfirmTrack;
+  lv_obj_t* overlayStopsConfirmFill;
+  lv_obj_t* overlayStopsConfirmLabel;
 
   // Group D -- MENU, the tile carousel (docs/ux-redesign.md section 6). A
   // carousel and not a list because the panel has only left/right keys: THREE
@@ -284,6 +293,13 @@ private:
   bool m_lastOverlayRightStopSet;
   int m_lastOverlayCarriageX;
   bool m_lastOverlayCarriageShown;
+  // The clear-both confirm bar: whether its three objects are shown, and the
+  // last fill width pushed. The display polls at 10 Hz against a 1 s hold, so
+  // the fill advances in ~10 visible steps -- that is the design, not jank
+  // (there is no animation on this build). Width, not permille: two permilles
+  // that quantise to the same pixel width must not repaint.
+  bool m_lastStopsConfirmShown;
+  int m_lastStopsConfirmFillW;
   // Last MenuTileBlock pushed as the ink/fill of each of the three visible
   // tiles. Only the block state drives colour, so arrowing between two tiles
   // that are both live costs no restyle at all.
@@ -371,7 +387,11 @@ protected:
   // Called by drawOverlay() only, once the panel is known to be visible.
   void drawOverlayTicker(bool jogSpeed);
   void drawOverlayMode();
-  void drawOverlayStops();
+  // `confirmPermille` is UiState::stopsConfirmPermille() -- 0..1000, 0 when the
+  // clear-both hold is not running -- computed once in drawOverlay() so the
+  // hint row and the confirm bar are driven by the SAME sample and cannot
+  // disagree about whether the hold is live.
+  void drawOverlayStops(int confirmPermille);
   // The DRO datum picker (group E). Renders m_droDatum as the selection.
   void drawOverlayDatum();
   // The two full read-only screens. Routed through drawOverlay()'s focus

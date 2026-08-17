@@ -408,6 +408,25 @@ static const int OVERLAY_STOP_END_W = 90;
 static const int OVERLAY_STOP_POS_Y = 76;     // 26 -> 76..104
 static const int OVERLAY_STOP_POS_X = 20;     // 20..279
 static const int OVERLAY_STOP_POS_W = 260;
+// The clear-both confirm bar (section 4: "STOPS hold - clear both, after a 1 s
+// confirm bar"). It lives in the strip between the position readout (ends 105)
+// and the body bottom (135) -- the one unused band of the STOPS body -- so the
+// resting widget is not moved, resized or restyled by it: at rest all three
+// objects are simply hidden and the overlay is pixel-identical to before.
+// The words ride ON the bar (chipInk ink over the colourFault fill / the
+// colourDisabled track -- 3.9:1 on the track, the worst case, same figure as
+// the IDLE state chip) rather than beside it, so a glance catches the red, the
+// growth and "CLEARING BOTH STOPS" as one object. Track geometry matches the
+// travel track above it (same x, same width, RADIUS_TRACK) on purpose: the bar
+// visibly "consumes" the same span whose two stops it is about to destroy.
+static const int OVERLAY_STOP_CONFIRM_Y = 109;   // 109..132
+static const int OVERLAY_STOP_CONFIRM_H = 24;
+// 14 ink centred in the 24: 109 + (24 - 16) / 2 = 113.
+static const int OVERLAY_STOP_CONFIRM_LABEL_Y = 113;
+// The fill's floor width when the hold has only just started: 2 x RADIUS_TRACK,
+// so the rounded rect never degenerates. Anything under ~1 tick of fill (28 px)
+// renders as this nub.
+static const int OVERLAY_STOP_CONFIRM_FILL_MIN = 8;
 
 // MENU: the tile carousel (docs/ux-redesign.md section 6), three tiles across
 // exactly as the mockup drew it:
@@ -641,6 +660,10 @@ static const int TEXT14_HINT_W = 171;      // "moving - datum locked", now the
 static const int TEXT14_HINT_OK_W = 64;    // "OK done"
 static const int TEXT14_STOP_END_W = 69;   // "L -1200.00"
 static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
+static const int TEXT14_STOP_CONFIRM_W = 169;  // "CLEARING BOTH STOPS" at 14,
+                                               // measured off the rendered ink
+                                               // (pixel extent 75..243 in the
+                                               // confirm-scene PNGs)
 // Menu, on the same basis. Names WRAP inside their tile, so the binding width
 // is the widest UNBREAKABLE word across the nine names in menuTileName() --
 // "Diagnostics", 85px at 14 ("Software" is 65, every other word is narrower).
@@ -838,6 +861,25 @@ static_assert(TEXT26_STOP_POS_W <= OVERLAY_STOP_POS_W, "stops readout wider than
 // The carriage must have somewhere to travel: it is placed by fraction across
 // (track width - its own width), which is only a scale if that is positive.
 static_assert(OVERLAY_STOP_CARRIAGE_W < OVERLAY_STOP_TRACK_W, "carriage marker wider than the track");
+// The clear-both confirm bar: it borrows the strip UNDER the position readout,
+// so it must clear the readout above and the body bottom below -- and its label
+// rides inside it, ink fully within the bar's height and narrower than the
+// track it is centred on.
+static_assert(OVERLAY_STOP_CONFIRM_Y >= OVERLAY_STOP_POS_Y + FONT26_H,
+              "confirm bar overlaps the position readout");
+static_assert(OVERLAY_STOP_CONFIRM_Y + OVERLAY_STOP_CONFIRM_H <= OVERLAY_BODY_BOTTOM,
+              "confirm bar overflows the body into the hint row");
+static_assert(OVERLAY_STOP_CONFIRM_LABEL_Y >= OVERLAY_STOP_CONFIRM_Y &&
+              OVERLAY_STOP_CONFIRM_LABEL_Y + FONT14_H <=
+                OVERLAY_STOP_CONFIRM_Y + OVERLAY_STOP_CONFIRM_H,
+              "confirm label ink outside its bar");
+static_assert(TEXT14_STOP_CONFIRM_W <= OVERLAY_STOP_TRACK_W,
+              "\"CLEARING BOTH STOPS\" wider than the confirm bar");
+// The fill scales permille over the track width, and its floor must not exceed
+// what a full bar can be, or a just-started hold would render fuller than the
+// arithmetic says.
+static_assert(OVERLAY_STOP_CONFIRM_FILL_MIN <= OVERLAY_STOP_TRACK_W,
+              "confirm fill floor wider than its track");
 // MENU carousel.
 // The title label is a FULL-CONTENT-WIDTH centred box, so it geometrically
 // overlaps the position box; what must not overlap is the INK. A centred string
@@ -1258,6 +1300,13 @@ static bool carriageFraction(Leadscrew* leadscrew, bool leftSet, bool rightSet,
 // than promising a keypress that ButtonPad::activateMenuTile() will discard.
 enum OverlayHint {
   OH_NONE, OH_PITCH, OH_SPEED, OH_MODE, OH_STOPS, OH_STOPS_LOCKED,
+  // The clear-both hold is running (stopsConfirmPermille() > 0): the one thing
+  // the row must say is the escape route -- releasing the key is what cancels,
+  // and nothing else on the panel says so. Plain dim text, NOT a chip: the
+  // colourFault bar above it is already shouting, and two red elements would
+  // compete. The right half goes blank with it (OK mid-hold just cancels the
+  // hold, which "release to cancel" already covers better).
+  OH_STOPS_CONFIRM,
   OH_MENU, OH_MENU_MOVING, OH_MENU_FEED,
   // The DRO datum picker. LOCKED mirrors OH_STOPS_LOCKED and is computed from
   // the SAME motion predicate: UiState refuses DroDatumLeft/Right while the
@@ -1278,6 +1327,8 @@ static const char* overlayHintText(OverlayHint hint) {
   case OH_MODE:         return OVERLAY_ARROWS " mode";
   case OH_STOPS:        return OVERLAY_ARROWS " set, hold to clear";
   case OH_STOPS_LOCKED: return "moving - stops locked";
+  // 132px -- inside the TEXT14_HINT_W bound (171, "moving - datum locked").
+  case OH_STOPS_CONFIRM: return "release to cancel";
   case OH_MENU:         return OVERLAY_ARROWS " move";
   // Both measured against TEXT14_HINT_W (161, "moving - stops locked"), which
   // is still the widest string this row can hold: 156 and 145 respectively.
@@ -1297,9 +1348,12 @@ static const char* overlayHintText(OverlayHint hint) {
 static const char* overlayHintOkText(OverlayHint hint) {
   switch (hint) {
   case OH_MENU:         return "OK open";
-  // A blocked tile: OK does nothing, so the row must not offer it.
+  // A blocked tile: OK does nothing, so the row must not offer it. Blank
+  // during the clear-both hold too -- the only key that matters is the one
+  // being held, and the left half already says what releasing it does.
   case OH_MENU_MOVING:
   case OH_MENU_FEED:
+  case OH_STOPS_CONFIRM:
   case OH_NONE:         return "";
   default:              return "OK done";
   }
@@ -1448,6 +1502,9 @@ void Display::resetObjectTree() {
   overlayStopsLeftLabel = nullptr;
   overlayStopsRightLabel = nullptr;
   overlayStopsPosLabel = nullptr;
+  overlayStopsConfirmTrack = nullptr;
+  overlayStopsConfirmFill = nullptr;
+  overlayStopsConfirmLabel = nullptr;
   overlayMenuGroup = nullptr;
   overlayMenuPos = nullptr;
   for (int i = 0; i < 3; i++) {
@@ -1499,6 +1556,10 @@ void Display::resetObjectTree() {
   m_lastOverlayRightStopSet = false;
   m_lastOverlayCarriageX = -1;
   m_lastOverlayCarriageShown = false;
+  // FALSE to match init(), which builds the confirm bar hidden; -1 so the
+  // first live draw always pushes a fill width.
+  m_lastStopsConfirmShown = false;
+  m_lastStopsConfirmFillW = -1;
   // -1, not MTB_NONE: the first drawOverlayMenu() after a rebuild must run its
   // restyle branch even when nothing is blocked, because that branch is what
   // paints the freshly-built card in the accent for the first time.
@@ -2066,6 +2127,44 @@ void Display::init() {
                                      m_palette->textPrimary,
                                      OVERLAY_STOP_POS_X, OVERLAY_STOP_POS_Y);
   fixLabelBox(overlayStopsPosLabel, OVERLAY_STOP_POS_W, LV_TEXT_ALIGN_CENTER);
+  // The clear-both confirm bar, built hidden (all three) to match the
+  // m_lastStopsConfirmShown cache resetObjectTree() just cleared -- at rest the
+  // STOPS body is exactly what it was before this bar existed. Creation order
+  // is z-order: track, then the fill on top of it, then the words on top of
+  // both. The fill is created at its floor width; drawOverlayStops() sizes it.
+  // Track and fill share the travel track's x/width and RADIUS_TRACK so the
+  // bar reads as the same span being consumed, and the fill is colourFault --
+  // the destroy colour, not a neutral progress tint -- because completing this
+  // hold erases both stop positions.
+  overlayStopsConfirmTrack = createRect(overlayStopsGroup,
+                                        OVERLAY_STOP_TRACK_X,
+                                        OVERLAY_STOP_CONFIRM_Y,
+                                        OVERLAY_STOP_TRACK_W,
+                                        OVERLAY_STOP_CONFIRM_H,
+                                        m_palette->colourDisabled,
+                                        RADIUS_TRACK);
+  lv_obj_add_flag(overlayStopsConfirmTrack, LV_OBJ_FLAG_HIDDEN);
+  overlayStopsConfirmFill = createRect(overlayStopsGroup,
+                                       OVERLAY_STOP_TRACK_X,
+                                       OVERLAY_STOP_CONFIRM_Y,
+                                       OVERLAY_STOP_CONFIRM_FILL_MIN,
+                                       OVERLAY_STOP_CONFIRM_H,
+                                       m_palette->colourFault, RADIUS_TRACK);
+  lv_obj_add_flag(overlayStopsConfirmFill, LV_OBJ_FLAG_HIDDEN);
+  // Static text, set once -- no TextSlot: "CLEARING BOTH STOPS" is 19 bytes,
+  // flush against setLabelText()'s 19-byte cache cap, and a static string has
+  // no business in the cache anyway. chipInk, the same punched-out ink as
+  // every filled chip, keeps it >= 3.9:1 on the grey track and better on the
+  // red fill in both palettes.
+  overlayStopsConfirmLabel = createLabel(overlayStopsGroup,
+                                         &lv_font_montserrat_14,
+                                         m_palette->chipInk,
+                                         OVERLAY_STOP_TRACK_X,
+                                         OVERLAY_STOP_CONFIRM_LABEL_Y);
+  fixLabelBox(overlayStopsConfirmLabel, OVERLAY_STOP_TRACK_W,
+              LV_TEXT_ALIGN_CENTER);
+  lv_label_set_text(overlayStopsConfirmLabel, "CLEARING BOTH STOPS");
+  lv_obj_add_flag(overlayStopsConfirmLabel, LV_OBJ_FLAG_HIDDEN);
 
   // Group D: MENU, the tile carousel -- three equal tiles across (prev /
   // current / next), the same geometry and quiet-tile treatment as the MODE
@@ -2781,6 +2880,16 @@ void Display::drawOverlay() {
   lv_obj_t* screen = nullptr;
   const char* title = "";
   OverlayHint hint = OH_NONE;
+  // The clear-both hold, 0..1000 (0 = not running). Sampled ONCE, here, and
+  // handed to drawOverlayStops(), so the hint row and the bar agree about the
+  // hold within a tick. UiState only arms it when the gesture can succeed (at
+  // rest, at least one stop set), so a non-zero value IS "this will clear both
+  // stops if it completes" -- no precondition is re-derived here. The one
+  // display-side guard, stopsLocked, mirrors the Hold handler's own fresh
+  // re-check for motion that starts DURING the second (uistate.cpp): UiState
+  // will refuse that hold when it lands, so the bar must stop filling for it
+  // -- the locked hint takes over instead.
+  int stopsConfirm = 0;
   switch (focus) {
   case UiFocus::Rate:
     group = overlayTickerGroup;
@@ -2800,7 +2909,12 @@ void Display::drawOverlay() {
   case UiFocus::Stops:
     group = overlayStopsGroup;
     title = "STOPS";
-    hint = stopsLocked ? OH_STOPS_LOCKED : OH_STOPS;
+    if (!stopsLocked && m_ui != nullptr) {
+      stopsConfirm = m_ui->stopsConfirmPermille(millis());
+    }
+    hint = stopsLocked ? OH_STOPS_LOCKED
+           : (stopsConfirm > 0) ? OH_STOPS_CONFIRM
+                                : OH_STOPS;
     break;
   case UiFocus::DroDatum:
     // Same locked treatment (and the SAME predicate) as STOPS: UiState refuses
@@ -2914,7 +3028,7 @@ void Display::drawOverlay() {
     break;
   case UiFocus::Stops:
   default:
-    drawOverlayStops();
+    drawOverlayStops(stopsConfirm);
     break;
   }
 }
@@ -3201,7 +3315,7 @@ void Display::drawOverlayMode() {
 // underneath it about a stop position or a datum. Recomputing would mean
 // duplicating the whole lib/dro datum resolution here, which is exactly the
 // kind of second opinion the datum rules must not have.
-void Display::drawOverlayStops() {
+void Display::drawOverlayStops(int confirmPermille) {
   const bool leftSet = m_leadscrew->getStopPositionState(
                          LeadscrewStopPosition::LEFT) == LeadscrewStopState::SET;
   const bool rightSet = m_leadscrew->getStopPositionState(
@@ -3250,6 +3364,38 @@ void Display::drawOverlayStops() {
       lv_obj_remove_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  // The clear-both confirm bar. Driven LIVE from the sampled permille every
+  // tick: the moment the press ends, stopsConfirmPermille() reads 0 and the
+  // whole thing vanishes on the next pass -- releasing IS the cancel, and the
+  // bar disappearing is its feedback. Show/hide and the fill width are gated
+  // separately, like the carriage above: mid-hold only the width changes, so
+  // only the fill repaints.
+  const bool confirmShown = confirmPermille > 0;
+  if (confirmShown != m_lastStopsConfirmShown) {
+    m_lastStopsConfirmShown = confirmShown;
+    if (confirmShown) {
+      lv_obj_remove_flag(overlayStopsConfirmTrack, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(overlayStopsConfirmFill, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(overlayStopsConfirmLabel, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayStopsConfirmTrack, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(overlayStopsConfirmFill, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(overlayStopsConfirmLabel, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (confirmShown) {
+    // Integer scale over the track width; the floor keeps the rounded rect
+    // from degenerating in the first fraction of the hold.
+    int fillW = (OVERLAY_STOP_TRACK_W * confirmPermille) / 1000;
+    if (fillW < OVERLAY_STOP_CONFIRM_FILL_MIN) {
+      fillW = OVERLAY_STOP_CONFIRM_FILL_MIN;
+    }
+    if (fillW != m_lastStopsConfirmFillW) {
+      m_lastStopsConfirmFillW = fillW;
+      lv_obj_set_size(overlayStopsConfirmFill, fillW, OVERLAY_STOP_CONFIRM_H);
     }
   }
 }

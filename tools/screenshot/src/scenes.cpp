@@ -298,8 +298,36 @@ void sc_overlayJogSpeed(Rig& r) {
 void sc_overlayStops(Rig& r) {
   baseState(r);
   spin(r, 850, 200);
+  // The FULL short-press event train (KeyArray's vocabulary: Press, Click,
+  // Release), not a bare Press: the Press now ARMS the clear-both confirm bar
+  // (both stops are set and the carriage is at rest), and pump() advances
+  // 240 ms of virtual time -- a key left "down" would render a quarter-full
+  // confirm bar instead of the resting widget this scene exists to pin.
   key(r, UiKey::Stops, UiKeyEvent::Press);
+  key(r, UiKey::Stops, UiKeyEvent::Click);
+  key(r, UiKey::Stops, UiKeyEvent::Release);
 }
+
+// The clear-both confirm bar (docs/ux-redesign.md section 4: "STOPS hold -
+// clear both, after a 1 s confirm bar") at three fill levels, so the gallery
+// shows the growth and the label together. Driven exactly as the keypad would:
+// STOPS goes down (Press arms the gesture -- both stops set, carriage at
+// rest), the key STAYS down, and the virtual clock advances. The bar is drawn
+// live from stopsConfirmPermille(millis()) at every one of pump()'s six ticks.
+// pump() advances 6 x 40 ms, and a value pushed on tick N is rendered on tick
+// N+1 (see pump()'s own comment), so the width in the PNG is the one pushed on
+// tick 5: the image lands at (holdMs + 200) / 1000 of the second. Verified
+// against the rendered fill's pixel extent, not assumed.
+void holdStops(Rig& r, int holdMs) {
+  baseState(r);
+  spin(r, 850, 200);
+  key(r, UiKey::Stops, UiKeyEvent::Press);
+  advanceMockMicros((uint64_t)holdMs * 1000ULL);
+}
+
+void sc_stopsConfirm25(Rig& r) { holdStops(r, 50); }   // renders at 250/1000
+void sc_stopsConfirm60(Rig& r) { holdStops(r, 400); }  // renders at 600/1000
+void sc_stopsConfirm95(Rig& r) { holdStops(r, 750); }  // renders at 950/1000
 
 // STOPS while the carriage is under power: the hint row must say the edit is
 // refused rather than advertise a gesture UiState will ignore.
@@ -484,6 +512,10 @@ const SceneDef kScenes[] = {
   { "overlay-jogspeed",       sc_overlayJogSpeed,     THEME_DARK,  false, 0 },
   { "overlay-stops",          sc_overlayStops,        THEME_DARK,  false, 0 },
   { "overlay-stops-locked",   sc_overlayStopsLocked,  THEME_DARK,  false, 0 },
+  // The clear-both confirm bar mid-hold, three fill levels.
+  { "overlay-stops-confirm-25", sc_stopsConfirm25,    THEME_DARK,  false, 0 },
+  { "overlay-stops-confirm-60", sc_stopsConfirm60,    THEME_DARK,  false, 0 },
+  { "overlay-stops-confirm-95", sc_stopsConfirm95,    THEME_DARK,  false, 0 },
   // Menu carousel.
   { "menu-units",             sc_menuUnits,           THEME_DARK,  false, 0 },
   { "menu-dro-datum",         sc_menuDroDatum,        THEME_DARK,  false, 0 },
