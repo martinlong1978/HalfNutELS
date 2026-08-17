@@ -24,7 +24,7 @@ extern Display* display;
 
 // Mk2 button panel glue (docs/ux-redesign.md Sec. 1-6).
 //
-// The old file dispatched one handler per verb, each gated on GlobalButtonLock.
+// The old file dispatched one handler per verb, each gated on a button lock.
 // It is now one path: matrix code -> UiKey, ButtonState -> UiKeyEvent, ask
 // UiState, execute the single UiIntent it returns.
 //
@@ -35,9 +35,9 @@ extern Display* display;
 // verbatim - never filtered, coalesced or synthesised here.
 //
 // The lock is gone from this path (docs/ux-redesign.md Sec. 7): HALT is the
-// answer to "stop it now", not a mode that prevents keys working. GlobalButtonLock
-// itself still exists because lib/display still reads it; it is deleted with the
-// display rebuild.
+// answer to "stop it now", not a mode that prevents keys working. The lock
+// state, its enum, and its accessors on GlobalState have since been deleted
+// outright now that lib/display no longer reads it either.
 
 ButtonPad::ButtonPad(Spindle* spindle, Leadscrew* leadscrew, KeyArray* pad)
   : m_spindle(spindle),
@@ -57,14 +57,6 @@ ButtonPad::ButtonPad(Spindle* spindle, Leadscrew* leadscrew, KeyArray* pad)
   // the user's commissioned geometry. Geometry is now web-only and carried
   // through flash by saveLathePreferences(), so the copy, the seeding, and the
   // size assert that guarded it are all gone (see buttonpad.h).
-
-  // GlobalState still constructs with the pad LOCKED, and nothing toggles the
-  // lock any more: this feature set removed the LOCK key with the rest of the
-  // Sec. 7 lock model. Left alone the device would boot showing the padlock
-  // forever and KeyArray::updateEncoderPos() (src/keyarray.cpp:102) would
-  // swallow every encoder click. Clear it once here. Remove this line together
-  // with GlobalButtonLock / drawLocked() when the display is rebuilt.
-  GlobalState::getInstance()->setButtonLock(GlobalButtonLock::LK_UNLOCKED);
 }
 
 bool ButtonPad::codeToKey(int code, UiKey& key) {

@@ -36,13 +36,6 @@ enum GlobalUnitMode { METRIC, IMPERIAL };
 enum GlobalThreadSyncState { SS_UNSET, SS_SYNC, SS_UNSYNC };
 
 /**
- * The state of the global button lock
- * Unlocked: The buttons are unlocked
- * Locked: The buttons are locked
- */
-enum GlobalButtonLock { LK_UNSET, LK_UNLOCKED, LK_LOCKED };
-
-/**
  * OTA update progress, set by the OTA task (SpindleTask) and read by the
  * DisplayTask so the OTA screen can show the right message. The two tasks
  * coordinate only through this (volatile) value; no display method is ever
@@ -90,7 +83,6 @@ private:
   volatile GlobalMotionMode m_motionMode;
   volatile GlobalUnitMode m_unitMode;
   volatile GlobalThreadSyncState m_threadSyncState;
-  volatile GlobalButtonLock m_buttonLock;
 
   volatile bool m_debugMode = false;
   volatile bool m_displayReset = false;
@@ -161,7 +153,6 @@ private:
     m_pitchMemory[pitchMemoryUnitIndex(IMPERIAL)][0] = DEFAULT_IMPERIAL_FEED_PITCH_IDX;
     m_pitchMemory[pitchMemoryUnitIndex(IMPERIAL)][1] = DEFAULT_IMPERIAL_THREAD_PITCH_IDX;
 
-    setButtonLock(LK_LOCKED);
     // Seed from the slot the configured default mode/unit actually selects.
     // Passing DEFAULT_METRIC_FEED_PITCH_IDX here instead would hardcode the
     // METRIC/FEED default onto whatever slot DEFAULT_UNIT_MODE /
@@ -220,9 +211,6 @@ public:
 
   void setThreadSyncState(GlobalThreadSyncState state);
   GlobalThreadSyncState getThreadSyncState();
-
-  void setButtonLock(GlobalButtonLock lock);
-  GlobalButtonLock getButtonLock();
 
   bool hasOTA();
   void setOTA();

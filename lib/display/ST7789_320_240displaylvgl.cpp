@@ -3511,12 +3511,13 @@ void Display::updateLed() {
 
   GlobalState* state = GlobalState::getInstance();
   GlobalMotionMode mode = state->getMotionMode();
-  GlobalButtonLock lock = GlobalState::getInstance()->getButtonLock();
 
+  // No lock any more (docs/ux-redesign.md Sec. 7) - these LEDs report motion
+  // state only: off when idle, yellow while jogging, green while engaged.
   switch (mode) {
   case GlobalMotionMode::MM_DISABLED:
-    firstColour = lock == LK_LOCKED ? EC_RED : EC_NONE;
-    secondColour = lock == LK_LOCKED ? EC_RED : EC_NONE;
+    firstColour = EC_NONE;
+    secondColour = EC_NONE;
     break;
   case GlobalMotionMode::MM_JOG_LEFT:
   case GlobalMotionMode::MM_JOG_RIGHT:
@@ -3524,7 +3525,7 @@ void Display::updateLed() {
     secondColour = EC_YELLOW;
     break;
   case GlobalMotionMode::MM_ENABLED:
-    firstColour = lock == LK_LOCKED ? EC_RED : EC_GREEN;
+    firstColour = EC_GREEN;
     secondColour = EC_GREEN;
     break;
   }
