@@ -74,6 +74,31 @@ These were judgement calls made to keep moving. All are cheap to reverse — say
    smooth edges need regenerating from the SVGs in `assets/` — deliberately not attempted,
    since it would change the artwork rather than just the format.
 
+## A pre-existing bug worth fixing — imperial feed is 1000× too slow
+
+Found by the FS-A review, confirmed independently, **not fixed** — it is outside this
+redesign's scope and it changes how the machine actually cuts, so it is your call.
+
+`feedPitchImperial[]` (`lib/config/config.h`) is commented `// defined as thou/rev` but holds
+`0.002 … 0.030`. Those are **inches** per rev — 2 to 30 thou, which are the real feed rates for
+a lathe this size. The comment is wrong, and two pieces of code disagree about it:
+
+| | Treats the table as | At index 8 (`0.010`) |
+|---|---|---|
+| `Display::drawPitch()` | inches — renders `* 1000` | shows `10th` ✓ |
+| `GlobalState::getCurrentFeedPitch()` | thou — computes `* 25.4 / 1000` | commands **0.000254 mm/rev** ✗ |
+
+They cannot both be right, and the display is. The correct conversion is `* 25.4`, giving
+0.254 mm/rev. As it stands, **imperial feed mode feeds at one thousandth of the rate shown on
+screen** — the screen says 10 thou and the carriage creeps.
+
+Metric feed and both threading modes are unaffected (they use different tables and paths), and
+imperial *threading* is fine — it goes through the TPI branch. It is imperial FEED only, which
+is presumably why it has survived.
+
+The fix is one line plus a test asserting the correct value. I have not applied it because it
+changes machine motion and belongs in its own commit, not buried in a UI branch.
+
 ## Safety findings from review — read this bit first
 
 The FS-D review turned up two genuine hazards in the focus state machine. Both are fixed or
@@ -102,9 +127,61 @@ a `Release` entirely: `handleRelease()` returns early inside a 10 ms debounce, s
 tap emits `Press` with no `Release` at all; and `handleTimer()` emits a release for button `0`
 rather than the arrow if any second key is touched during a hold. A dead-man jog that never
 receives its release cannot stop itself. Today's `FM_JOG` path has the identical hazard, so
-this is not a regression — but the buttonpad rewrite (FS-G) needs a caller-side watchdog that
-re-arms a jog only on continued evidence the key is down. **This is the one I would want your
-eyes on.**
+this is not a regression — but a dead-man switch whose release can go missing is only a
+dead-man switch by luck. **This is the one I would want your eyes on**, and it is the reason
+FS-G ships with a `// HAZARD:` comment rather than a fix.
+
+Two candidate fixes, both behaviour changes I did not want to make unilaterally:
+
+- **Time-cap a continuous jog** — auto-decelerate after N ms with no `Release`. Simple,
+  bounded, no new coupling. Costs you a jog that stops itself mid-traverse if you pick N too
+  short, and a long deliberate traverse is a legitimate thing to want.
+- **Poll the matrix from the display loop** while a jog is in flight, and stop the moment the
+  key is no longer physically down. This is a true dead-man rather than an approximation, but
+  `getCodeFromArray()` has side effects — it reconfigures pin modes and re-attaches the
+  interrupts — so calling it from the display task races the ISR. It would need that scan
+  split into a side-effect-free read first.
+
+I lean to the second done properly, because the first only shortens the window rather than
+closing it. But it is a real change to how the keypad is read, on the path that moves the
+carriage, so it is your call.
+
+## Known regressions on this branch
+
+Tracked, not accidental. All are consequences of removing a key before its replacement exists.
+
+1. **OTA has no on-device trigger.** The half-nut hold that started an update is gone with the
+   key, and its designed replacement is the Software update menu tile, which does not exist
+   until the display rebuild. **Do not flash this branch to the lathe expecting to update it
+   over the air afterwards** — you would be back to USB until the menu lands. If you want a
+   temporary binding in the meantime (MENU-hold would be the obvious one) it is a two-line
+   change; I did not add it unasked because it is a UI decision and it would need removing
+   again.
+2. **Units toggle is unreachable.** MODE-hold used to switch metric/imperial; that moves to
+   the Units tile, so MODE-hold is currently inert.
+3. **Display reset is unreachable.** Thread-sync-hold used to call `setDisplayReset()`; that
+   key no longer exists.
+4. **The lock is bypassed but not removed.** `GlobalButtonLock`, `getButtonLock()` and
+   `drawLocked()` all still exist because `lib/display` calls them — deleting them now would
+   break the device build. The new buttonpad simply never consults the lock, and the
+   `ButtonPad` constructor unlocks once at startup so the padlock does not sit on screen and
+   so the encoder is not silently swallowed (`keyarray.cpp:102`). All of it dies with the
+   display rebuild.
+
+## A landmine for whoever wires up ZeroDro
+
+`OK`-hold emits `ZeroDro`, and it is deliberately allowed while the machine is engaged — it
+moves no metal, and the DRO is a display concern. That reasoning only holds while the zero is
+a **display datum**.
+
+If it is ever implemented as `Leadscrew::setCurrentPosition(0)`, it stops being a display
+concern: the endstops are stored as absolute positions against the same counter, so rezeroing
+mid-cut would silently shift both stops relative to the tool. The datum must live beside the
+DRO (a stored `manualZeroPulses`, exactly as `lib/dro` already models it) and must never move
+the carriage's own position counter.
+
+`Leadscrew::setCurrentPosition()` exists and has no non-test callers. It is the obvious wrong
+answer, which is why it is written down here.
 
 ## Questions for Martin
 
