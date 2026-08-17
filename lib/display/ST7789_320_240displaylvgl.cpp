@@ -53,88 +53,102 @@ struct DisplayPalette {
   lv_color_t accent;         // focus accent: the overlay border and the selected
                               // MODE tile. The one colour that means "the arrows
                               // drive THIS" (section 1).
+  lv_color_t chipInk;        // ink used ON TOP of a filled chip (accent, the
+                              // state colours, colourDisabled). Always a DARK
+                              // ink in both palettes: the vivid fills are all
+                              // mid-luminance, so a light ink fails contrast on
+                              // every one of them (white on colourRun is 2.2:1)
+                              // while a near-black ink clears 3.9:1 on the
+                              // dimmest (colourDisabled) and ~9:1 on the rest.
+                              // This is what lets the state word, the SYNC chip
+                              // and the selected tiles stay legible in BOTH
+                              // themes -- coloured TEXT on a light ground is
+                              // unreadable (colourRun on white is 2.2:1), so
+                              // anything state-coloured is a filled chip with
+                              // this ink instead.
 };
 
-// Dark palette (THEME_DARK, the default). NOTE the naming is historical: these
-// are the values the pre-redesign screen rendered with, which is a LIGHT-ground
-// look (LVGL's default theme background, black ink). Renaming/retuning the two
-// palettes into a genuinely dark one and a light one is a theme-work item, not
-// a layout one, so this pass leaves the values alone and only rebuilds the
-// layout on top of them.
-static const DisplayPalette PALETTE_DARK = {
-  lv_color_hex(0xF5F5F5), // background: matches LVGL's implicit default theme
-                          // screen colour (LIGHT_COLOR_SCR = lv_palette_
-                          // lighten(GREY, 4) in lv_theme_default.c, since
-                          // lv_conf.h has LV_THEME_DEFAULT_DARK 0) -- R==B, no
-                          // swap needed. init() now paints it explicitly rather
-                          // than relying on that default.
-  lv_color_hex(0x000000), // textPrimary: was the hardcoded black mode-icon/
-                          // RPM ink -- R==B, no swap needed.
-  lv_color_hex(0x616161), // textDim: mid grey -- R==B, no swap needed.
-  lv_color_hex(0x008800), // colourRun: was COLOUR_GREEN.
-  lv_color_hex(0x0084FF), // colourCaution: was COLOUR_YELLOW.
-  lv_color_hex(0x0000FF), // colourFault: was COLOUR_RED.
-  lv_color_hex(0xCCCCCC), // colourDisabled: was COLOUR_DISABLED.
-  lv_color_hex(0xFFFFFF), // iconInk: was the hardcoded white status-icon ink
-                          // -- R==B, no swap needed.
-  lv_color_hex(0xFFFFFF), // surface: white, one step UP from this palette's
-                          // 0xF5F5F5 ground (see the naming note above: "dark"
-                          // is historically a light-ground look). R==B, no swap.
-  lv_color_hex(0xF8BD38), // accent: docs/ux-redesign.md section 8 "Colour"
-                          // gives the focus accent as natural #38BDF8 ->
-                          // R=38,G=BD,B=F8 -> swap R/B -> F8,BD,38 -> 0xF8BD38.
-                          // A pale sky blue, so this palette's black
-                          // textPrimary is what goes on top of it.
-};
-
-// Light palette: not reachable yet -- no menu wires LatheConfig::theme to
-// THEME_LIGHT, and setTheme() below is not called from anywhere. background/
-// textPrimary/textDim are placeholders (unconsumed, same as in dark).
-// colourRun/colourCaution/colourFault/colourDisabled come from
-// docs/ux-redesign.md section 8 "Colour", which gives them pre-swapped
-// already; the swap arithmetic (R<->B byte swap of the doc's natural hex) is
-// reproduced here so it's checkable without cross-referencing the doc:
+// Shared state / accent hues, from docs/ux-redesign.md section 8 "Colour":
+// "the accent/state hues are shared so only the ground and text tokens differ",
+// so the vivid set appears ONCE here and both palettes reference it. The doc
+// gives them pre-swapped already; the swap arithmetic (R<->B byte swap of the
+// doc's natural hex) is reproduced so it's checkable without cross-referencing:
 //   run:      natural #00C853 -> R=00,G=C8,B=53 -> swap R/B -> 53,C8,00 -> 0x53C800
 //   caution:  natural #FFAB00 -> R=FF,G=AB,B=00 -> swap R/B -> 00,AB,FF -> 0x00ABFF
 //   fault:    natural #FF3B30 -> R=FF,G=3B,B=30 -> swap R/B -> 30,3B,FF -> 0x303BFF
 //   disabled: natural #6B7280 -> R=6B,G=72,B=80 -> swap R/B -> 80,72,6B -> 0x80726B
-// These deliberately do NOT match PALETTE_DARK's state colours even though
-// docs/ux-redesign.md section 8 "Theme" says "the accent/state hues are
-// shared so only the ground and text tokens differ" -- that line describes an
-// eventual full re-skin where dark's state colours would ALSO move to this
-// vivid set, but this pass's hard constraint is that dark stays byte-for-byte
-// identical to today, so dark keeps today's older/dimmer state hex values
-// instead. Worth reconciling when the two palettes are next revisited.
+//   accent:   natural #38BDF8 -> R=38,G=BD,B=F8 -> swap R/B -> F8,BD,38 -> 0xF8BD38
+#define STATE_RUN       lv_color_hex(0x53C800)
+#define STATE_CAUTION   lv_color_hex(0x00ABFF)
+#define STATE_FAULT     lv_color_hex(0x303BFF)
+#define STATE_DISABLED  lv_color_hex(0x80726B)
+#define FOCUS_ACCENT    lv_color_hex(0xF8BD38)
+
+// Dark palette (THEME_DARK, the default): a genuinely dark ground -- near-black
+// blue-grey with near-white ink. (Its previous values were the pre-redesign
+// light-grey screen, kept during the layout pass; that "grey and unreadable"
+// look is exactly what this replaces.)
+static const DisplayPalette PALETTE_DARK = {
+  lv_color_hex(0x14110E), // background: natural #0E1114 -> R=0E,G=11,B=14 ->
+                          // swap R/B -> 14,11,0E -> 0x14110E. Painted onto the
+                          // screen explicitly by init() -- relying on LVGL's
+                          // default (light grey) ground is why "dark" used to
+                          // render light.
+  lv_color_hex(0xF7F5F2), // textPrimary: natural #F2F5F7 -> R=F2,G=F5,B=F7 ->
+                          // swap R/B -> F7,F5,F2 -> 0xF7F5F2. 17.3:1 on the
+                          // background.
+  lv_color_hex(0x94877C), // textDim: natural #7C8794 -> R=7C,G=87,B=94 ->
+                          // swap R/B -> 94,87,7C -> 0x94877C. 5.2:1 on the
+                          // background, 4.6:1 on the surface.
+  STATE_RUN,              // colourRun (shared, swap working above).
+  STATE_CAUTION,          // colourCaution (shared, swap working above).
+  STATE_FAULT,            // colourFault (shared, swap working above).
+  STATE_DISABLED,         // colourDisabled (shared, swap working above).
+  lv_color_hex(0xFFFFFF), // iconInk: white -- R==B, its own swap.
+  lv_color_hex(0x241E19), // surface: natural #191E24 -> R=19,G=1E,B=24 ->
+                          // swap R/B -> 24,1E,19 -> 0x241E19. One step up from
+                          // the background, so the opaque overlay panel reads
+                          // as a thing that replaced the screen, not an outline.
+  FOCUS_ACCENT,           // accent (shared, swap working above).
+  lv_color_hex(0x14110E), // chipInk: the background colour again -- text is
+                          // "punched out" of a filled chip down to the ground.
+                          // Same value as background above, same swap working.
+};
+
+// Light palette. Same vivid state/accent hues; only the ground and ink tokens
+// differ (docs/ux-redesign.md section 8 "Theme").
 static const DisplayPalette PALETTE_LIGHT = {
-  lv_color_hex(0xFFFFFF), // background: white -- R==B, no swap needed.
-  lv_color_hex(0x000000), // textPrimary: black -- R==B, no swap needed.
-  lv_color_hex(0x757575), // textDim: mid grey -- R==B, no swap needed.
-  lv_color_hex(0x53C800), // colourRun, see swap working above.
-  lv_color_hex(0x00ABFF), // colourCaution, see swap working above.
-  lv_color_hex(0x303BFF), // colourFault, see swap working above.
-  lv_color_hex(0x80726B), // colourDisabled, see swap working above.
-  // iconInk: BLACK here, unlike dark's white -- R==B, no swap needed.
+  lv_color_hex(0xFFFFFF), // background: white -- R==B, its own swap.
+  lv_color_hex(0x110E0B), // textPrimary: natural #0B0E11 -> R=0B,G=0E,B=11 ->
+                          // swap R/B -> 11,0E,0B -> 0x110E0B. 19.4:1 on white.
+  lv_color_hex(0x7C7268), // textDim: natural #68727C -> R=68,G=72,B=7C ->
+                          // swap R/B -> 7C,72,68 -> 0x7C7268. 4.9:1 on white,
+                          // 4.2:1 on the surface.
+  STATE_RUN,              // colourRun (shared, swap working above).
+  STATE_CAUTION,          // colourCaution (shared, swap working above).
+  STATE_FAULT,            // colourFault (shared, swap working above).
+  STATE_DISABLED,         // colourDisabled (shared, swap working above).
+  // iconInk: BLACK here, unlike dark's white -- R==B, its own swap.
   //
   // The status icons are recoloured to iconInk and (in the overlays that will
   // use them) drawn ON TOP of the state colours above, so this pairing is what
-  // has to be legible, not the ink against the screen background. Dark's are
-  // the old dim hues (0x008800 green), which white reads well against. Light's
-  // are the design doc's vivid hues, and white on those is washed out --
-  // measured contrast is 2.24:1 on colourRun and 1.90:1 on colourCaution, both
-  // under the 3:1 minimum for UI glyphs. Black against the same two is roughly
-  // 9.8:1 and 12:1.
-  //
-  // This is the same class of mistake the I1->A8 icon conversion already made
-  // once (black ink landing on the green "engaged" chip), so it is spelled out
-  // rather than left to be rediscovered.
+  // has to be legible, not the ink against the screen background. White on the
+  // vivid hues is washed out -- measured contrast is 2.2:1 on colourRun and
+  // 1.9:1 on colourCaution, both under the 3:1 minimum for UI glyphs. Black
+  // against the same two is roughly 9.4:1 and 11:1. (This is the same class of
+  // mistake the I1->A8 icon conversion already made once -- black ink landing
+  // on the green "engaged" chip -- so it is spelled out rather than left to be
+  // rediscovered. It is also exactly why chipInk exists and is dark in BOTH
+  // palettes.)
   lv_color_hex(0x000000),
-  lv_color_hex(0xF5F5F5), // surface: one step DOWN from this palette's white
-                          // ground -- the opposite direction to dark's, because
-                          // there is nowhere above white to go. R==B, no swap.
-  lv_color_hex(0xF8BD38), // accent: same focus accent as dark, see the swap
-                          // working there. Section 8 "Theme" says the accent
-                          // hue is SHARED between the two palettes, so unlike
-                          // the state colours these two are meant to match.
+  lv_color_hex(0xF0EEEB), // surface: natural #EBEEF0 -> R=EB,G=EE,B=F0 ->
+                          // swap R/B -> F0,EE,EB -> 0xF0EEEB. One step DOWN
+                          // from this palette's white ground -- the opposite
+                          // direction to dark's, because there is nowhere
+                          // above white to go.
+  FOCUS_ACCENT,           // accent (shared, swap working above).
+  lv_color_hex(0x110E0B), // chipInk: this palette's textPrimary again (natural
+                          // #0B0E11, same swap working as above).
 };
 
 // --- Layout ------------------------------------------------------------------
@@ -151,28 +165,33 @@ static const DisplayPalette PALETTE_LIGHT = {
 //   146 +------------------------------------------+
 //       | |--o---------------|                       |
 //       | L 0.00        12.40 mm             48.00 R |  carriage travel
-//   192 +------------------------------------------+
-//       |  * IDLE                                  |  state
-//       |     HALT        MENU        RUN          |  soft-key hints
+//   196 +------------------------------------------+
+//       |  [ CUTTING ]                             |  state chip (36)
 //   240 +------------------------------------------+
+//
+// The soft-key hint row that band 5 used to carry is GONE: the physical caps
+// are properly labelled, so mirroring them wasted the band. Its height went to
+// the state word (26 -> 36, chip-filled) and to band 4, the most information-
+// dense band on the screen (taller track and markers).
 //
 // Every y below is derived from those boundaries plus the ACTUAL Montserrat
 // metrics (line_height / base_line from lvgl's lv_font_montserrat_*.c):
 //     size 14: line_height 16, base_line 3  -> ascent 13
 //     size 26: line_height 29, base_line 5  -> ascent 24
+//     size 36: line_height 40, base_line 7  -> ascent 33
 //     size 48: line_height 52, base_line 9  -> ascent 43
 // A single-line label's height IS its font's line_height, so "baseline-align a
 // 14 with a 26" means y14 = y26 + (24 - 13) = y26 + 11.
 //
 // Only Montserrat 14/26/36/48 are compiled in (include/lv_conf.h) -- any other
-// size fails to link. This screen uses 14, 26 and 48 only.
+// size fails to link.
 static const int SCREEN_W = 320;
 static const int SCREEN_H = 240;
 
 static const int BAND_STATUS_BOTTOM = 34;
 static const int BAND_PITCH_BOTTOM = 124;
 static const int BAND_TICKER_BOTTOM = 146;
-static const int BAND_TRAVEL_BOTTOM = 192;
+static const int BAND_TRAVEL_BOTTOM = 196;
 
 // Band 1 -- status bar, 0..33 (h 34).
 // 26 centred: (34-29)/2 = 2. 14 centred: (34-16)/2 = 9.
@@ -180,7 +199,14 @@ static const int BAND_TRAVEL_BOTTOM = 192;
 static const int STATUS_CHIP_Y = 9;
 static const int STATUS_MODE_X = 8;    // widest text "THREAD R" = 75px -> 83
 static const int STATUS_UNIT_X = 96;   // widest text "inch" = 31px -> 127
-static const int STATUS_SYNC_X = 146;  // "SYNC" = 39px -> 185
+static const int STATUS_SYNC_X = 140;  // "SYNC" ink 140..179; the label carries
+                                       // a chip fill when synced, so its BOX is
+                                       // padded SYNC_CHIP_PAD_H beyond the ink
+                                       // on each side (134..185) -- the two
+                                       // adjacency asserts below are written
+                                       // against the padded box, not the ink.
+static const int SYNC_CHIP_PAD_H = 6;
+static const int SYNC_CHIP_PAD_V = 3;  // chip 6..27 vertically, ink still at 9
 static const int STATUS_RPM_VALUE_Y = 2;
 static const int STATUS_RPM_VALUE_X = 186;  // right-aligned box, 186..266;
 static const int STATUS_RPM_VALUE_W = 80;   // "9999" @26 = 64px -> ink from 202
@@ -206,18 +232,20 @@ static const int TICKER_W = 296;
 static const int TICKER_H = 8;
 static const int TICKER_KNOB_PAD = 3;  // -> a 14x14 marker, 128..141
 
-// Band 4 -- carriage travel, 147..191 (h 45).
+// Band 4 -- carriage travel, 147..195 (h 49). Grew 4px when the soft-key hint
+// row was removed: the taller track and markers are what make the most
+// information-dense band on the screen readable at a glance.
 static const int TRAVEL_TRACK_X = 12;
-static const int TRAVEL_TRACK_Y = 150;
+static const int TRAVEL_TRACK_Y = 153;
 static const int TRAVEL_TRACK_W = 296;  // 12..307
-static const int TRAVEL_TRACK_H = 8;
-static const int TRAVEL_MARK_Y = 147;   // 14 tall -> 147..160, clear of the rule
-static const int TRAVEL_MARK_H = 14;
+static const int TRAVEL_TRACK_H = 10;
+static const int TRAVEL_MARK_Y = 150;   // 16 tall -> 150..165, clear of the rule
+static const int TRAVEL_MARK_H = 16;
 static const int TRAVEL_MARK_W = 4;
 static const int TRAVEL_CARRIAGE_W = 8;
-// 26 at y 161 -> box 161..189, baseline 185. The 14s sit at 185-13 = 172.
-static const int TRAVEL_VALUE_Y = 161;
-static const int TRAVEL_LABEL_Y = 172;
+// 26 at y 166 -> box 166..194, baseline 190. The 14s sit at 190-13 = 177.
+static const int TRAVEL_VALUE_Y = 166;
+static const int TRAVEL_LABEL_Y = 177;
 static const int TRAVEL_POS_X = 90;    // right-aligned box 90..200
 static const int TRAVEL_POS_W = 110;   // "-300.00" @26 = 100px -> ink from 100
 static const int TRAVEL_POS_UNIT_X = 204;  // "mm" @14 = 30px -> 234
@@ -230,22 +258,19 @@ static const int TRAVEL_LEFT_W = 74;       // 12..85; see fixLabelBox() at its
 static const int TRAVEL_RIGHT_X = 238;     // right-aligned box 238..308
 static const int TRAVEL_RIGHT_W = 70;      // "888.88 R" @14 = 62px -> ink from 246
 
-// Band 5 -- state + soft keys, 193..239 (h 47).
-// Two rows: the 26 state word (29 tall) then the 14 hint row (16 tall) = 45.
-static const int STATE_DOT_X = 10;
-static const int STATE_DOT_Y = 203;
-static const int STATE_DOT_SIZE = 12;
-static const int STATE_WORD_X = 28;
-static const int STATE_WORD_Y = 194;   // box 194..222
-static const int STATE_WORD_W = 170;   // "RETURNING" @26 = 161px, clipped beyond
-static const int SOFTKEY_Y = 223;      // box 223..238
-static const int SOFTKEY_W = 106;      // three columns mirroring the 3x3 keypad
-static const int SOFTKEY_X0 = 0;       // 0..105, 106..211, 212..317
+// Band 5 -- the state chip, 197..239 (h 43). One Montserrat-36 label carrying
+// its own state-coloured background (chip), chipInk text. The soft-key hint row
+// is gone (the physical caps are labelled), so the word grew 26 -> 36 and fills
+// the band: 36 line_height 40, pad_v 0 -> chip 198..237.
+static const int STATE_CHIP_X = 10;
+static const int STATE_CHIP_Y = 198;
+static const int STATE_CHIP_PAD_H = 12;  // horizontal chip padding around the ink
 
 // Font box heights, for the layout assertions below (see the metrics table
 // above): a single-line label is exactly line_height tall.
 static const int FONT14_H = 16;
 static const int FONT26_H = 29;
+static const int FONT36_H = 40;
 static const int FONT48_H = 52;
 static const int GLYPH_W = 128;
 static const int GLYPH_H = 64;
@@ -267,7 +292,7 @@ static const int TEXT14_UNIT_W = 32;       // "inch"
 static const int TEXT14_SYNC_W = 39;       // "SYNC"
 static const int TEXT14_RPM_UNIT_W = 33;   // "RPM"
 static const int TEXT26_RPM_VALUE_W = 64;  // "9999"
-static const int TEXT26_STATE_W = 161;     // "RETURNING" (longest state word)
+static const int TEXT36_STATE_W = 223;     // "RETURNING" (longest state word)
 
 // --- Selector overlay --------------------------------------------------------
 //
@@ -282,18 +307,22 @@ static const int TEXT26_STATE_W = 161;     // "RETURNING" (longest state word)
 //       |    1.00        1.25        1.50            |  ticker  (26/48/26)
 //       |                  mm                        |  unit       (26, dim)
 //       |  <> pitch                        OK done   |  hints      (14, dim)
-//   188 +--------------------------------------------+
+//   196 +--------------------------------------------+
 //
-// The panel is 8..311 x 40..187. Child coordinates below are relative to its
-// CONTENT area, which LVGL insets by the border width (lv_obj_get_style_space_*
-// adds border_width to the padding), so the usable box is 300 x 144 and every
-// child x/y is measured from (OVERLAY_X + OVERLAY_BORDER, OVERLAY_Y +
-// OVERLAY_BORDER). Groups sit at (0,0) at full content size and pass their
-// children's coordinates through unchanged.
+// The panel is 8..311 x 40..195: its bottom edge lands exactly on the band-4/5
+// rule, so it covers band 4 COMPLETELY. Anything less leaves a strip of the
+// travel readout's half-clipped glyphs visible under the panel edge, which
+// reads as a rendering fault (it did, before the panel grew to meet the rule).
+// Child coordinates below are relative to its CONTENT area, which LVGL insets
+// by the border width (lv_obj_get_style_space_* adds border_width to the
+// padding), so the usable box is 300 x 152 and every child x/y is measured
+// from (OVERLAY_X + OVERLAY_BORDER, OVERLAY_Y + OVERLAY_BORDER). Groups sit at
+// (0,0) at full content size and pass their children's coordinates through
+// unchanged.
 static const int OVERLAY_X = 8;
 static const int OVERLAY_Y = 40;
 static const int OVERLAY_W = 304;   // 8..311
-static const int OVERLAY_H = 148;   // 40..187
+static const int OVERLAY_H = 156;   // 40..195
 static const int OVERLAY_BORDER = 2;
 static const int OVERLAY_CONTENT_W = OVERLAY_W - (2 * OVERLAY_BORDER);  // 300
 static const int OVERLAY_CONTENT_H = OVERLAY_H - (2 * OVERLAY_BORDER);  // 144
@@ -302,10 +331,17 @@ static const int OVERLAY_CONTENT_H = OVERLAY_H - (2 * OVERLAY_BORDER);  // 144
 // bottom, and the body between them.
 static const int OVERLAY_TITLE_Y = 5;    // 14 -> 5..20
 static const int OVERLAY_BODY_TOP = 24;
-static const int OVERLAY_BODY_BOTTOM = 118;
-static const int OVERLAY_HINT_Y = 122;   // 14 -> 122..137
+static const int OVERLAY_BODY_BOTTOM = 126;
+static const int OVERLAY_HINT_Y = 130;   // 14 ink -> 130..145
+// The left hint doubles as a REFUSAL chip ("moving - stops locked"): when the
+// hint variant is a block it takes a colourCaution fill with chipInk text --
+// coloured TEXT would be unreadable on the light surface (caution on #EBEEF0
+// is 1.5:1), a filled chip is ~10:1 in both palettes. The label is auto-width
+// (the chip must hug its text) and permanently padded, positioned so the INK
+// stays at (OVERLAY_HINT_L_X, OVERLAY_HINT_Y) whether or not the fill shows.
 static const int OVERLAY_HINT_L_X = 6;
-static const int OVERLAY_HINT_L_W = 190;  // 6..195
+static const int OVERLAY_HINT_PAD_H = 6;
+static const int OVERLAY_HINT_PAD_V = 2;  // chip 120..141, inside the 144 content
 static const int OVERLAY_HINT_R_X = 200;
 static const int OVERLAY_HINT_R_W = 94;   // 200..293
 
@@ -349,43 +385,35 @@ static const int OVERLAY_STOP_POS_Y = 76;     // 26 -> 76..104
 static const int OVERLAY_STOP_POS_X = 20;     // 20..279
 static const int OVERLAY_STOP_POS_W = 260;
 
-// MENU: the tile carousel (docs/ux-redesign.md section 6).
+// MENU: the tile carousel (docs/ux-redesign.md section 6), three tiles across
+// exactly as the mockup drew it:
 //
 //    40 +--- 2px accent border ----------------------+
 //       |   MENU                             6 / 9   |  title + position (14)
-//       |        +--------------------------+        |
-//       |        |     Software update      |        |  current tile card (26)
-//       |        +--------------------------+        |
-//       |     Sync                Wi-Fi setup        |  neighbours     (14, dim)
+//       |  +--------+  +==========+  +--------+      |
+//       |  |  Sync  |  | Software |  |  Wi-Fi |      |  prev / CURRENT / next
+//       |  |        |  |  update  |  |  setup |      |  (14, wrapped to 2 lines,
+//       |  +--------+  +==========+  +--------+      |   centre = accent fill)
 //       |   <> move                        OK open   |  hints          (14)
-//   188 +--------------------------------------------+
+//   196 +--------------------------------------------+
 //
-// The neighbours sit on the row BELOW the card rather than truly beside it, and
-// that is forced arithmetic, not a preference: "Software update" is 223px at
-// Montserrat 26 and the panel's content area is only 300 wide, so a card able to
-// show the longest tile name leaves ~35px a side - not enough for a legible
-// neighbour, and clipping a neighbour to "Softwa" tells the operator nothing.
-// The direction information is preserved instead by ALIGNMENT: the previous tile
-// is right-aligned into the left half and the next tile left-aligned into the
-// right half, so both point at the card, exactly as the RATE ticker's dimmed
-// neighbours do. Same grammar, one row down.
-//
-// No LV_SYMBOL arrows on the neighbour labels: they would eat into the 140px
-// boxes that the longest name (122px at 14) already nearly fills, and the hint
-// row below already says which key moves which way.
+// Three EQUAL tiles -- selection is marked by the accent FILL on the centre
+// tile, never by size. That is only possible at Montserrat 14 with the names
+// allowed to WRAP to two lines inside their tile ("Software / update"): the
+// widest UNBREAKABLE word, "Diagnostics", is 85px at 14, so it is the word
+// widths, not the full names, that size the tile (see TEXT14_MENU_WORD_W).
+// Same geometry as the MODE tiles (92px tiles, 8px gaps, x0 4 -> 4..95 /
+// 104..195 / 204..295 in the 300px content area), so the two three-across
+// widgets read as one family.
 static const int OVERLAY_MENU_POS_X = 236;   // 236..295, right of the title
 static const int OVERLAY_MENU_POS_W = 60;
-static const int OVERLAY_MENU_CARD_X = 10;   // 10..289
-static const int OVERLAY_MENU_CARD_W = 280;
-static const int OVERLAY_MENU_CARD_Y = 28;   // 28..83
-static const int OVERLAY_MENU_CARD_H = 56;
-static const int OVERLAY_MENU_NAME_PAD = 8;  // inset of the name box in the card
-// 26 centred in the card: 28 + (56-29)/2 = 41 (integer division, 1px high).
-static const int OVERLAY_MENU_NAME_Y = 41;
-static const int OVERLAY_MENU_SIDE_Y = 92;   // 14 -> 92..107
-static const int OVERLAY_MENU_SIDE_W = 140;
-static const int OVERLAY_MENU_PREV_X = 4;    // 4..143
-static const int OVERLAY_MENU_NEXT_X = 156;  // 156..295
+static const int OVERLAY_MENU_TILE_W = 92;
+static const int OVERLAY_MENU_TILE_H = 60;
+static const int OVERLAY_MENU_GAP = 8;
+static const int OVERLAY_MENU_X0 = 4;
+static const int OVERLAY_MENU_TILE_Y = 30;   // 30..89
+static const int OVERLAY_MENU_NAME_PAD = 3;  // inset of the name box in its tile
+                                             // -> inner width 86
 
 // Measured worst-case ink for the overlay's fixed boxes, on the same basis as
 // the main screen's constants above (summed adv_w, no kerning credit).
@@ -401,13 +429,13 @@ static const int TEXT14_HINT_W = 161;      // "moving - stops locked"
 static const int TEXT14_HINT_OK_W = 64;    // "OK done"
 static const int TEXT14_STOP_END_W = 69;   // "L -1200.00"
 static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
-// Menu, on the same basis. The two tile widths are "Software update", the
-// longest of the nine names in menuTileName() - 122px at 14, 223px at 26. The
-// title is "MENU" and the position slot's widest reading is "9 / 9". These are
-// what the carousel's boxes are checked against, so a longer tile name fails the
-// build here rather than clipping silently on the panel.
-static const int TEXT14_MENU_TILE_W = 122;   // "Software update" at 14
-static const int TEXT26_MENU_TILE_W = 223;   // "Software update" at 26
+// Menu, on the same basis. Names WRAP inside their tile, so the binding width
+// is the widest UNBREAKABLE word across the nine names in menuTileName() --
+// "Diagnostics", 85px at 14 ("Software" is 65, every other word is narrower).
+// The title is "MENU" and the position slot's widest reading is "9 / 9". These
+// are what the carousel's boxes are checked against, so a longer word fails
+// the build here rather than clipping silently on the panel.
+static const int TEXT14_MENU_WORD_W = 85;    // "Diagnostics" at 14
 static const int TEXT14_MENU_TITLE_W = 44;   // "MENU"
 static const int TEXT14_MENU_POS_W = 31;     // "9 / 9"
 
@@ -427,11 +455,15 @@ static_assert(STATUS_RPM_VALUE_X + STATUS_RPM_VALUE_W < STATUS_RPM_UNIT_X, "RPM 
 static_assert(STATUS_RPM_UNIT_X < SCREEN_W, "RPM unit off screen");
 // Band 1 is a row of four unboxed/boxed items with no layout manager between
 // them, so the only thing keeping them apart is these four x constants. Check
-// them against the measured ink, not just against each other. sync -> RPM is
-// the tightest gap on the whole screen (185 vs 186).
+// them against the measured ink, not just against each other -- and against
+// the SYNC label's chip padding, which extends its box beyond the ink on every
+// side. sync chip -> RPM box is the tightest gap on the whole screen
+// (185 vs 186).
 static_assert(STATUS_MODE_X + TEXT14_MODE_W <= STATUS_UNIT_X, "mode text runs into the unit chip");
-static_assert(STATUS_UNIT_X + TEXT14_UNIT_W <= STATUS_SYNC_X, "unit chip runs into the sync chip");
-static_assert(STATUS_SYNC_X + TEXT14_SYNC_W <= STATUS_RPM_VALUE_X, "sync chip runs into the RPM box");
+static_assert(STATUS_UNIT_X + TEXT14_UNIT_W <= STATUS_SYNC_X - SYNC_CHIP_PAD_H, "unit text runs into the sync chip");
+static_assert(STATUS_SYNC_X + TEXT14_SYNC_W + SYNC_CHIP_PAD_H <= STATUS_RPM_VALUE_X, "sync chip runs into the RPM box");
+static_assert(STATUS_CHIP_Y - SYNC_CHIP_PAD_V >= 0, "sync chip off the top of the screen");
+static_assert(STATUS_CHIP_Y + FONT14_H + SYNC_CHIP_PAD_V <= BAND_STATUS_BOTTOM, "sync chip overflows band 1");
 static_assert(STATUS_RPM_UNIT_X + TEXT14_RPM_UNIT_W <= SCREEN_W, "RPM unit text off the right edge");
 static_assert(TEXT26_RPM_VALUE_W <= STATUS_RPM_VALUE_W, "RPM value wider than its box");
 // Band 2
@@ -459,15 +491,13 @@ static_assert(TRAVEL_LEFT_X + TRAVEL_LEFT_W < TRAVEL_POS_X, "left stop label box
 static_assert(TRAVEL_POS_X + TRAVEL_POS_W < TRAVEL_POS_UNIT_X, "live readout runs into its unit");
 static_assert(TRAVEL_POS_UNIT_X < TRAVEL_RIGHT_X, "live unit runs into the right stop label");
 static_assert(TRAVEL_RIGHT_X + TRAVEL_RIGHT_W <= SCREEN_W, "right stop label off the right edge");
-// Band 5 -- two rows: the state word, then the soft-key hints.
-static_assert(STATE_WORD_Y > BAND_TRAVEL_BOTTOM, "state word overlaps band 4");
-static_assert(STATE_WORD_Y + FONT26_H <= SOFTKEY_Y, "state word overlaps the hint row");
-static_assert(STATE_WORD_X + STATE_WORD_W <= SCREEN_W, "state word box off the right edge");
-static_assert(TEXT26_STATE_W <= STATE_WORD_W, "state word wider than its box");
-static_assert(STATE_DOT_Y + STATE_DOT_SIZE <= SOFTKEY_Y, "state dot overlaps the hint row");
-static_assert(STATE_DOT_X + STATE_DOT_SIZE < STATE_WORD_X, "state dot collides with the word");
-static_assert(SOFTKEY_Y + FONT14_H <= SCREEN_H, "soft-key hints off the bottom");
-static_assert(SOFTKEY_X0 + (3 * SOFTKEY_W) <= SCREEN_W, "soft-key columns off the right edge");
+// Band 5 -- one row: the state chip. The label is auto-width (the chip fill
+// must hug the word), so the right-edge check is against the measured ink of
+// the longest word plus the chip's own padding, not against a box width.
+static_assert(STATE_CHIP_Y > BAND_TRAVEL_BOTTOM, "state chip overlaps band 4");
+static_assert(STATE_CHIP_Y + FONT36_H <= SCREEN_H, "state chip off the bottom");
+static_assert(STATE_CHIP_X + (2 * STATE_CHIP_PAD_H) + TEXT36_STATE_W <= SCREEN_W,
+              "widest state chip off the right edge");
 
 // --- Selector overlay assertions ---------------------------------------------
 // Same deal as above: no host test reaches this file, so the panel's arithmetic
@@ -485,10 +515,15 @@ static_assert(OVERLAY_X > 0, "overlay has no left margin");
 static_assert(OVERLAY_TITLE_Y + FONT14_H <= OVERLAY_BODY_TOP, "overlay title overlaps the body");
 static_assert(OVERLAY_BODY_TOP < OVERLAY_BODY_BOTTOM, "overlay body has no height");
 static_assert(OVERLAY_BODY_BOTTOM <= OVERLAY_HINT_Y, "overlay body overlaps the hint row");
-static_assert(OVERLAY_HINT_Y + FONT14_H <= OVERLAY_CONTENT_H, "overlay hint row falls off the panel");
-static_assert(OVERLAY_HINT_L_X + OVERLAY_HINT_L_W <= OVERLAY_HINT_R_X, "overlay hints collide");
+// The left hint is auto-width with a permanent chip padding (see the constants
+// above), so its collision checks are ink + padding, not a fixed box.
+static_assert(OVERLAY_HINT_Y - OVERLAY_HINT_PAD_V >= OVERLAY_BODY_BOTTOM, "hint chip overlaps the body");
+static_assert(OVERLAY_HINT_Y + FONT14_H + OVERLAY_HINT_PAD_V <= OVERLAY_CONTENT_H,
+              "overlay hint chip falls off the panel");
+static_assert(OVERLAY_HINT_L_X + TEXT14_HINT_W + OVERLAY_HINT_PAD_H <= OVERLAY_HINT_R_X,
+              "longest left hint chip runs into the right hint");
+static_assert(OVERLAY_HINT_L_X - OVERLAY_HINT_PAD_H >= 0, "hint chip off the left of the panel");
 static_assert(OVERLAY_HINT_R_X + OVERLAY_HINT_R_W <= OVERLAY_CONTENT_W, "overlay right hint off the panel");
-static_assert(TEXT14_HINT_W <= OVERLAY_HINT_L_W, "longest arrow hint wider than its box");
 static_assert(TEXT14_HINT_OK_W <= OVERLAY_HINT_R_W, "\"OK done\" wider than its box");
 // Ticker. The neighbour boxes are the only thing stopping a long neighbour
 // value from running under the 48, so check the ink, not just the boxes.
@@ -544,28 +579,22 @@ static_assert(((OVERLAY_CONTENT_W + TEXT14_MENU_TITLE_W) / 2) <= OVERLAY_MENU_PO
 static_assert(OVERLAY_MENU_POS_X + OVERLAY_MENU_POS_W <= OVERLAY_CONTENT_W,
               "menu position slot off the right of the panel");
 static_assert(TEXT14_MENU_POS_W <= OVERLAY_MENU_POS_W, "\"9 / 9\" wider than its box");
-static_assert(OVERLAY_MENU_CARD_Y >= OVERLAY_BODY_TOP, "menu card overlaps the title row");
-static_assert(OVERLAY_MENU_CARD_X + OVERLAY_MENU_CARD_W <= OVERLAY_CONTENT_W,
-              "menu card off the right of the panel");
-// The name is a child of the GROUP, not of the card, so nothing clips it to the
-// card - these two are the only thing keeping it inside its own tile.
-static_assert(OVERLAY_MENU_NAME_Y >= OVERLAY_MENU_CARD_Y &&
-              OVERLAY_MENU_NAME_Y + FONT26_H <= OVERLAY_MENU_CARD_Y + OVERLAY_MENU_CARD_H,
-              "menu tile name is not inside its card");
-static_assert(TEXT26_MENU_TILE_W <= OVERLAY_MENU_CARD_W - (2 * OVERLAY_MENU_NAME_PAD),
-              "longest tile name wider than the card's inner box");
-// Card and neighbour row must not collide, and the neighbour row must stay
-// clear of the hint row (OVERLAY_BODY_BOTTOM is where the body ends).
-static_assert(OVERLAY_MENU_CARD_Y + OVERLAY_MENU_CARD_H <= OVERLAY_MENU_SIDE_Y,
-              "menu card overlaps the neighbour row");
-static_assert(OVERLAY_MENU_SIDE_Y + FONT14_H <= OVERLAY_BODY_BOTTOM,
-              "menu neighbour row overflows the body into the hints");
-static_assert(OVERLAY_MENU_PREV_X + OVERLAY_MENU_SIDE_W <= OVERLAY_MENU_NEXT_X,
-              "menu neighbour labels collide");
-static_assert(OVERLAY_MENU_NEXT_X + OVERLAY_MENU_SIDE_W <= OVERLAY_CONTENT_W,
-              "menu next-tile label off the right of the panel");
-static_assert(TEXT14_MENU_TILE_W <= OVERLAY_MENU_SIDE_W,
-              "longest tile name wider than a neighbour box");
+// Three equal tiles with gaps must fit the content area (4 + 3*92 + 2*8 = 296
+// in 300), and each must clear its vertical bounds.
+static_assert(OVERLAY_MENU_X0 + (3 * OVERLAY_MENU_TILE_W) + (2 * OVERLAY_MENU_GAP) <= OVERLAY_CONTENT_W,
+              "menu tiles off the right of the panel");
+static_assert(OVERLAY_MENU_TILE_Y >= OVERLAY_BODY_TOP, "menu tiles overlap the title row");
+static_assert(OVERLAY_MENU_TILE_Y + OVERLAY_MENU_TILE_H <= OVERLAY_BODY_BOTTOM,
+              "menu tiles overflow the body into the hints");
+// Names wrap to at most two lines inside their tile, so the constraints are
+// (a) the widest unbreakable WORD fits the inner width -- otherwise LVGL
+// letter-breaks it mid-word -- and (b) two wrapped lines fit the tile height.
+// The labels are CHILDREN of the tiles (clipped + kept centred by LVGL), so
+// these two are what keep a wrapped name whole and inside its tile.
+static_assert(TEXT14_MENU_WORD_W <= OVERLAY_MENU_TILE_W - (2 * OVERLAY_MENU_NAME_PAD),
+              "widest menu word wider than a tile's inner box");
+static_assert((2 * FONT14_H) <= OVERLAY_MENU_TILE_H - (2 * OVERLAY_MENU_NAME_PAD),
+              "a two-line menu name overflows its tile");
 
 // Radii. LV_DRAW_SW_CIRCLE_CACHE_SIZE is 4, so keep the number of DISTINCT
 // radii small (docs/ux-redesign.md section 8 "Renderer constraints"): this
@@ -863,9 +892,11 @@ static const char* overlayHintOkText(OverlayHint hint) {
 //   * under 20 bytes, or setLabelText()'s cache truncates it, never compares
 //     equal again, and repaints the label at 10 Hz forever (see the TextSlot
 //     comment in the header);
-//   * no wider than TEXT26_MENU_TILE_W / TEXT14_MENU_TILE_W, the measured
-//     widths the carousel's boxes are asserted against - a longer name clips
-//     silently on the panel, so re-measure and update those two constants.
+//   * no single WORD wider than TEXT14_MENU_WORD_W, the measured width the
+//     carousel's tiles are asserted against. Names WRAP on spaces inside their
+//     tile (at most two lines), so a long name is fine but a long word is not
+//     -- LVGL letter-breaks an overwide word mid-glyph run, so re-measure and
+//     update that constant.
 static const char* menuTileName(int tile) {
   switch (tile) {
   case MENU_UNITS:            return "Units";
@@ -961,11 +992,7 @@ void Display::resetObjectTree() {
   travelRightLabel = nullptr;
   travelPosLabel = nullptr;
   travelPosUnit = nullptr;
-  stateDot = nullptr;
   stateLabel = nullptr;
-  for (int i = 0; i < 3; i++) {
-    softKeyLabel[i] = nullptr;
-  }
   for (int i = 0; i < 4; i++) {
     bandRule[i] = nullptr;
   }
@@ -993,10 +1020,10 @@ void Display::resetObjectTree() {
   overlayStopsPosLabel = nullptr;
   overlayMenuGroup = nullptr;
   overlayMenuPos = nullptr;
-  overlayMenuCard = nullptr;
-  overlayMenuName = nullptr;
-  overlayMenuPrev = nullptr;
-  overlayMenuNext = nullptr;
+  for (int i = 0; i < 3; i++) {
+    overlayMenuTile[i] = nullptr;
+    overlayMenuTileLabel[i] = nullptr;
+  }
   updateSlider = nullptr;
   updateLabel = nullptr;
 
@@ -1029,6 +1056,10 @@ void Display::resetObjectTree() {
   m_lastMenuBlock = -1;
   m_lastMenuPrevBlock = -1;
   m_lastMenuNextBlock = -1;
+  // TRUE, not false: init() builds the neighbour tiles visible, and these gate
+  // the hidden flag, so they must describe the tree as built (see the header).
+  m_lastMenuPrevShown = true;
+  m_lastMenuNextShown = true;
   // NOTE m_palette and m_droDatum are deliberately NOT reset here. Both are
   // RUNTIME settings owned by setTheme()/setDroDatum(), and init() calls this
   // on every rebuild -- including the rebuild setTheme() itself requests, which
@@ -1211,9 +1242,17 @@ void Display::initialiseOta() {
   // dangling; drop them (and the caches) before anything can push into them.
   resetObjectTree();
 
+  // This screen is reachable while m_palette points at either theme, and it
+  // shares the screen object init() painted -- so its ink and bar must come
+  // from the palette too. LVGL's label default is BLACK, which on the dark
+  // palette's near-black ground would render the OTA status invisible.
+  lv_obj_set_style_bg_color(lv_screen_active(), m_palette->background, 0);
+  lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+
   updateLabel = lv_label_create(lv_screen_active());
   lv_label_set_text(updateLabel, "Updating...");
   lv_obj_set_style_text_font(updateLabel, &lv_font_montserrat_26, 0);
+  lv_obj_set_style_text_color(updateLabel, m_palette->textPrimary, 0);
   lv_obj_align(updateLabel, LV_ALIGN_CENTER, 0, 0);
 
   updateSlider = lv_slider_create(lv_screen_active());
@@ -1221,6 +1260,12 @@ void Display::initialiseOta() {
   lv_obj_set_pos(updateSlider, 20, 150);
 
   lv_obj_set_style_opa(updateSlider, LV_OPA_0, LV_PART_KNOB);
+  // Track dim, progress in the run colour, both explicitly opaque (the slider
+  // theme's translucent main part is the same trap the pitch ticker hit).
+  lv_obj_set_style_bg_color(updateSlider, m_palette->colourDisabled, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(updateSlider, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(updateSlider, m_palette->colourRun, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(updateSlider, LV_OPA_COVER, LV_PART_INDICATOR);
 
   lv_slider_set_range(updateSlider, 0, 100);
   lv_obj_set_style_pad_all(updateSlider, 0, 0);
@@ -1255,10 +1300,23 @@ void Display::init() {
                           m_palette->textPrimary, STATUS_MODE_X, STATUS_CHIP_Y);
   unitLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
                           m_palette->textDim, STATUS_UNIT_X, STATUS_CHIP_Y);
-  // Static text; only its colour tracks GlobalThreadSyncState (drawStatusBar).
+  // Static text; drawStatusBar() tracks GlobalThreadSyncState by toggling the
+  // chip: synced = colourRun fill + chipInk text, unsynced = no fill + textDim
+  // text. A filled chip, not coloured text, because colourRun TEXT on the light
+  // palette's white ground is 2.2:1 -- invisible -- while chipInk on the fill
+  // is ~8.5:1 in both palettes. The label is positioned pad-left/pad-up of the
+  // ink coordinates so the TEXT sits at (STATUS_SYNC_X, STATUS_CHIP_Y) whether
+  // or not the fill is showing; the fill colour is set once here and only
+  // bg_opa/text colour toggle at runtime.
   syncLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
-                          m_palette->colourDisabled, STATUS_SYNC_X, STATUS_CHIP_Y);
+                          m_palette->textDim, STATUS_SYNC_X - SYNC_CHIP_PAD_H,
+                          STATUS_CHIP_Y - SYNC_CHIP_PAD_V);
   lv_label_set_text(syncLabel, "SYNC");
+  lv_obj_set_style_pad_hor(syncLabel, SYNC_CHIP_PAD_H, 0);
+  lv_obj_set_style_pad_ver(syncLabel, SYNC_CHIP_PAD_V, 0);
+  lv_obj_set_style_radius(syncLabel, RADIUS_TRACK, 0);
+  lv_obj_set_style_bg_color(syncLabel, m_palette->colourRun, 0);
+  lv_obj_set_style_bg_opa(syncLabel, LV_OPA_TRANSP, 0);
 
   rpmLabel = createLabel(lv_screen_active(), &lv_font_montserrat_26,
                          m_palette->textPrimary, STATUS_RPM_VALUE_X,
@@ -1288,7 +1346,13 @@ void Display::init() {
   // LV_STYLE_IMAGE_RECOLOR is black -- so without an explicit recolor here it
   // renders black regardless of theme. Set per object, not per source, because
   // drawMode() swaps lv_image_set_src at runtime on this same object.
-  lv_obj_set_style_image_recolor(feedSymbolObj, m_palette->textPrimary, 0);
+  //
+  // textDim, NOT textPrimary: at 128x64 of solid ink the glyph out-shouted the
+  // pitch value, which is the number the operator actually reads -- and the
+  // status bar already names the mode in text, so the glyph is a secondary
+  // echo, not the primary carrier. Dimmed it still reads clearly (5.2:1 dark /
+  // 4.9:1 light) but the 48px pitch value now dominates band 2.
+  lv_obj_set_style_image_recolor(feedSymbolObj, m_palette->textDim, 0);
   lv_obj_set_style_image_recolor_opa(feedSymbolObj, LV_OPA_COVER, 0);
 
   // --- band 3: pitch ticker -------------------------------------------------
@@ -1300,9 +1364,15 @@ void Display::init() {
   lv_obj_set_size(pitchSlider, TICKER_W, TICKER_H);
   lv_obj_set_pos(pitchSlider, TICKER_X, TICKER_Y);
   lv_obj_set_style_pad_all(pitchSlider, 0, 0);
+  // bg_opa COVER on BOTH parts, explicitly: the slider theme leaves the main
+  // part translucent while the indicator is opaque, so without these two the
+  // "same colour" below renders as two different colours and the ticker reads
+  // as the fill bar it must not be.
   lv_obj_set_style_bg_color(pitchSlider, m_palette->colourDisabled, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(pitchSlider, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_MAIN);
   lv_obj_set_style_bg_color(pitchSlider, m_palette->colourDisabled, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(pitchSlider, LV_OPA_COVER, LV_PART_INDICATOR);
   lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_INDICATOR);
   lv_obj_set_style_bg_color(pitchSlider, m_palette->textPrimary, LV_PART_KNOB);
   lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_KNOB);
@@ -1313,19 +1383,25 @@ void Display::init() {
                            TRAVEL_TRACK_W, TRAVEL_TRACK_H,
                            m_palette->colourDisabled, RADIUS_TRACK);
   // Markers and the carriage are siblings of the track, not children of it: a
-  // child would be clipped to the 8px-high track, and these are 14 tall.
+  // child would be clipped to the 10px-high track, and these are 16 tall.
+  //
+  // Both end markers are ALWAYS shown; drawTravel() colours them colourRun
+  // (set) or colourDisabled (a "ghost" tick, unset) rather than hiding them.
+  // Hiding an unset end left a lone green tick at the far end of an empty
+  // grey track, which reads as an empty progress bar; with both endpoints
+  // always drawn the band reads as a span whose ends are defined or not --
+  // which is what it is. Created as ghosts to match the m_last*StopSet caches,
+  // which resetObjectTree() has just cleared to false.
   travelLeftMark = createRect(lv_screen_active(), TRAVEL_TRACK_X, TRAVEL_MARK_Y,
                               TRAVEL_MARK_W, TRAVEL_MARK_H,
-                              m_palette->colourRun, 0);
+                              m_palette->colourDisabled, 0);
   travelRightMark = createRect(lv_screen_active(),
                                TRAVEL_TRACK_X + TRAVEL_TRACK_W - TRAVEL_MARK_W,
                                TRAVEL_MARK_Y, TRAVEL_MARK_W, TRAVEL_MARK_H,
-                               m_palette->colourRun, 0);
+                               m_palette->colourDisabled, 0);
   travelCarriage = createRect(lv_screen_active(), TRAVEL_TRACK_X, TRAVEL_MARK_Y,
                               TRAVEL_CARRIAGE_W, TRAVEL_MARK_H,
                               m_palette->textPrimary, RADIUS_TRACK);
-  lv_obj_add_flag(travelLeftMark, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(travelRightMark, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(travelCarriage, LV_OBJ_FLAG_HIDDEN);
 
   travelLeftLabel = createLabel(lv_screen_active(), &lv_font_montserrat_14,
@@ -1343,26 +1419,20 @@ void Display::init() {
   travelPosUnit = createLabel(lv_screen_active(), &lv_font_montserrat_14,
                               m_palette->textDim, TRAVEL_POS_UNIT_X, TRAVEL_LABEL_Y);
 
-  // --- band 5: state + soft keys -------------------------------------------
-  stateDot = createRect(lv_screen_active(), STATE_DOT_X, STATE_DOT_Y,
-                        STATE_DOT_SIZE, STATE_DOT_SIZE,
-                        m_palette->colourDisabled, LV_RADIUS_CIRCLE);
-  stateLabel = createLabel(lv_screen_active(), &lv_font_montserrat_26,
-                           m_palette->colourDisabled, STATE_WORD_X, STATE_WORD_Y);
-  fixLabelBox(stateLabel, STATE_WORD_W, LV_TEXT_ALIGN_LEFT);
-
-  // Static hints mirroring the bottom physical row of the 3x3 keypad
-  // (docs/ux-redesign.md section 2: HALT | MENU | ENABLE), one per column, so
-  // the panel documents the two keys that have no on-screen state of their own.
-  // Only the third changes (RUN <-> STOP, drawStateBar()).
-  const char* hints[3] = { "HALT", "MENU", "RUN" };
-  for (int i = 0; i < 3; i++) {
-    softKeyLabel[i] = createLabel(lv_screen_active(), &lv_font_montserrat_14,
-                                  m_palette->textDim,
-                                  SOFTKEY_X0 + (i * SOFTKEY_W), SOFTKEY_Y);
-    fixLabelBox(softKeyLabel[i], SOFTKEY_W, LV_TEXT_ALIGN_CENTER);
-    lv_label_set_text(softKeyLabel[i], hints[i]);
-  }
+  // --- band 5: state chip ---------------------------------------------------
+  // One auto-width Montserrat-36 label carrying a state-coloured chip fill;
+  // drawStateBar() pushes the word and the fill colour. A filled chip, not a
+  // coloured word, because the state colours as TEXT fail contrast on the
+  // light palette's white ground (colourRun is 2.2:1) while chipInk on the
+  // fill clears 3.9:1 on the dimmest state (IDLE / colourDisabled) and 5.3:1+
+  // on the rest, in both palettes. (The soft-key hint row that shared this
+  // band is gone: the physical caps are labelled, so it repeated the keypad.)
+  stateLabel = createLabel(lv_screen_active(), &lv_font_montserrat_36,
+                           m_palette->chipInk, STATE_CHIP_X, STATE_CHIP_Y);
+  lv_obj_set_style_pad_hor(stateLabel, STATE_CHIP_PAD_H, 0);
+  lv_obj_set_style_radius(stateLabel, RADIUS_TRACK, 0);
+  lv_obj_set_style_bg_color(stateLabel, m_palette->colourDisabled, 0);
+  lv_obj_set_style_bg_opa(stateLabel, LV_OPA_COVER, 0);
 
   // --- the selector overlay (docs/ux-redesign.md section 4) -----------------
   // Built LAST, so it is the last sibling on the screen and therefore drawn on
@@ -1389,10 +1459,18 @@ void Display::init() {
   overlayTitle = createLabel(overlayPanel, &lv_font_montserrat_14,
                              m_palette->textDim, 0, OVERLAY_TITLE_Y);
   fixLabelBox(overlayTitle, OVERLAY_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+  // Auto-width, permanently padded, fill colour set once: drawOverlay() only
+  // toggles bg_opa (and the ink) when the hint becomes/stops being a refusal,
+  // so the chip hugs whatever text it holds (see the OVERLAY_HINT_* comment).
   overlayHintLeft = createLabel(overlayPanel, &lv_font_montserrat_14,
-                                m_palette->textDim, OVERLAY_HINT_L_X,
-                                OVERLAY_HINT_Y);
-  fixLabelBox(overlayHintLeft, OVERLAY_HINT_L_W, LV_TEXT_ALIGN_LEFT);
+                                m_palette->textDim,
+                                OVERLAY_HINT_L_X - OVERLAY_HINT_PAD_H,
+                                OVERLAY_HINT_Y - OVERLAY_HINT_PAD_V);
+  lv_obj_set_style_pad_hor(overlayHintLeft, OVERLAY_HINT_PAD_H, 0);
+  lv_obj_set_style_pad_ver(overlayHintLeft, OVERLAY_HINT_PAD_V, 0);
+  lv_obj_set_style_radius(overlayHintLeft, RADIUS_TRACK, 0);
+  lv_obj_set_style_bg_color(overlayHintLeft, m_palette->colourCaution, 0);
+  lv_obj_set_style_bg_opa(overlayHintLeft, LV_OPA_TRANSP, 0);
   overlayHintRight = createLabel(overlayPanel, &lv_font_montserrat_14,
                                  m_palette->textDim, OVERLAY_HINT_R_X,
                                  OVERLAY_HINT_Y);
@@ -1426,13 +1504,22 @@ void Display::init() {
   // Group B: MODE. Tiles first, labels after, so the labels are the later
   // siblings and draw on top of the fills (they are siblings, not children of
   // the tiles, which keeps every coordinate in one space).
+  //
+  // Unselected tiles are BACKGROUND-filled wells with a 1px colourDisabled
+  // border and textDim ink -- NOT colourDisabled slabs with textDim ink, which
+  // measured 1.05:1 (light) / 1.3:1 (dark): blank slabs. Ink on background is
+  // 5.2:1 / 4.9:1. The border is what keeps a white-on-white tile visible in
+  // the light palette (its background and surface are 1.2:1 apart).
+  // drawOverlayMode() swaps the selected tile to accent fill + chipInk.
   overlayModeGroup = createOverlayGroup(overlayPanel);
   for (int i = 0; i < 3; i++) {
     overlayModeTile[i] = createRect(
       overlayModeGroup,
       OVERLAY_MODE_X0 + (i * (OVERLAY_MODE_TILE_W + OVERLAY_MODE_GAP)),
       OVERLAY_MODE_TILE_Y, OVERLAY_MODE_TILE_W, OVERLAY_MODE_TILE_H,
-      m_palette->colourDisabled, RADIUS_TRACK);
+      m_palette->background, RADIUS_TRACK);
+    lv_obj_set_style_border_width(overlayModeTile[i], 1, 0);
+    lv_obj_set_style_border_color(overlayModeTile[i], m_palette->colourDisabled, 0);
   }
   // Same three words the status bar uses for the same three modes; FM_JOG is
   // deliberately absent (section 3: jog is no longer a mode).
@@ -1455,21 +1542,22 @@ void Display::init() {
                                  OVERLAY_STOP_TRACK_Y, OVERLAY_STOP_TRACK_W,
                                  OVERLAY_STOP_TRACK_H,
                                  m_palette->colourDisabled, RADIUS_TRACK);
+  // End markers always drawn, ghosted when unset -- the same treatment (and
+  // the same reason) as the band-4 marks above.
   overlayStopsLeftMark = createRect(overlayStopsGroup, OVERLAY_STOP_TRACK_X,
                                     OVERLAY_STOP_MARK_Y, OVERLAY_STOP_MARK_W,
-                                    OVERLAY_STOP_MARK_H, m_palette->colourRun, 0);
+                                    OVERLAY_STOP_MARK_H,
+                                    m_palette->colourDisabled, 0);
   overlayStopsRightMark = createRect(
     overlayStopsGroup,
     OVERLAY_STOP_TRACK_X + OVERLAY_STOP_TRACK_W - OVERLAY_STOP_MARK_W,
     OVERLAY_STOP_MARK_Y, OVERLAY_STOP_MARK_W, OVERLAY_STOP_MARK_H,
-    m_palette->colourRun, 0);
+    m_palette->colourDisabled, 0);
   overlayStopsCarriage = createRect(overlayStopsGroup, OVERLAY_STOP_TRACK_X,
                                     OVERLAY_STOP_MARK_Y,
                                     OVERLAY_STOP_CARRIAGE_W,
                                     OVERLAY_STOP_MARK_H,
                                     m_palette->textPrimary, RADIUS_TRACK);
-  lv_obj_add_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
   overlayStopsLeftLabel = createLabel(overlayStopsGroup,
                                       &lv_font_montserrat_14,
@@ -1487,37 +1575,41 @@ void Display::init() {
                                      OVERLAY_STOP_POS_X, OVERLAY_STOP_POS_Y);
   fixLabelBox(overlayStopsPosLabel, OVERLAY_STOP_POS_W, LV_TEXT_ALIGN_CENTER);
 
-  // Group D: MENU, the tile carousel. Card first, name after, so the name is
-  // the later sibling and draws on top of the fill -- the same ordering, and
-  // the same reason, as the MODE tiles above. The position label lives in this
-  // group rather than beside overlayTitle so it disappears with the rest of the
-  // menu instead of hanging over the PITCH/MODE/STOPS widgets.
+  // Group D: MENU, the tile carousel -- three equal tiles across (prev /
+  // current / next), the same geometry and quiet-tile treatment as the MODE
+  // group so the two widgets read as one family. Unlike the MODE labels, the
+  // names are CHILDREN of their tiles: they wrap to up to two lines, and being
+  // a child both clips a wayward name to its tile and lets LV_ALIGN_CENTER
+  // keep it vertically centred as the wrapped line count changes.
+  // drawOverlayMenu() styles the three tiles from their MenuTileBlock states
+  // (centre live = accent fill; any blocked tile = colourDisabled fill).
+  // The position label lives in this group rather than beside overlayTitle so
+  // it disappears with the rest of the menu instead of hanging over the
+  // PITCH/MODE/STOPS widgets.
   overlayMenuGroup = createOverlayGroup(overlayPanel);
   overlayMenuPos = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
                                m_palette->textDim, OVERLAY_MENU_POS_X,
                                OVERLAY_TITLE_Y);
   fixLabelBox(overlayMenuPos, OVERLAY_MENU_POS_W, LV_TEXT_ALIGN_RIGHT);
-  overlayMenuCard = createRect(overlayMenuGroup, OVERLAY_MENU_CARD_X,
-                               OVERLAY_MENU_CARD_Y, OVERLAY_MENU_CARD_W,
-                               OVERLAY_MENU_CARD_H, m_palette->accent,
-                               RADIUS_TRACK);
-  overlayMenuName = createLabel(overlayMenuGroup, &lv_font_montserrat_26,
-                                m_palette->textPrimary,
-                                OVERLAY_MENU_CARD_X + OVERLAY_MENU_NAME_PAD,
-                                OVERLAY_MENU_NAME_Y);
-  fixLabelBox(overlayMenuName,
-              OVERLAY_MENU_CARD_W - (2 * OVERLAY_MENU_NAME_PAD),
-              LV_TEXT_ALIGN_CENTER);
-  // Both neighbours are aligned TOWARDS the card, so the row reads as "this is
-  // what is to your left / right" rather than as two loose words.
-  overlayMenuPrev = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
-                                m_palette->textDim, OVERLAY_MENU_PREV_X,
-                                OVERLAY_MENU_SIDE_Y);
-  fixLabelBox(overlayMenuPrev, OVERLAY_MENU_SIDE_W, LV_TEXT_ALIGN_RIGHT);
-  overlayMenuNext = createLabel(overlayMenuGroup, &lv_font_montserrat_14,
-                                m_palette->textDim, OVERLAY_MENU_NEXT_X,
-                                OVERLAY_MENU_SIDE_Y);
-  fixLabelBox(overlayMenuNext, OVERLAY_MENU_SIDE_W, LV_TEXT_ALIGN_LEFT);
+  for (int i = 0; i < 3; i++) {
+    overlayMenuTile[i] = createRect(
+      overlayMenuGroup,
+      OVERLAY_MENU_X0 + (i * (OVERLAY_MENU_TILE_W + OVERLAY_MENU_GAP)),
+      OVERLAY_MENU_TILE_Y, OVERLAY_MENU_TILE_W, OVERLAY_MENU_TILE_H,
+      m_palette->background, RADIUS_TRACK);
+    lv_obj_set_style_border_width(overlayMenuTile[i], 1, 0);
+    lv_obj_set_style_border_color(overlayMenuTile[i], m_palette->colourDisabled, 0);
+    overlayMenuTileLabel[i] = createLabel(overlayMenuTile[i],
+                                          &lv_font_montserrat_14,
+                                          m_palette->textDim, 0, 0);
+    // Fixed width (so names wrap inside the tile), centred text, and WRAP --
+    // deliberately NOT fixLabelBox(), whose CLIP long-mode would kill the
+    // wrapping this layout depends on.
+    lv_obj_set_width(overlayMenuTileLabel[i],
+                     OVERLAY_MENU_TILE_W - (2 * OVERLAY_MENU_NAME_PAD));
+    lv_obj_set_style_text_align(overlayMenuTileLabel[i], LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(overlayMenuTileLabel[i], LV_ALIGN_CENTER, 0, 0);
+  }
 }
 
 void showWifi(const char* ssid, const char* password, IPAddress ip) {
@@ -1628,9 +1720,13 @@ void Display::drawStatusBar() {
   const GlobalThreadSyncState sync = m_globalState->getThreadSyncState();
   if ((int)sync != m_lastSyncState) {
     m_lastSyncState = (int)sync;
+    // Synced = the chip lights (colourRun fill, set once in init(), chipInk
+    // text); unsynced = no fill, textDim text. See the creation comment for
+    // why this is a fill toggle and not a text-colour swap.
+    const bool synced = (sync == SS_SYNC);
+    lv_obj_set_style_bg_opa(syncLabel, synced ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(
-      syncLabel,
-      sync == SS_SYNC ? m_palette->colourRun : m_palette->colourDisabled, 0);
+      syncLabel, synced ? m_palette->chipInk : m_palette->textDim, 0);
   }
 }
 
@@ -1816,22 +1912,20 @@ void Display::drawTravel() {
                                           : m_palette->textDim, 0);
   }
 
-  // Stop markers: shown only for a stop that is actually set.
+  // Stop markers: always drawn; SET is colourRun, unset is a colourDisabled
+  // ghost tick (see the creation comment -- a hidden end made the band read
+  // as an empty progress bar).
   if (leftSet != m_lastLeftStopSet) {
     m_lastLeftStopSet = leftSet;
-    if (leftSet) {
-      lv_obj_remove_flag(travelLeftMark, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(travelLeftMark, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_set_style_bg_color(travelLeftMark,
+                              leftSet ? m_palette->colourRun
+                                      : m_palette->colourDisabled, 0);
   }
   if (rightSet != m_lastRightStopSet) {
     m_lastRightStopSet = rightSet;
-    if (rightSet) {
-      lv_obj_remove_flag(travelRightMark, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(travelRightMark, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_set_style_bg_color(travelRightMark,
+                              rightSet ? m_palette->colourRun
+                                       : m_palette->colourDisabled, 0);
   }
 
   // The carriage marker needs a SPAN to sit in, and only two set stops provide
@@ -1860,7 +1954,9 @@ void Display::drawTravel() {
   }
 }
 
-// Band 5 -- the machine state word and the soft-key hints.
+// Band 5 -- the machine state chip: the word at 36 on a state-coloured fill.
+// The text stays chipInk (set once in init()); only the word and the fill
+// colour move. The soft-key hints that used to share this band are gone.
 //
 // MM_JOG_* is the powered run to a stop ("RETURNING"); MM_INTERACTIVE_JOG_* is
 // the hold-to-move dead-man jog, which shows the direction it is travelling.
@@ -1901,13 +1997,8 @@ void Display::drawStateBar() {
   setLabelText(stateLabel, TS_STATE, word);
   if ((int)mode != m_lastMotionMode) {
     m_lastMotionMode = (int)mode;
-    lv_obj_set_style_text_color(stateLabel, colour, 0);
-    lv_obj_set_style_bg_color(stateDot, colour, 0);
+    lv_obj_set_style_bg_color(stateLabel, colour, 0);
   }
-
-  // The third soft key mirrors the physical ENABLE key and reflects what it
-  // will do next.
-  setLabelText(softKeyLabel[2], TS_SOFTKEY, mode == MM_ENABLED ? "STOP" : "RUN");
 
   updateLed();
 }
@@ -2025,11 +2116,17 @@ void Display::drawOverlay() {
     m_lastHintVariant = (int)hint;
     lv_label_set_text(overlayHintLeft, overlayHintText(hint));
     // A refusal is a caution, not an instruction, in both widgets that can
-    // report one: the stops inhibit and the two menu blocks.
+    // report one: the stops inhibit and the two menu blocks. It renders as a
+    // colourCaution CHIP (fill on, chipInk text) rather than caution-coloured
+    // text: caution text on the light surface is 1.5:1, chipInk on the fill
+    // is ~10:1 in both palettes. The fill colour is set once in init(); only
+    // the opacity and ink toggle here.
     const bool blocked = (hint == OH_STOPS_LOCKED || hint == OH_MENU_MOVING ||
                           hint == OH_MENU_FEED);
+    lv_obj_set_style_bg_opa(overlayHintLeft,
+                            blocked ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(overlayHintLeft,
-                                blocked ? m_palette->colourCaution
+                                blocked ? m_palette->chipInk
                                         : m_palette->textDim, 0);
     // The right half moves with the same variant now that it is no longer
     // always "OK done" -- see overlayHintOkText().
@@ -2105,13 +2202,18 @@ void Display::drawOverlayMode() {
   m_lastModeTile = tile;
   for (int i = 0; i < 3; i++) {
     const bool selected = (i == tile);
+    // Selected: accent fill + chipInk (a dark ink in BOTH palettes -- the
+    // accent is mid-luminance, so a light ink fails on it, 2.1:1). Unselected:
+    // the quiet-well style from init() (background fill, colourDisabled
+    // border, textDim ink).
     lv_obj_set_style_bg_color(overlayModeTile[i],
                               selected ? m_palette->accent
-                                       : m_palette->colourDisabled, 0);
-    // The accent is a pale blue, so the selected tile takes the high-emphasis
-    // ink; the unselected ones stay dim on their grey.
+                                       : m_palette->background, 0);
+    lv_obj_set_style_border_color(overlayModeTile[i],
+                                  selected ? m_palette->accent
+                                           : m_palette->colourDisabled, 0);
     lv_obj_set_style_text_color(overlayModeTileLabel[i],
-                                selected ? m_palette->textPrimary
+                                selected ? m_palette->chipInk
                                          : m_palette->textDim, 0);
   }
 }
@@ -2142,21 +2244,18 @@ void Display::drawOverlayStops() {
            m_textCache[TS_TRAVEL_UNIT]);
   setLabelText(overlayStopsPosLabel, TS_OV_STOP_POS, pos);
 
+  // Set = colourRun, unset = ghost tick, as in drawTravel().
   if (leftSet != m_lastOverlayLeftStopSet) {
     m_lastOverlayLeftStopSet = leftSet;
-    if (leftSet) {
-      lv_obj_remove_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_set_style_bg_color(overlayStopsLeftMark,
+                              leftSet ? m_palette->colourRun
+                                      : m_palette->colourDisabled, 0);
   }
   if (rightSet != m_lastOverlayRightStopSet) {
     m_lastOverlayRightStopSet = rightSet;
-    if (rightSet) {
-      lv_obj_remove_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
-    }
+    lv_obj_set_style_bg_color(overlayStopsRightMark,
+                              rightSet ? m_palette->colourRun
+                                       : m_palette->colourDisabled, 0);
   }
 
   bool showCarriage = false;
@@ -2204,58 +2303,76 @@ void Display::drawOverlayMenu(bool motionActive, bool threadMode) {
   snprintf(buf, sizeof(buf), "%d / %d", index + 1, UiState::kMenuItemCount);
   setLabelText(overlayMenuPos, TS_OV_MENU_POS, buf);
 
-  setLabelText(overlayMenuName, TS_OV_MENU_NAME, menuTileName(index));
-  setLabelText(overlayMenuPrev, TS_OV_MENU_PREV, menuTileName(index - 1));
-  setLabelText(overlayMenuNext, TS_OV_MENU_NEXT, menuTileName(index + 1));
+  setLabelText(overlayMenuTileLabel[0], TS_OV_MENU_PREV, menuTileName(index - 1));
+  setLabelText(overlayMenuTileLabel[1], TS_OV_MENU_NAME, menuTileName(index));
+  setLabelText(overlayMenuTileLabel[2], TS_OV_MENU_NEXT, menuTileName(index + 1));
+
+  // At the two ends of the (non-wrapping) ring there IS no neighbour, and an
+  // empty bordered tile would read as a broken widget -- hide the whole tile
+  // instead (its label is a child, so it goes with it). This matches the
+  // saturating clamp in UiState: no tile, nowhere to go that way.
+  const bool prevShown = (index - 1) >= 0;
+  const bool nextShown = (index + 1) < UiState::kMenuItemCount;
+  if (prevShown != m_lastMenuPrevShown) {
+    m_lastMenuPrevShown = prevShown;
+    if (prevShown) {
+      lv_obj_remove_flag(overlayMenuTile[0], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayMenuTile[0], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (nextShown != m_lastMenuNextShown) {
+    m_lastMenuNextShown = nextShown;
+    if (nextShown) {
+      lv_obj_remove_flag(overlayMenuTile[2], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayMenuTile[2], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 
   // A tile whose action is unavailable renders UNAVAILABLE, never hidden:
   // dropping it out of the ring would renumber everything after it, so "6 / 9"
   // would name two different tiles depending on the machine's state.
   //
   // Out-of-range neighbours (at the two ends of the list) fall to
-  // menuTileBlock()'s default arm and read as MTB_NONE, which is right: their
-  // label is blank, so there is nothing to colour either way.
-  const MenuTileBlock block = menuTileBlock(index, motionActive, threadMode);
-  const MenuTileBlock prevBlock =
-    menuTileBlock(index - 1, motionActive, threadMode);
-  const MenuTileBlock nextBlock =
-    menuTileBlock(index + 1, motionActive, threadMode);
-
-  // Only the block state drives colour, so arrowing between two live tiles
-  // restyles nothing. The two block reasons share one appearance - the hint row
-  // is what tells them apart - so a change of reason costs a (rare, harmless)
-  // repaint.
-  if ((int)block != m_lastMenuBlock) {
-    m_lastMenuBlock = (int)block;
-    const bool live = (block == MTB_NONE);
-    lv_obj_set_style_bg_color(overlayMenuCard,
-                              live ? m_palette->accent
-                                   : m_palette->colourDisabled, 0);
-    // The accent is a pale blue, so a live tile takes the high-emphasis ink and
-    // a blocked one stays dim on its grey -- the same pairing the MODE tiles
-    // use, so "filled + dark ink" means the same thing in both widgets.
-    lv_obj_set_style_text_color(overlayMenuName,
-                                live ? m_palette->textPrimary
-                                     : m_palette->textDim, 0);
-  }
-
-  // The neighbours are ALREADY dim (they are neighbours), so "dimmer still" is
-  // not available as the unavailable cue: colourDisabled is a near-background
-  // grey in both palettes and would effectively hide the name, which is the one
-  // thing this rendering must not do. They take colourCaution instead - the
-  // exact colour the hint row uses for the refusal they are about to earn, and
-  // the same colour the STOPS overlay already uses for "you cannot do this now".
-  if ((int)prevBlock != m_lastMenuPrevBlock) {
-    m_lastMenuPrevBlock = (int)prevBlock;
-    lv_obj_set_style_text_color(overlayMenuPrev,
-                                prevBlock == MTB_NONE ? m_palette->textDim
-                                                      : m_palette->colourCaution, 0);
-  }
-  if ((int)nextBlock != m_lastMenuNextBlock) {
-    m_lastMenuNextBlock = (int)nextBlock;
-    lv_obj_set_style_text_color(overlayMenuNext,
-                                nextBlock == MTB_NONE ? m_palette->textDim
-                                                      : m_palette->colourCaution, 0);
+  // menuTileBlock()'s default arm and read as MTB_NONE, which is harmless:
+  // their whole tile is hidden above, so there is nothing to colour either way.
+  //
+  // Three looks, all chip-grammar consistent with the MODE tiles:
+  //   * centre + live:  accent fill + chipInk    ("the arrows chose THIS")
+  //   * blocked (any):  colourDisabled fill + chipInk  (present but refusing;
+  //     the hint row says why). A FILL, not caution-coloured text -- caution
+  //     text is unreadable on the light surface (1.5:1).
+  //   * side + live:    the quiet well from init() (background fill,
+  //     colourDisabled border, textDim ink).
+  // Only the block state drives a restyle, so arrowing between two live tiles
+  // costs no repaint. The two block REASONS share one appearance - the hint
+  // row is what tells them apart - so a change of reason costs a (rare,
+  // harmless) repaint.
+  const MenuTileBlock blocks[3] = {
+    menuTileBlock(index - 1, motionActive, threadMode),
+    menuTileBlock(index,     motionActive, threadMode),
+    menuTileBlock(index + 1, motionActive, threadMode),
+  };
+  int* lastBlocks[3] = { &m_lastMenuPrevBlock, &m_lastMenuBlock,
+                         &m_lastMenuNextBlock };
+  for (int i = 0; i < 3; i++) {
+    if ((int)blocks[i] == *lastBlocks[i]) {
+      continue;
+    }
+    *lastBlocks[i] = (int)blocks[i];
+    const bool live = (blocks[i] == MTB_NONE);
+    const bool selected = (i == 1);
+    const lv_color_t fill = !live ? m_palette->colourDisabled
+                          : selected ? m_palette->accent
+                                     : m_palette->background;
+    lv_obj_set_style_bg_color(overlayMenuTile[i], fill, 0);
+    lv_obj_set_style_border_color(overlayMenuTile[i],
+                                  (live && !selected) ? m_palette->colourDisabled
+                                                      : fill, 0);
+    lv_obj_set_style_text_color(overlayMenuTileLabel[i],
+                                (live && !selected) ? m_palette->textDim
+                                                    : m_palette->chipInk, 0);
   }
 }
 

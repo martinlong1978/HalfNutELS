@@ -105,10 +105,12 @@ private:
   lv_obj_t* travelPosLabel;   // live carriage position, datum-relative
   lv_obj_t* travelPosUnit;    // mm / in
 
-  // Band 5, state + soft keys (y 193..239)
-  lv_obj_t* stateDot;
+  // Band 5, state chip (y 197..239). The soft-key hint row is gone -- the
+  // physical caps are properly labelled, so the panel no longer mirrors them --
+  // and the whole band belongs to the machine-state readout: one Montserrat-36
+  // label with a state-coloured chip fill (the label carries its own bg style,
+  // so there is no separate dot/fill object to keep in step with it).
   lv_obj_t* stateLabel;
-  lv_obj_t* softKeyLabel[3];  // HALT / MENU / RUN|STOP
 
   lv_obj_t* bandRule[4];      // the four band separators
 
@@ -152,17 +154,18 @@ private:
   lv_obj_t* overlayStopsPosLabel;
 
   // Group D -- MENU, the tile carousel (docs/ux-redesign.md section 6). A
-  // carousel and not a list because the panel has only left/right keys: the
-  // current tile is a wide card in the middle, its two neighbours sit dimmed to
-  // either side underneath it, and the title row carries "n / 9" so the position
-  // in a nine-long ring is readable without counting.
+  // carousel and not a list because the panel has only left/right keys: THREE
+  // tiles in a row, exactly like the mockup and the MODE widget -- previous /
+  // current / next -- with the current (centre) one marked by the accent FILL,
+  // not by size. Names are Montserrat 14 and wrap to two lines inside their
+  // tile ("Software / update"); the title row carries "n / 9" so the position
+  // in a nine-long ring is readable without counting. Labels are CHILDREN of
+  // their tiles (unlike the MODE labels): the tile clips them and LVGL keeps
+  // them centred as the wrapped line count changes.
   lv_obj_t* overlayMenuGroup;
-  lv_obj_t* overlayMenuPos;    // "4 / 9", right of the MENU title
-  lv_obj_t* overlayMenuCard;   // the emphasised current tile (accent, or grey
-                               // when the tile's action is unavailable)
-  lv_obj_t* overlayMenuName;   // the current tile's name (26)
-  lv_obj_t* overlayMenuPrev;   // the tile one step LEFT  (14, dim)
-  lv_obj_t* overlayMenuNext;   // the tile one step RIGHT (14, dim)
+  lv_obj_t* overlayMenuPos;          // "4 / 9", right of the MENU title
+  lv_obj_t* overlayMenuTile[3];      // 0 = prev, 1 = current, 2 = next
+  lv_obj_t* overlayMenuTileLabel[3];
 
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
@@ -177,7 +180,7 @@ private:
   enum TextSlot {
     TS_MODE, TS_UNIT, TS_RPM, TS_PITCH, TS_PITCH_UNIT,
     TS_TRAVEL_POS, TS_TRAVEL_UNIT, TS_TRAVEL_LEFT, TS_TRAVEL_RIGHT,
-    TS_STATE, TS_SOFTKEY,
+    TS_STATE,
     // Overlay slots. The title and the two hints are NOT here: every string
     // they can hold is a compile-time literal, so drawOverlay() caches the
     // VARIANT (m_lastFocus / m_lastHintVariant) and pushes the literal only
@@ -229,6 +232,13 @@ private:
   int m_lastMenuBlock;
   int m_lastMenuPrevBlock;
   int m_lastMenuNextBlock;
+  // Whether each neighbour tile is currently shown: at the two ends of the
+  // (non-wrapping) ring there is no previous / next tile, and an empty bordered
+  // box would read as a broken widget, so the whole tile is hidden instead.
+  // Reset to TRUE (not false) -- init() builds the tiles visible, and the cache
+  // must describe the tree it gates.
+  bool m_lastMenuPrevShown;
+  bool m_lastMenuNextShown;
 
   void initDisplay();
   void initialiseOta();
