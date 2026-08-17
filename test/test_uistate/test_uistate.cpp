@@ -433,6 +433,54 @@ TEST(UiStateJog, InFlightRightRunStillCancelsOnTheNextClick) {
   EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Right, running));
 }
 
+// The two cases above pin THAT the latch is reconciled, but not WHERE. Both
+// observe it through an arrow click, which would behave identically if the
+// reconciliation lived next to its only reader inside the Jog branch. The two
+// below pin the placement - at the top of handleKey, above every early return -
+// which is the whole point of it: a run ends while the operator is somewhere
+// else entirely, and the keypress that happens to be in flight at that moment
+// must still clean up.
+//
+// Each works by making the LATER arrow click see motionActive true again (an
+// unrelated jog, an engaged feed, a deceleration tail). If reconciliation only
+// happened there, that click would see Confirmed + active, keep the stale latch
+// and return CancelMotion. Getting a fresh run instead proves the earlier,
+// unrelated key event is what cleared it.
+
+TEST(UiStateJog, AnInertNonArrowKeyAlsoReconcilesACompletedRun) {
+  Rig r;
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  const UiContext idle = ctx(true, false, /*motionEnabled=*/false,
+                             /*motionActive=*/false);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+
+  // The run reaches the stop. The only event that sees the machine at rest is
+  // an OK Press, which produces no intent at all - and must still reconcile.
+  ASSERT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Press, idle));
+
+  // Something is moving again by the time the operator reaches for an arrow.
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+}
+
+TEST(UiStateJog, ARunThatEndsWhileTheMenuIsOpenIsStillReconciled) {
+  // The case the placement was chosen for: the menu branch returns early for
+  // every event it does not use, so a reconciliation below it would never run
+  // while the carousel is up.
+  Rig r;
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  const UiContext idle = ctx(true, false, /*motionEnabled=*/false,
+                             /*motionActive=*/false);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+
+  r.click(UiKey::Menu, idle);  // run completes while the operator is in here
+  ASSERT_TRUE(r.ui().menuOpen());
+  ASSERT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu, idle));
+
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, running));
+}
+
 // ===========================================================================
 // 3. The OK key's three jobs (spec §1 table)
 // ===========================================================================

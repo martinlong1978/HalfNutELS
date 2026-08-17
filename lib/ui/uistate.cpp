@@ -35,39 +35,37 @@ inline bool isWidgetFocus(UiFocus f) {
          f == UiFocus::Stops;
 }
 
-// --- The powered-run latch, m_runToStopDir --------------------------------
+// --- The powered-run latch, m_runPhase ------------------------------------
 //
-// The SIGN is the direction, exactly as uistate.h documents it: -1 left,
-// +1 right, 0 no run. The MAGNITUDE records how far the latch has got, and
-// exists only so the latch can be reconciled against the machine.
+// UiState has to keep its own record that a run to a stop is in flight, and
+// that record cannot be replaced by ctx.motionActive, nor cleared whenever
+// ctx.motionActive is false. Both fail, in opposite directions:
 //
-// The latch cannot simply be derived from ctx.motionActive, and it cannot
-// simply be cleared whenever ctx.motionActive is false. Both fail, in
-// opposite directions:
-//
-//   * Purely derived: DisplayTask polls at 10 Hz (main.cpp), so for up to a
-//     poll after RunToLeftStop is emitted the caller still reports
-//     motionActive == false. An arrow click inside that window would start a
-//     SECOND run instead of cancelling the first.
+//   * Purely derived from the context: the caller cannot have moved the
+//     machine, let alone reported it, by the time the very next event arrives.
+//     An arrow click inside that window would start a SECOND run instead of
+//     cancelling the first.
 //   * Cleared on every inactive context: the Release of the very tap that
 //     started the run arrives inside that same window, so the latch would be
 //     wiped before it ever meant anything and a run could never be cancelled.
 //
-// Hence two phases. A run is COMMANDED when we emit the intent, and becomes
-// CONFIRMED once the caller has actually reported motionActive. Only a
-// CONFIRMED run can be seen to end: it ended by itself at the stop, which is
-// the case UiState is never told about (defect 2). A COMMANDED run is still
-// inside the poll window, so an inactive context says nothing about it and
+// Hence two phases. A run is Commanded when we emit the intent, and becomes
+// Confirmed once some context has actually reported motionActive. Only a
+// Confirmed run can be inferred to have ENDED: it ended by itself at the stop,
+// which is the case UiState is never told about (defect 2). A Commanded run
+// may not have started yet, so an inactive context says nothing about it and
 // the latch is left alone.
-const int kRunCommanded = 1;
-const int kRunConfirmed = 2;
-
-inline int runPhase(int latch) { return latch < 0 ? -latch : latch; }
-
-// Same direction, new phase.
-inline int withPhase(int latch, int phase) {
-  return latch < 0 ? -phase : phase;
-}
+//
+// A naturally-completed run and an in-flight one present IDENTICAL contexts at
+// the decision point (motionActive false, in the first case because it is over
+// and in the second because it has not begun) and demand opposite answers, so
+// the phase is the only thing that separates them. Do not collapse it.
+//
+// No direction is stored. This used to be a signed m_runToStopDir whose sign
+// was documented as the direction, but nothing ever read the sign: both
+// consumers test only "is a run in flight", the cancel fires on either arrow
+// regardless of which one started the run, and the RunToLeft/RightStop intent
+// is chosen from the key in hand. The phase is the whole of the state.
 
 }  // namespace
 
@@ -76,7 +74,7 @@ UiState::UiState()
       m_menuOpen(false),
       m_menuIndex(0),
       m_lastActivityMs(0),
-      m_runToStopDir(0),
+      m_runPhase(RunPhase::None),
       m_jogDir(0) {}
 
 UiFocus UiState::focus() const { return m_focus; }
@@ -103,7 +101,7 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     }
     m_menuOpen = false;
     m_focus = UiFocus::Jog;
-    m_runToStopDir = 0;
+    m_runPhase = RunPhase::None;
     m_jogDir = 0;
     return UiIntent::CancelMotion;
   }
@@ -139,9 +137,21 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // the next arrow click returns CancelMotion for a run that is already over:
   // the click is silently eaten. Run to the stop, click back, nothing happens.
   //
-  // So: a CONFIRMED run plus an inactive machine means the run is over, and
-  // the latch goes. See the two-phase note above for why a COMMANDED run is
+  // So: a Confirmed run plus an inactive machine means the run is over, and
+  // the latch goes. See the two-phase note above for why a Commanded run is
   // deliberately left standing.
+  //
+  // KNOWN LIMIT, and the reason UiContext's comment insists on a FRESH context:
+  // a run that is never Confirmed is never reconciled either. If no key event
+  // between the start of a run and its natural end ever sees motionActive, the
+  // latch stays Commanded for good, and the eaten-click symptom above returns.
+  // In practice the Release of the starting tap is that event - but only if the
+  // caller re-reads the machine after executing the intent it was just handed.
+  // A caller that snapshots one context per 10 Hz display poll and replays it
+  // over a batch of queued key events defeats this entirely. It cannot be
+  // repaired from inside UiState: a Commanded latch and a completed one are
+  // indistinguishable here, and clearing on a timer would break the pinned
+  // "a powered run survives the focus timeout" contract (see tick()).
   //
   // This sits here, at the top of the ladder, rather than next to the latch's
   // only reader in the Jog branch, for two reasons. Every path that consults
@@ -156,12 +166,12 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // an arrow has to stop the carriage no matter what else is true. Bookkeeping
   // never goes above it.
   // -------------------------------------------------------------------------
-  if (m_runToStopDir != 0) {
-    if (ctx.motionActive) {
-      m_runToStopDir = withPhase(m_runToStopDir, kRunConfirmed);
-    } else if (runPhase(m_runToStopDir) == kRunConfirmed) {
-      m_runToStopDir = 0;
+  if (ctx.motionActive) {
+    if (m_runPhase == RunPhase::Commanded) {
+      m_runPhase = RunPhase::Confirmed;
     }
+  } else if (m_runPhase == RunPhase::Confirmed) {
+    m_runPhase = RunPhase::None;
   }
 
   // -------------------------------------------------------------------------
@@ -369,9 +379,9 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // cancels rather than reversing: one gesture, one effect. Press and Release
   // stay inert, so the Release of the cancelling tap does not also fire, and
   // so the Press of a fresh tap cannot cancel before its own Click is seen.
-  if (m_runToStopDir != 0) {
+  if (m_runPhase != RunPhase::None) {
     if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
-      m_runToStopDir = 0;
+      m_runPhase = RunPhase::None;
       return UiIntent::CancelMotion;
     }
     return UiIntent::None;
@@ -384,10 +394,10 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     // Click follows a Hold. Press/Release must be inert: a Release must never
     // abort the powered run its own Click just started.
     if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
-      // COMMANDED, not yet confirmed: the caller has not had a chance to move
+      // Commanded, not yet confirmed: the caller has not had a chance to move
       // the machine, let alone report it. The reconciliation above promotes
-      // this to CONFIRMED on the first context that says motionActive.
-      m_runToStopDir = dir * kRunCommanded;
+      // this to Confirmed on the first context that says motionActive.
+      m_runPhase = RunPhase::Commanded;
       return (dir < 0) ? UiIntent::RunToLeftStop : UiIntent::RunToRightStop;
     }
     return UiIntent::None;

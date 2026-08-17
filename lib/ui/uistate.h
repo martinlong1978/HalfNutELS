@@ -43,12 +43,24 @@ enum class UiIntent {
 
 // Machine state the decision depends on. Supplied fresh by the caller on every
 // key event; UiState never caches it.
+//
+// "Fresh" is load-bearing for motionActive, not a figure of speech. The powered
+// run latch (m_runPhase, below) is reconciled against it, and the reconciliation
+// can only observe a run ending if some key event, at some point, saw the run
+// while it was live. The caller must therefore EXECUTE the returned intent and
+// then rebuild the context from the machine before the next handleKey - not
+// snapshot one context per display poll and feed it to a whole batch of queued
+// key events. See the m_runPhase note below for what goes stale otherwise.
 struct UiContext {
   bool leftStopSet;
   bool rightStopSet;
   bool motionEnabled;   // true when the leadscrew is engaged (MM_ENABLED)
   bool motionActive;   // the carriage is under power right now:
-                       // motionMode is neither MM_DISABLED nor MM_UNSET
+                       // motionMode is neither MM_DISABLED nor MM_UNSET.
+                       // A superset of motionEnabled: it also covers the
+                       // powered run to a stop (MM_JOG_*), the interactive jog
+                       // (MM_INTERACTIVE_JOG_*) and the deceleration tail
+                       // (MM_DECELLERATE).
 };
 
 class UiState {
@@ -78,13 +90,24 @@ class UiState {
   static const int kMenuItemCount = 9;
 
  private:
+  // How far a powered run to a stop has got. Two phases, not one flag, because
+  // the caller cannot report the run instantly: it is COMMANDED from the moment
+  // the intent is emitted, and CONFIRMED once some later context has actually
+  // reported motionActive. Only a CONFIRMED run may be inferred to have ENDED
+  // when a context reports motionActive false - a COMMANDED one may simply not
+  // have started yet, and an inactive context says nothing about it. See the
+  // long note in uistate.cpp for why both halves are necessary.
+  //
+  // No direction is stored. Every consumer asks only "is a run in flight" - the
+  // cancel is unconditional on EITHER arrow, by design (§7), and the intent that
+  // starts a run is chosen from the key that starts it, not from this member.
+  enum class RunPhase { None, Commanded, Confirmed };
+
   UiFocus m_focus;
   bool m_menuOpen;
   int m_menuIndex;
   unsigned long m_lastActivityMs;
-  // Direction of an in-flight powered run to a stop: -1 left, +1 right, 0 none.
-  // A second arrow click while this is non-zero cancels the run.
-  int m_runToStopDir;
+  RunPhase m_runPhase;
   // Direction of an in-flight hold-to-jog: -1 left, +1 right, 0 none.
   int m_jogDir;
 };
