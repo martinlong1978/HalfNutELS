@@ -58,7 +58,19 @@ class ButtonPad {
   // Runs the tile UiState::menuIndex() currently names (docs/ux-redesign.md
   // Sec. 6). The index -> tile mapping is NOT defined here: it is the MenuTile
   // enum in lib/ui/uistate.h, shared with the carousel that renders it.
+  //
+  // SIDE EFFECTS ONLY. UiState has already closed the carousel and moved focus
+  // to menuTileDestination(tile) by the time this runs - "OK always closes the
+  // menu, and you always land somewhere that shows the result" - so several
+  // tiles now legitimately do nothing here. Do not move focus from this method.
   void activateMenuTile();
+
+  // Persist + apply one end of the travel as the DRO datum, behind
+  // UiIntent::DroDatumLeft / DroDatumRight. Idempotent: a request for the end
+  // already stored writes nothing, which is what keeps a repeated press off the
+  // flash erase path. DroDatumPreference comes from lib/dro/dro.h via
+  // latheconfig.h above.
+  void setDroDatumPreference(DroDatumPreference wanted);
 
   // The MM_ENABLED <-> MM_DECELLERATE swap behind UiIntent::ToggleEngage. Pure
   // execution: whether ENABLE toggles at all, or merely dismisses whatever is

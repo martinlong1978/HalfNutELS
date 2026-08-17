@@ -32,7 +32,10 @@ std::ostream& operator<<(std::ostream& os, UiFocus f) {
     case UiFocus::Rate: return os << "Focus::Rate";
     case UiFocus::Mode: return os << "Focus::Mode";
     case UiFocus::Stops: return os << "Focus::Stops";
+    case UiFocus::DroDatum: return os << "Focus::DroDatum";
     case UiFocus::Menu: return os << "Focus::Menu";
+    case UiFocus::Diagnostics: return os << "Focus::Diagnostics";
+    case UiFocus::About: return os << "Focus::About";
   }
   return os << "Focus::<?>";
 }
@@ -59,6 +62,8 @@ std::ostream& operator<<(std::ostream& os, UiIntent i) {
     case UiIntent::ClearBothStops: return os << "ClearBothStops";
     case UiIntent::ToggleEngage: return os << "ToggleEngage";
     case UiIntent::ZeroDro: return os << "ZeroDro";
+    case UiIntent::DroDatumLeft: return os << "DroDatumLeft";
+    case UiIntent::DroDatumRight: return os << "DroDatumRight";
     case UiIntent::MenuNext: return os << "MenuNext";
     case UiIntent::MenuPrev: return os << "MenuPrev";
     case UiIntent::MenuActivate: return os << "MenuActivate";
@@ -83,13 +88,17 @@ namespace {
 const unsigned long kTimeout = UiState::kFocusTimeoutMs;
 const int kMenuItems = UiState::kMenuItemCount;
 
+// threadMode defaults to FALSE, i.e. a feed mode. Only menuTileBlock() reads
+// it, and only for the Sync tile, so every test that is not about Sync is
+// unaffected by the default; the ones that are pass it explicitly.
 UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false,
-              bool motionActive = false) {
+              bool motionActive = false, bool threadMode = false) {
   UiContext c;
   c.leftStopSet = leftStopSet;
   c.rightStopSet = rightStopSet;
   c.motionEnabled = motionEnabled;
   c.motionActive = motionActive;
+  c.threadMode = threadMode;
   return c;
 }
 
@@ -97,6 +106,10 @@ const UiContext kNoStops = ctx(false, false);
 const UiContext kBothStops = ctx(true, true);
 const UiContext kLeftOnly = ctx(true, false);
 const UiContext kRightOnly = ctx(false, true);
+// At rest, in a thread mode: the context in which EVERY menu tile is available,
+// so a test about a tile's destination is never accidentally testing a refusal.
+const UiContext kThreadIdle = ctx(false, false, /*motionEnabled=*/false,
+                                  /*motionActive=*/false, /*threadMode=*/true);
 
 // A UiState plus a virtual millisecond clock, so timeout tests are explicit
 // about when each event happened.
@@ -125,6 +138,18 @@ class Rig {
     return out;
   }
 
+  // Open the carousel from rest, walk to `tile`, and press OK. Real gestures
+  // only, and the context defaults to kThreadIdle so no tile is refused - a
+  // helper that silently landed on a refusal would make every test built on it
+  // pass for the wrong reason.
+  UiIntent activateTile(int tile, const UiContext& c = kThreadIdle) {
+    click(UiKey::Menu, c);
+    for (int i = 0; i < tile; i++) {
+      click(UiKey::Right, c);
+    }
+    return click(UiKey::Ok, c);
+  }
+
   // Drive focus into a given state using only real key gestures.
   void enterFocus(UiFocus f) {
     switch (f) {
@@ -134,6 +159,10 @@ class Rig {
       case UiFocus::Mode: click(UiKey::Mode); break;
       case UiFocus::Stops: click(UiKey::Stops); break;
       case UiFocus::Menu: click(UiKey::Menu); break;
+      // The three focuses that are only reachable through the menu.
+      case UiFocus::DroDatum: activateTile(MENU_DRO_DATUM); break;
+      case UiFocus::Diagnostics: activateTile(MENU_DIAGNOSTICS); break;
+      case UiFocus::About: activateTile(MENU_ABOUT); break;
     }
   }
 
@@ -149,8 +178,23 @@ class Rig {
   unsigned long m_now;
 };
 
+// The six focuses that are reachable from the rest screen with a single key.
+//
+// DELIBERATELY does NOT include DroDatum, Diagnostics or About. Those three are
+// reachable only through a menu tile, and two of them answer several of the
+// keys below differently on purpose - MENU closes a read-only screen instead of
+// opening the carousel over it, and the encoder is inert there rather than
+// stepping a value. Folding them in would make the "every focus" loops assert a
+// uniformity that is not the design; they get their own tests instead, in the
+// DroDatum / read-only-screen sections at the end of this file.
 const UiFocus kAllFocuses[] = {UiFocus::Jog,   UiFocus::JogSpeed, UiFocus::Rate,
                                UiFocus::Mode,  UiFocus::Stops,    UiFocus::Menu};
+
+// The three focuses a menu tile opens.
+const UiFocus kMenuOpenedFocuses[] = {UiFocus::DroDatum, UiFocus::Diagnostics,
+                                      UiFocus::About};
+// The two read-only screens, which share every rule.
+const UiFocus kReadOnlyScreens[] = {UiFocus::Diagnostics, UiFocus::About};
 
 // ===========================================================================
 // 1. Rest state
@@ -1173,17 +1217,32 @@ TEST(UiStateMenu, IndexClampsAtTheEnd) {
   EXPECT_EQ(kMenuItems - 2, r.ui().menuIndex());
 }
 
-TEST(UiStateMenu, OkActivatesTheCurrentTileAndLeavesTheMenuOpen) {
-  // Decision: tiles like Units / Theme toggle in place, so activation must not
-  // dismiss the carousel; MENU or HALT close it (§6).
+// UPDATED (was OkActivatesTheCurrentTileAndLeavesTheMenuOpen). The old contract
+// - "tiles toggle in place, so activation must not dismiss the carousel" - is
+// the exact behaviour the owner overturned: the carousel is a full-width panel
+// covering the pitch, the theme and the travel bar, i.e. covering everything a
+// tile changes, so leaving it up meant OK visibly did nothing. The new rule is
+// "OK always closes the menu, and you always land somewhere that shows the
+// result". The refused-tile exception is pinned separately below.
+TEST(UiStateMenu, OkActivatesTheCurrentTileAndClosesTheMenu) {
   Rig r;
-  r.click(UiKey::Menu);
-  r.click(UiKey::Right);
+  r.click(UiKey::Menu, kThreadIdle);
+  r.click(UiKey::Right, kThreadIdle);
   ASSERT_EQ(1, r.ui().menuIndex());
-  EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok));
-  EXPECT_EQ(UiFocus::Menu, r.focus());
-  EXPECT_TRUE(r.ui().menuOpen());
-  EXPECT_EQ(1, r.ui().menuIndex()) << "activation must not move the selection";
+  EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, kThreadIdle));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus()) << "Theme's result is the whole screen";
+}
+
+TEST(UiStateMenu, ActivateLeavesTheIndexReadableToCaller) {
+  // Load-bearing contract, not incidental: ButtonPad::activateMenuTile() reads
+  // menuIndex() AFTER handleKey() has returned, to decide which tile to
+  // execute. If closing the carousel reset the index, every tile would fire
+  // tile 0 - Units - instead of the one that was selected.
+  Rig r;
+  ASSERT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_SOFTWARE_UPDATE));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ((int)MENU_SOFTWARE_UPDATE, r.ui().menuIndex());
 }
 
 TEST(UiStateMenu, OkHoldInsideTheMenuDoesNotZeroTheDro) {
@@ -2278,6 +2337,519 @@ TEST(UiStateEnable, DoesNotStrandAnInFlightJog) {
   r.click(UiKey::Enable);
   EXPECT_EQ(UiIntent::JogStop,
             r.key(UiKey::Left, UiKeyEvent::Release, kNoStops));
+}
+
+// ===========================================================================
+// 12. Where OK on a tile lands you (the owner's rule for this feature set)
+//
+// "OK always closes the menu, and you always land somewhere that shows the
+// result." The main screen IS the confirmation for the tiles whose effect is
+// visible there; the rest open a screen of their own. The ONE exception is a
+// refused tile, which changes nothing and stays open with its reason.
+//
+// These are the contract for menuTileDestination() as UiState applies it, so
+// the table is asserted tile by tile rather than through the helper - a test
+// that asked menuTileDestination() what it expected would pass no matter what
+// the table said.
+// ===========================================================================
+
+TEST(UiStateMenuDestination, UnitsLandsOnTheMainScreen) {
+  // The pitch redraws in the new unit; that redraw is the feedback.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_UNITS));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuDestination, ThemeLandsOnTheMainScreen) {
+  // The whole screen changes colour.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_THEME));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuDestination, DroDatumOpensItsOwnOverlay) {
+  // Not visible on the main screen at the moment of the press, so it gets a
+  // picker rather than a silent toggle behind the carousel.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_DRO_DATUM));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::DroDatum, r.focus());
+}
+
+TEST(UiStateMenuDestination, JogSpeedOpensTheExistingWidget) {
+  // The same widget OK opens at rest (§6, "here for discoverability"). This is
+  // what replaced ButtonPad replaying two synthetic keystrokes to move focus.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_JOG_SPEED));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::JogSpeed, r.focus());
+}
+
+TEST(UiStateMenuDestination, SyncLandsOnTheMainScreen) {
+  // The sync indicator lights in the status bar. Needs a thread mode, or the
+  // tile is refused - which is the next section.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_SYNC, kThreadIdle));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuDestination, SoftwareUpdateLandsOnTheMainScreen) {
+  // The OTA screen takes over from GlobalState::hasOTA(), not from a UiFocus,
+  // so Jog is the correct focus to leave behind it.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_SOFTWARE_UPDATE));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuDestination, WifiSetupLandsOnTheMainScreen) {
+  // Academic - ButtonPad reboots - but the state must still be coherent for the
+  // instant before it goes, and for the case where the reboot is refused.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_WIFI_SETUP));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuDestination, DiagnosticsOpensItsOwnScreen) {
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_DIAGNOSTICS));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Diagnostics, r.focus());
+}
+
+TEST(UiStateMenuDestination, AboutOpensItsOwnScreen) {
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_ABOUT));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::About, r.focus());
+}
+
+TEST(UiStateMenuDestination, EveryTileClosesTheMenuAndLandsSomewhere) {
+  // The sweep, so a tile added later cannot quietly inherit the old "stays
+  // open" behaviour by being left out of the table above.
+  for (int tile = 0; tile < kMenuItems; ++tile) {
+    Rig r;
+    EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(tile))
+        << "tile " << tile;
+    EXPECT_FALSE(r.ui().menuOpen()) << "tile " << tile;
+    EXPECT_NE(UiFocus::Menu, r.focus()) << "tile " << tile;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE EXCEPTION: a refused tile changes nothing and stays open.
+//
+// Not decoration. The reason the tile was refused is ALREADY on screen - the
+// display evaluates the same menuTileBlock() every tick, so the tile is drawn
+// dim and the hint row reads "stop the carriage first" / "needs thread mode".
+// Closing on a refusal would throw that explanation away at the exact moment
+// the operator needs to read it, and drop them on a rest screen where nothing
+// happened for no visible reason.
+//
+// MUTATION-VERIFIED: deleting the `!= MTB_NONE` early return in uistate.cpp
+// (so a refused tile closes and activates like any other) fails
+// RefusedTileStaysOpenAndEmitsNothing, RefusedByFeedModeAlsoStaysOpen,
+// EveryBlockableTileStaysOpenUnderPower and TheRefusalIsNotJustASuppressedIntent.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateMenuRefusal, RefusedTileStaysOpenAndEmitsNothing) {
+  // Theme under power: blocked by MTB_MOTION, because persisting it is a flash
+  // erase that stalls the spindle loop.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.click(UiKey::Menu, moving);
+  r.click(UiKey::Right, moving);
+  ASSERT_EQ((int)MENU_THEME, r.ui().menuIndex());
+
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, moving))
+      << "a refused tile must not fire";
+  EXPECT_TRUE(r.ui().menuOpen()) << "the reason is on screen; keep it there";
+  EXPECT_EQ(UiFocus::Menu, r.focus());
+  EXPECT_EQ((int)MENU_THEME, r.ui().menuIndex())
+      << "and the selection must not move";
+}
+
+TEST(UiStateMenuRefusal, RefusedByFeedModeAlsoStaysOpen) {
+  // Sync at rest but in a feed mode: MTB_FEED_MODE. The other half of the rule,
+  // and the one that proves the refusal is not just "is the machine moving".
+  Rig r;
+  r.click(UiKey::Menu, kNoStops);  // kNoStops is a FEED mode
+  for (int i = 0; i < (int)MENU_SYNC; ++i) {
+    r.click(UiKey::Right, kNoStops);
+  }
+  ASSERT_EQ((int)MENU_SYNC, r.ui().menuIndex());
+
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, kNoStops));
+  EXPECT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Menu, r.focus());
+}
+
+TEST(UiStateMenuRefusal, SyncFiresOnceTheModeIsAThreadMode) {
+  // The same tile, the same rest state, one flag different - so the refusal
+  // above is attributable to threadMode and nothing else.
+  Rig r;
+  EXPECT_EQ(UiIntent::MenuActivate, r.activateTile(MENU_SYNC, kThreadIdle));
+  EXPECT_FALSE(r.ui().menuOpen());
+}
+
+TEST(UiStateMenuRefusal, EveryBlockableTileStaysOpenUnderPower) {
+  // The four tiles menuTileBlock() gates on motion, plus Sync, which is gated
+  // on motion first. Under power every one of them must be inert.
+  const MenuTile blockable[] = {MENU_THEME, MENU_DRO_DATUM, MENU_SYNC,
+                                MENU_SOFTWARE_UPDATE, MENU_WIFI_SETUP};
+  for (MenuTile tile : blockable) {
+    // motionActive AND threadMode: the thread mode removes the other reason
+    // Sync could be refused, so motion is provably the cause for all five.
+    const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                                 /*motionActive=*/true, /*threadMode=*/true);
+    Rig r;
+    r.click(UiKey::Menu, moving);
+    for (int i = 0; i < (int)tile; ++i) {
+      r.click(UiKey::Right, moving);
+    }
+    ASSERT_EQ((int)tile, r.ui().menuIndex());
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, moving)) << "tile " << (int)tile;
+    EXPECT_TRUE(r.ui().menuOpen()) << "tile " << (int)tile;
+    EXPECT_EQ(UiFocus::Menu, r.focus()) << "tile " << (int)tile;
+  }
+}
+
+TEST(UiStateMenuRefusal, UnblockedTilesStillFireUnderPower) {
+  // The refusal must be per-tile, not a blanket "no menu while moving": Units,
+  // Jog speed, Diagnostics and About touch neither flash nor motion and stay
+  // live throughout, which is what menuTileBlock() already documents.
+  const MenuTile live[] = {MENU_UNITS, MENU_JOG_SPEED, MENU_DIAGNOSTICS,
+                           MENU_ABOUT};
+  for (MenuTile tile : live) {
+    const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                                 /*motionActive=*/true);
+    Rig r;
+    r.click(UiKey::Menu, moving);
+    for (int i = 0; i < (int)tile; ++i) {
+      r.click(UiKey::Right, moving);
+    }
+    EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, moving))
+        << "tile " << (int)tile;
+    EXPECT_FALSE(r.ui().menuOpen()) << "tile " << (int)tile;
+    EXPECT_EQ(menuTileDestination((int)tile), r.focus()) << "tile " << (int)tile;
+  }
+}
+
+TEST(UiStateMenuRefusal, TheRefusalIsNotJustASuppressedIntent) {
+  // The failure mode this pins: closing the carousel and moving focus, and only
+  // then swallowing the intent. The operator would see the menu vanish with
+  // nothing changed and no reason left on screen - worse than the old bug,
+  // because at least that one left the explanation up. So after a refusal the
+  // carousel must still be usable, in place, with the selection intact.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.click(UiKey::Menu, moving);
+  r.click(UiKey::Right, moving);  // -> Theme, blocked
+  ASSERT_EQ(UiIntent::None, r.click(UiKey::Ok, moving));
+
+  // Still a live carousel: the arrows still walk it.
+  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right, moving));
+  EXPECT_EQ((int)MENU_DRO_DATUM, r.ui().menuIndex());
+  EXPECT_TRUE(r.ui().menuOpen());
+  // And MENU still closes it the ordinary way.
+  EXPECT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu, moving));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateMenuRefusal, ARefusedTileFiresOnceTheCarriageStops) {
+  // The refusal is a state, not a latch: nothing is remembered about it, so the
+  // same press works the moment the machine is at rest.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.click(UiKey::Menu, moving);
+  r.click(UiKey::Right, moving);
+  ASSERT_EQ(UiIntent::None, r.click(UiKey::Ok, moving));
+  EXPECT_EQ(UiIntent::MenuActivate, r.click(UiKey::Ok, kNoStops));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+// ===========================================================================
+// 13. The DRO datum overlay (UiFocus::DroDatum)
+//
+// Modelled on Mode: a small set of choices, arrows pick, OK commits and
+// dismisses, HALT cancels, 4 s idle drops back to Jog. The intents are ABSOLUTE
+// (DroDatumLeft / DroDatumRight) rather than a next/prev pair, because with two
+// choices a next/prev pair is a toggle and a toggle cannot be pressed twice
+// safely - see the arrow branch in uistate.cpp.
+// ===========================================================================
+
+TEST(UiStateDroDatum, ArrowsPickAnEndAbsolutely) {
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  ASSERT_EQ(UiFocus::DroDatum, r.focus());
+  EXPECT_EQ(UiIntent::DroDatumLeft, r.click(UiKey::Left));
+  EXPECT_EQ(UiIntent::DroDatumRight, r.click(UiKey::Right));
+  EXPECT_EQ(UiFocus::DroDatum, r.focus()) << "picking must not dismiss";
+}
+
+TEST(UiStateDroDatum, RepeatingAnArrowNamesTheSameEnd) {
+  // THE reason the intents are absolute. A next/prev toggle would return
+  // DroDatumRight on the second press and silently undo the first - which is
+  // exactly the "did that register?" failure this feature set exists to kill.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::DroDatumLeft, r.click(UiKey::Left));
+  EXPECT_EQ(UiIntent::DroDatumLeft, r.click(UiKey::Left));
+  EXPECT_EQ(UiIntent::DroDatumLeft, r.click(UiKey::Left));
+  EXPECT_EQ(UiIntent::DroDatumRight, r.click(UiKey::Right));
+  EXPECT_EQ(UiIntent::DroDatumRight, r.click(UiKey::Right));
+}
+
+TEST(UiStateDroDatum, ArrowsIgnoreEveryEventThatIsNotAClick) {
+  // Press/Release inert or one tap acts twice; Hold has no meaning here.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  const UiKeyEvent inert[] = {UiKeyEvent::Press, UiKeyEvent::Release,
+                              UiKeyEvent::Hold};
+  for (UiKeyEvent ev : inert) {
+    EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, ev)) << ev;
+    EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, ev)) << ev;
+    EXPECT_EQ(UiFocus::DroDatum, r.focus()) << ev;
+  }
+}
+
+TEST(UiStateDroDatum, OkCommitsAndReturnsToJog) {
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  r.click(UiKey::Right);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateDroDatum, OkHoldInsideTheOverlayDoesNotZeroTheDro) {
+  // Same guard every other widget has: ZeroDro is defined at rest only, so a
+  // slow OK press inside a picker can never move the datum by accident.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Ok));
+}
+
+TEST(UiStateDroDatum, HaltCancelsBackToJog) {
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_FALSE(r.ui().menuOpen());
+}
+
+TEST(UiStateDroDatum, ExpiresAfterTheIdleTimeout) {
+  // It IS a widget, so the 4 s rule applies: an overlay left open over the rest
+  // screen re-points the arrows at a setting the operator has forgotten about.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  ASSERT_EQ(UiFocus::DroDatum, r.focus());
+  r.advance(kTimeout - 1);
+  EXPECT_FALSE(r.tick());
+  r.advance(1);
+  EXPECT_TRUE(r.tick());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateDroDatum, EnableDismissesItWithoutEngaging) {
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable));
+}
+
+TEST(UiStateDroDatum, MenuKeyOpensTheCarouselOverIt) {
+  // It is a widget, not a read-only screen, so MENU behaves as it does over
+  // every other widget: top level, opens on top.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu));
+  EXPECT_EQ(UiFocus::Menu, r.focus());
+  EXPECT_TRUE(r.ui().menuOpen());
+}
+
+TEST(UiStateDroDatum, TheKnobPicksAnEndToo) {
+  // The knob drives what the focus owns, exactly like Mode. Unlike STOPS, the
+  // choice is instantly reversible, so there is no reason to make it inert.
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::DroDatumRight,
+            r.key(UiKey::EncoderCw, UiKeyEvent::Click));
+  EXPECT_EQ(UiIntent::DroDatumLeft,
+            r.key(UiKey::EncoderCcw, UiKeyEvent::Click));
+  EXPECT_EQ(UiFocus::DroDatum, r.focus());
+}
+
+TEST(UiStateDroDatum, ArrowsAreInhibitedUnderPower) {
+  // Unlike Rate and Mode, whose arrows must keep working mid-cut (§3), this
+  // widget's arrows go dead under power - persisting the datum is a flash erase
+  // that saveLathePreferences() refuses outright while the carriage is moving,
+  // so emitting the intent would guarantee a silent no-op.
+  for (int enabled = 0; enabled <= 1; ++enabled) {
+    for (int active = 0; active <= 1; ++active) {
+      if (!enabled && !active) {
+        continue;  // at rest; covered by ArrowsPickAnEndAbsolutely
+      }
+      const UiContext c = ctx(false, false, enabled != 0, active != 0);
+      Rig r;
+      r.enterFocus(UiFocus::DroDatum);  // opened at rest, as the tile requires
+      EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, c))
+          << "enabled=" << enabled << " active=" << active;
+      EXPECT_EQ(UiIntent::None, r.click(UiKey::Right, c))
+          << "enabled=" << enabled << " active=" << active;
+      EXPECT_EQ(UiFocus::DroDatum, r.focus()) << "and the widget stays open";
+    }
+  }
+}
+
+TEST(UiStateDroDatum, ArrowsAreLiveAgainOnceTheCarriageStops) {
+  // The inhibit is a state, not a latch.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  ASSERT_EQ(UiIntent::None, r.click(UiKey::Left, moving));
+  EXPECT_EQ(UiIntent::DroDatumLeft, r.click(UiKey::Left, kNoStops));
+}
+
+TEST(UiStateDroDatum, TheKnobIsStillDeadUnderPower) {
+  // The blanket encoder inhibit applies here like everywhere else.
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.enterFocus(UiFocus::DroDatum);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::EncoderCw, UiKeyEvent::Click, moving));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::EncoderCcw, UiKeyEvent::Click, moving));
+}
+
+// ===========================================================================
+// 14. The read-only screens (UiFocus::Diagnostics, UiFocus::About)
+//
+// OK, MENU and HALT all get you out to Jog; the arrows do nothing; and - the
+// deliberate ruling - the 4 s idle timeout does NOT apply, because these are
+// screens you are meant to be able to watch or read for longer than that and
+// they carry none of the hazard the timeout exists to guard against.
+// ===========================================================================
+
+TEST(UiStateReadOnlyScreens, OkReturnsToJog) {
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    ASSERT_EQ(f, r.focus());
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok)) << f;
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+  }
+}
+
+TEST(UiStateReadOnlyScreens, MenuReturnsToJogRatherThanReopeningTheCarousel) {
+  // The key that took the operator in is the obvious one to take them back out,
+  // and re-opening the carousel would put a picker on top of a screen that was
+  // itself opened from that picker.
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu)) << f;
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+    EXPECT_FALSE(r.ui().menuOpen()) << f;
+  }
+}
+
+TEST(UiStateReadOnlyScreens, HaltReturnsToJogAndStillCancelsMotion) {
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt)) << f;
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+  }
+}
+
+TEST(UiStateReadOnlyScreens, ArrowsDoNothingAtAll) {
+  // Inert on every event, in every stop configuration - LEFT and RIGHT are the
+  // jog keys, so a reflex press on a read-only screen must not move metal, step
+  // a value, or leave the screen.
+  const UiKeyEvent every[] = {UiKeyEvent::Press, UiKeyEvent::Click,
+                              UiKeyEvent::Hold, UiKeyEvent::Release};
+  const UiContext contexts[] = {kNoStops, kLeftOnly, kRightOnly, kBothStops};
+  for (UiFocus f : kReadOnlyScreens) {
+    for (const UiContext& c : contexts) {
+      for (UiKeyEvent ev : every) {
+        Rig r;
+        r.enterFocus(f);
+        EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, ev, c)) << f << " " << ev;
+        EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, ev, c)) << f << " " << ev;
+        EXPECT_EQ(f, r.focus()) << f << " " << ev;
+      }
+    }
+  }
+}
+
+TEST(UiStateReadOnlyScreens, TheKnobIsInertToo) {
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_EQ(UiIntent::None, r.key(UiKey::EncoderCw, UiKeyEvent::Click)) << f;
+    EXPECT_EQ(UiIntent::None, r.key(UiKey::EncoderCcw, UiKeyEvent::Click)) << f;
+    EXPECT_EQ(f, r.focus()) << f;
+  }
+}
+
+TEST(UiStateReadOnlyScreens, DoNotTimeOut) {
+  // THE RULING. Diagnostics shows following error and pulse counts, which only
+  // mean anything watched over a spindle revolution or a test pass - and the
+  // operator's hands are on the machine, not the panel, so there is no input to
+  // keep a timer alive with. About is a screen you read an IP address off. Four
+  // seconds is not enough for either, and neither carries the hazard the
+  // timeout exists for (their arrows are inert - see above), so neither expires.
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    ASSERT_EQ(f, r.focus());
+    r.advance(kTimeout * 100);
+    EXPECT_FALSE(r.tick()) << f;
+    EXPECT_EQ(f, r.focus()) << f << " must survive an arbitrary idle period";
+  }
+}
+
+TEST(UiStateReadOnlyScreens, EnableDismissesThemWithoutEngaging) {
+  // Same rule as a widget: engaging is a commitment to cut, and it must not
+  // happen while a full screen is hiding the rest screen and the state chip.
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable)) << f;
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+    EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable)) << f;
+  }
+}
+
+TEST(UiStateReadOnlyScreens, OkHoldDoesNotZeroTheDro) {
+  for (UiFocus f : kReadOnlyScreens) {
+    Rig r;
+    r.enterFocus(f);
+    EXPECT_EQ(UiIntent::None, r.hold(UiKey::Ok)) << f;
+  }
+}
+
+TEST(UiStateMenuOpenedFocuses, AreAllReachableAndAllLeaveOnHalt) {
+  // The sweep over the three focuses only a tile can open: each is entered by a
+  // real gesture sequence, and HALT - the one key that is live from everywhere -
+  // gets out of all of them.
+  for (UiFocus f : kMenuOpenedFocuses) {
+    Rig r;
+    r.enterFocus(f);
+    ASSERT_EQ(f, r.focus()) << f << " is not reachable from its tile";
+    ASSERT_FALSE(r.ui().menuOpen()) << f;
+    EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt)) << f;
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
+  }
 }
 
 }  // namespace

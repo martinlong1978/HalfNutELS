@@ -116,6 +116,13 @@ UiContext ButtonPad::buildContext() {
   // or decelerating out of any of those.
   ctx.motionActive = (motionMode != GlobalMotionMode::MM_DISABLED &&
     motionMode != GlobalMotionMode::MM_UNSET);
+  // Only menuTileBlock() reads this, for the Sync tile. Sampled from the same
+  // GlobalState, at the same instant, as the two motion flags - so the block
+  // UiState computes and the one activateMenuTile() recomputes below can only
+  // disagree if the machine actually changed in between, which is the race that
+  // check exists to catch.
+  const GlobalFeedMode feedMode = globalState->getFeedMode();
+  ctx.threadMode = (feedMode == FM_THREAD || feedMode == FM_THREAD_REVERSE);
   return ctx;
 }
 
@@ -321,6 +328,17 @@ void ButtonPad::applyIntent(UiIntent intent) {
     m_leadscrew->unsetStopPosition(LeadscrewStopPosition::RIGHT);
     break;
 
+  // --- DRO DATUM widget (Sec. 6 / Sec. 8) ----------------------------------
+  // The picker the DRO datum tile now opens, instead of the tile toggling the
+  // value blind behind the carousel. UiState has decided WHICH end; this only
+  // persists and applies it.
+  case UiIntent::DroDatumLeft:
+    setDroDatumPreference(DroDatumPreference::Left);
+    break;
+  case UiIntent::DroDatumRight:
+    setDroDatumPreference(DroDatumPreference::Right);
+    break;
+
   // --- ENABLE (Sec. 5) -----------------------------------------------------
   case UiIntent::ToggleEngage:
     enableHandler();
@@ -355,6 +373,18 @@ void ButtonPad::applyIntent(UiIntent intent) {
 // in lib/ui/uistate.h, shared with the carousel that renders it) decides what
 // that index MEANS. This method only executes.
 //
+// THE FOCUS CHANGE IS NOT HERE. By the time this runs, UiState has already
+// closed the carousel and moved focus to menuTileDestination(tile) - Jog for
+// the tiles whose result is visible on the main screen, the tile's own widget
+// or screen for the rest. This method owns the SIDE EFFECTS only, which is why
+// the Jog speed tile no longer has to replay two synthetic keystrokes to move
+// focus and why several tiles below now have nothing left to do at all.
+//
+// m_ui.menuIndex() is read AFTER the menu has closed. That is a documented
+// contract on UiState::menuIndex(), not an accident: the index is reset when
+// the menu OPENS, never when it closes, precisely so the caller can dispatch on
+// it here. It is pinned by UiStateMenu.ActivateLeavesTheIndexReadableToCaller.
+//
 // Nothing here may be slow or blocking beyond what is already unavoidable: it
 // runs on the DisplayTask, which is where every other button action runs, and
 // the two genuinely expensive tiles (the flash write behind Theme/DRO datum,
@@ -388,6 +418,20 @@ void ButtonPad::activateMenuTile() {
     // has already dropped "OK open". Popping a transient message on top of a
     // permanent one that says the same thing would be noise, and this build has
     // no animation to dismiss it with (Sec. 8).
+    //
+    // This is now the SECOND evaluation, not the first: UiState applies the
+    // same menuTileBlock() to decide whether to close the carousel at all, and
+    // on a refusal it never emits MenuActivate, so ordinarily this branch is
+    // unreachable. It stays because it is the AUTHORITATIVE one - UiState is
+    // judging a UiContext, this is judging the machine itself, sampled at the
+    // moment of execution - and it is what catches motion starting in the
+    // microseconds between the two. Reaching it means the menu has already
+    // closed and focus has already moved; nothing here can put that back, and
+    // nothing needs to, because the destination for every blockable tile
+    // (Theme, DRO datum, Sync, Software update, Wi-Fi setup) is a screen that
+    // shows the unchanged value. Do NOT delete this check to "avoid the
+    // duplication" - the duplication is one shared rule evaluated against two
+    // different snapshots, which is the whole point.
     return;
   }
 
@@ -446,55 +490,23 @@ void ButtonPad::activateMenuTile() {
     break;
   }
 
-  case MENU_DRO_DATUM: {
-    // Same read-toggle-persist-apply order as Theme above, and the same reason
-    // for each step. Nothing to roll back on a refusal, for the same reason.
-    uint8_t theme = THEME_DARK;
-    DroDatumPreference datum = DroDatumPreference::Left;
-    (void)readLathePreferences(theme, datum);
-
-    const DroDatumPreference next = toggleDroDatum(datum);
-    if (!saveLathePreferences(theme, next)) {
-      break;
-    }
-    if (display != nullptr) {
-      display->setDroDatum(next);
-    }
-    // Sec. 8 also has re-picking the datum CLEAR a manual zero. Not implemented,
-    // and deliberately not faked: there is no manual-zero store anywhere yet
-    // (drawTravel() hard-codes manualZeroSet false, and UiIntent::ZeroDro is
-    // still a no-op above), so there is nothing to clear. Whoever adds that
-    // store owns adding the clear here.
+  case MENU_DRO_DATUM:
+    // Nothing to execute. The tile used to toggle the datum in place, behind
+    // the carousel - a flash write whose only visible effect was on the travel
+    // bar the menu was covering, which is precisely the "OK does nothing
+    // visible" complaint this feature set exists to answer. It now OPENS the
+    // picker instead: UiState has already moved focus to UiFocus::DroDatum, its
+    // arrows emit DroDatumLeft/DroDatumRight, and applyIntent() persists the
+    // chosen end through setDroDatumPreference().
     break;
-  }
 
   case MENU_JOG_SPEED:
-    // "The same widget OK opens at rest; here for discoverability" (Sec. 6). So
-    // move focus onto it rather than duplicating the picker - the jog-speed
-    // overlay, its list and its arrow handling all already exist.
-    //
-    // Focus is moved by replaying the two keystrokes an operator would use, on
-    // UiState's own public API: MENU closes the carousel and returns focus to
-    // Jog, then OK at rest opens the jog-speed widget. UiState has no setter for
-    // focus, and this is not a case for inventing a private one - these are real
-    // gestures with defined semantics, and going through handleKey() means the
-    // idle timeout, the menu flag and the focus all move together instead of
-    // being poked into a consistent-looking state from outside.
-    //
-    // Note this is NOT the thing the jog HAZARD comment above forbids. That
-    // warns against synthesising a Release that the hardware never sent, which
-    // would let UiState believe a physically-held key had been let go. These two
-    // are complete, self-contained Clicks that assert nothing about the physical
-    // state of any key.
-    //
-    // A fresh context for each, per UiContext's contract. Neither call can
-    // return an intent that needs executing (MENU-while-open yields CloseMenu,
-    // which has no action; OK-at-rest yields None), so their results are
-    // deliberately discarded rather than recursing back into applyIntent().
-    (void)m_ui.handleKey(UiKey::Menu, UiKeyEvent::Click, buildContext(),
-                         millis());
-    (void)m_ui.handleKey(UiKey::Ok, UiKeyEvent::Click, buildContext(),
-                         millis());
+    // "The same widget OK opens at rest; here for discoverability" (Sec. 6).
+    // Nothing to execute: UiState has already moved focus to UiFocus::JogSpeed,
+    // via menuTileDestination(), so the two synthetic MENU + OK keystrokes this
+    // used to replay through handleKey() are gone. Every tile now gets its
+    // destination the same way, from one table, instead of this one tile
+    // steering focus by hand.
     break;
 
   case MENU_SYNC:
@@ -532,17 +544,21 @@ void ButtonPad::activateMenuTile() {
     break;
 
   case MENU_DIAGNOSTICS:
-    // Not implemented. Sec. 6 wants live position error / pulse counts on
-    // screen. Deliberately NOT wired to the old serial debug path: setDebugMode()
-    // is an empty body and debugBuffer is a pointer written from the 4 KB spindle
+    // Nothing to execute. UiState has moved focus to UiFocus::Diagnostics and
+    // lib/display renders it, reading Leadscrew / Spindle directly from the
+    // DisplayTask (Sec. 6: live position error and pulse counts). There is no
+    // machine state to change, which is the whole nature of the screen.
+    //
+    // Deliberately NOT wired to the old serial debug path: setDebugMode() is an
+    // empty body and debugBuffer is a pointer written from the 4 KB spindle
     // task, so re-enabling it is a latent crash (Sec. 9 item 5 has it deleted,
-    // not revived). A real diagnostics screen reads Leadscrew/Spindle directly
-    // from the DisplayTask, and is its own piece of work.
+    // not revived).
     break;
 
   case MENU_ABOUT:
-    // Not implemented. Sec. 6 wants firmware version (include/version.h), IP and
-    // uptime - read-only, and it needs a screen of its own to put them on.
+    // Nothing to execute, for the same reason: UiState has moved focus to
+    // UiFocus::About and the screen reads firmware version (include/version.h),
+    // IP and uptime for itself.
     break;
 
   case MENU_TILE_COUNT:
@@ -551,6 +567,46 @@ void ButtonPad::activateMenuTile() {
     // the static_assert beside MenuTile ties that count to this list.
     break;
   }
+}
+
+// Persist and apply one end of the travel as the DRO datum. Same read-persist-
+// apply order, and the same reasons for each step, as the Theme tile: flash is
+// the authority, the save can refuse, and a display that had already switched
+// would then be showing a setting the machine did not keep.
+//
+// The IDEMPOTENT short-circuit is the point of the absolute DroDatumLeft/Right
+// intents (see the DroDatum arrow branch in lib/ui/uistate.cpp): pressing LEFT
+// when the datum is already Left must not cost a 4 KB sector erase, which
+// disables the instruction cache on both cores and stalls the spindle loop for
+// tens of milliseconds. A next/prev toggle could not make that check, because
+// by construction it always names a different value.
+void ButtonPad::setDroDatumPreference(DroDatumPreference wanted) {
+  uint8_t theme = THEME_DARK;
+  DroDatumPreference datum = DroDatumPreference::Left;
+  (void)readLathePreferences(theme, datum);
+
+  if (datum == wanted) {
+    // Already there. Nothing to write, nothing to apply - and the operator sees
+    // the choice they pressed stay selected, which is the correct feedback.
+    return;
+  }
+  // Theme is read and passed straight back through unchanged: the save takes
+  // both preferences, so persisting a datum with a stale theme would revert it.
+  if (!saveLathePreferences(theme, wanted)) {
+    // Refused. Nothing to undo - the value being changed came from flash, not
+    // from anything held here. The refusal that matters is "the carriage is
+    // under power", and reaching it is a RACE: menuTileBlock() refuses the tile
+    // that opens this widget under power, so motion must have started since.
+    return;
+  }
+  if (display != nullptr) {
+    display->setDroDatum(wanted);
+  }
+  // Sec. 8 also has re-picking the datum CLEAR a manual zero. Not implemented,
+  // and deliberately not faked: there is no manual-zero store anywhere yet
+  // (drawTravel() hard-codes manualZeroSet false, and UiIntent::ZeroDro is
+  // still a no-op above), so there is nothing to clear. Whoever adds that store
+  // owns adding the clear here.
 }
 
 void ButtonPad::enableHandler() {

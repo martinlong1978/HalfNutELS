@@ -16,7 +16,45 @@
 #define ELS_UI_UISTATE_H
 
 // The field the arrows currently drive. Rests on Jog and returns there.
-enum class UiFocus { Jog, JogSpeed, Rate, Mode, Stops, Menu };
+//
+// Three groups, and the grouping is the whole of the idle-timeout rule (see
+// isWidgetFocus() in uistate.cpp and tick() below):
+//
+//   Jog                        the rest state - nothing to fall back to.
+//   JogSpeed/Rate/Mode/Stops/  the SELECTOR WIDGETS. Small pickers over the
+//   DroDatum                   rest screen; they commit on OK and expire back
+//                              to Jog after kFocusTimeoutMs.
+//   Menu                       the carousel. Exempt: it leaves on MENU or HALT.
+//   Diagnostics/About          READ-ONLY SCREENS. Also exempt - see below.
+//
+// DroDatum is a widget because it is one: two choices, arrows pick, OK commits,
+// and leaving it open over the rest screen with the arrows re-pointed at a
+// setting is exactly the hazard the 4 s timeout exists for.
+//
+// Diagnostics and About are NOT, and that is a deliberate ruling rather than an
+// oversight. Three reasons:
+//   * The timeout protects against a PICKER being left open, where the next
+//     arrow press would silently change a setting the operator has forgotten is
+//     focused. A read-only screen has no such hazard: its arrows are inert
+//     (see the arrow switch in uistate.cpp), so there is nothing to guard.
+//   * Diagnostics exists to be WATCHED. Following error and pulse counts only
+//     mean anything over a spindle revolution or a test pass, which is tens of
+//     seconds, not four - and the operator's hands are on the machine, not the
+//     panel, so there is no input to keep the timer alive with. A screen that
+//     vanishes mid-observation, needing MENU plus seven arrow presses to get
+//     back, is worse than no screen.
+//   * About is a screen you read something OFF - a version string, an IP
+//     address you are typing into a phone. Same shape, same answer, and one
+//     rule for both read-only screens is easier to hold than two.
+// Both leave on OK, MENU or HALT: three keys, all of which an operator already
+// reaches for to get out of something, which is the same bargain UiFocus::Menu
+// already makes for its own exemption.
+enum class UiFocus {
+  Jog,
+  JogSpeed, Rate, Mode, Stops, DroDatum,  // the widgets: OK commits, 4 s expiry
+  Menu,
+  Diagnostics, About                      // read-only screens: no expiry
+};
 
 // The nine physical keys of the Mk2 panel, plus the two synthetic keys the
 // rotary encoder produces.
@@ -60,6 +98,10 @@ enum class UiIntent {
   SetRightStop, ClearRightStop,
   ClearBothStops,
   ZeroDro,
+  // The DRO datum picker (UiFocus::DroDatum). ABSOLUTE, not a next/prev pair,
+  // and not a toggle - see the long note on the DroDatum arrow branch in
+  // uistate.cpp for why. The caller persists and applies the named end.
+  DroDatumLeft, DroDatumRight,
   MenuNext, MenuPrev, MenuActivate,
   CloseMenu,
   ToggleEngage,
@@ -85,6 +127,15 @@ struct UiContext {
                        // powered run to a stop (MM_JOG_*), the interactive jog
                        // (MM_INTERACTIVE_JOG_*) and the deceleration tail
                        // (MM_DECELLERATE).
+  bool threadMode;     // the feed mode is FM_THREAD or FM_THREAD_REVERSE.
+                       // Needed here for exactly one decision: OK on a menu
+                       // tile now CLOSES the carousel and moves focus, so
+                       // UiState has to know whether the tile would be refused
+                       // before it can decide where to leave the operator - and
+                       // menuTileBlock() (below) refuses Sync outside a thread
+                       // mode. It is the SAME menuTileBlock() the display dims
+                       // with and ButtonPad re-checks against fresh GlobalState,
+                       // not a second copy of the rule.
 };
 
 class UiState {
@@ -93,6 +144,13 @@ class UiState {
 
   UiFocus focus() const;
   bool menuOpen() const;
+
+  // The selected tile. CONTRACT: this stays valid after MenuActivate has closed
+  // the carousel, and the caller depends on it - ButtonPad reads it to decide
+  // WHICH tile to execute, after handleKey() has already returned. The index is
+  // reset only when the menu is OPENED (every open starts at 0), never when it
+  // closes. Do not "tidy" that by clearing it on close: the tile that fires
+  // would silently become tile 0, i.e. Units instead of whatever was selected.
   int  menuIndex() const;
 
   // Feed one key event. Returns the single action the caller should perform.
@@ -132,8 +190,9 @@ class UiState {
   // the hold completes - see kStopsConfirmMs.
   int stopsConfirmPermille(unsigned long nowMs) const;
 
-  // Focus falls back to Jog after this long with no key events (§1). Menu focus
-  // is exempt - the menu leaves only on MENU or HALT.
+  // Focus falls back to Jog after this long with no key events (§1). Applies to
+  // the widget focuses only. Menu is exempt (it leaves on MENU or HALT), and so
+  // are Diagnostics and About - see the ruling on the UiFocus enum above.
   static const unsigned long kFocusTimeoutMs = 4000;
 
   // The length of the clear-both confirm bar. This MIRRORS KeyArray's hold
@@ -272,6 +331,46 @@ inline MenuTileBlock menuTileBlock(int tile, bool motionActive,
     return motionActive ? MTB_MOTION : MTB_NONE;
   default:
     return MTB_NONE;
+  }
+}
+
+// Where OK on a tile leaves the operator (OWNER RULING, this feature set).
+//
+// The rule it encodes, in one line: **OK always closes the menu, and you always
+// land somewhere that shows the result.** The menu used to leave itself open
+// over a change the operator could not see - "OK does nothing visible", "no
+// feedback that it worked" - because the carousel is a full-width panel sitting
+// on top of the pitch, the theme and the travel bar, i.e. on top of the three
+// things the tiles change. The confirmation is not a message; it is the screen
+// you land on:
+//
+//   Units / Theme / Sync / Software update / Wi-Fi setup -> Jog
+//       The main screen IS the confirmation. The pitch redraws in the new unit,
+//       the whole screen changes colour, the sync indicator lights in the status
+//       bar. Software update lands on Jog too and the OTA screen takes over from
+//       GlobalState::hasOTA() - it is not a UiFocus, so there is nothing to name
+//       here. Wi-Fi setup reboots, so its destination is academic; Jog is the
+//       honest answer for the microseconds before it goes.
+//   DRO datum -> DroDatum, Jog speed -> JogSpeed
+//       Their effect is a SETTING, not something visible on the rest screen at
+//       the moment of the press, so each opens its own picker instead.
+//   Diagnostics / About -> their own read-only screens.
+//
+// THE ONE EXCEPTION is a refused tile (menuTileBlock() != MTB_NONE): it changes
+// nothing and the carousel stays open with the reason already in the hint row.
+// That is decided in UiState::handleKey(), not here - this function answers only
+// "where does this tile go", and is never consulted for a tile that is blocked.
+//
+// Shared with lib/display for the same reason MenuTile and menuTileBlock() are:
+// the screen that renders a destination and the state machine that moves to it
+// must not hold two copies of the mapping.
+inline UiFocus menuTileDestination(int tile) {
+  switch (tile) {
+  case MENU_DRO_DATUM:   return UiFocus::DroDatum;
+  case MENU_JOG_SPEED:   return UiFocus::JogSpeed;
+  case MENU_DIAGNOSTICS: return UiFocus::Diagnostics;
+  case MENU_ABOUT:       return UiFocus::About;
+  default:               return UiFocus::Jog;
   }
 }
 

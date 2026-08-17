@@ -29,11 +29,23 @@ namespace {
 // arrow keys.
 inline int arrowDir(UiKey key) { return key == UiKey::Left ? -1 : +1; }
 
-// The four selector widgets, i.e. every focus that is neither Jog nor Menu.
-// These are the ones that commit on OK and expire on the idle timeout.
+// The selector widgets: the small pickers that sit over the rest screen. These
+// are the ones that commit on OK and expire on the idle timeout.
+//
+// DroDatum joins the original four, and joining is the whole of its wiring -
+// OK-commits-and-dismisses, the ENABLE dismiss and tick()'s 4 s expiry all key
+// off this predicate, so the only code DroDatum needs of its own is the arrow
+// branch that produces its intents. That is the point of modelling it on Mode.
 inline bool isWidgetFocus(UiFocus f) {
   return f == UiFocus::JogSpeed || f == UiFocus::Rate || f == UiFocus::Mode ||
-         f == UiFocus::Stops;
+         f == UiFocus::Stops || f == UiFocus::DroDatum;
+}
+
+// The read-only full screens (Diagnostics, About). Deliberately NOT widgets:
+// they are exempt from the idle timeout for the reasons set out on the UiFocus
+// enum, and their arrows are inert. They leave on OK, MENU or HALT.
+inline bool isScreenFocus(UiFocus f) {
+  return f == UiFocus::Diagnostics || f == UiFocus::About;
 }
 
 // One detent of the rotary encoder, either way.
@@ -243,7 +255,12 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     if (ev != UiKeyEvent::Click) {
       return UiIntent::None;
     }
-    if (m_menuOpen || isWidgetFocus(m_focus)) {
+    if (m_menuOpen || isWidgetFocus(m_focus) || isScreenFocus(m_focus)) {
+      // isScreenFocus too: Diagnostics and About are full screens that hide the
+      // rest screen entirely, so the reason the dismiss exists - do not commit
+      // to cutting while the operator's attention is somewhere else and the
+      // state chip is not on screen - applies to them at least as strongly as
+      // it does to a picker.
       m_menuOpen = false;
       m_focus = UiFocus::Jog;
       return UiIntent::None;  // dismiss only - does NOT engage
@@ -336,6 +353,19 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
         return ccw ? UiIntent::JogSpeedPrev : UiIntent::JogSpeedNext;
       case UiFocus::Mode:
         return ccw ? UiIntent::ModePrev : UiIntent::ModeNext;
+      case UiFocus::DroDatum:
+        // The knob drives what the focus owns, exactly like Mode - anticlockwise
+        // for the left-hand end, clockwise for the right. NOT the STOPS
+        // exception: that one is inert because every gesture in it destroys a
+        // position the operator spent time finding, whereas the datum is a
+        // two-way choice that one press of the other arrow puts straight back.
+        // (The knob is already dead under power by the blanket inhibit above,
+        // and menuTileBlock() refuses the tile that opens this widget under
+        // power anyway, so a stray detent can never land mid-cut.)
+        return ccw ? UiIntent::DroDatumLeft : UiIntent::DroDatumRight;
+      case UiFocus::Diagnostics:
+      case UiFocus::About:
+        return UiIntent::None;  // read-only screens own nothing to step
       case UiFocus::Jog:
         // The rest screen: the knob is the pitch control. (The motion inhibit
         // is the blanket one above - by here the carriage is at rest.)
@@ -364,6 +394,18 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       m_focus = UiFocus::Jog;
       return UiIntent::CloseMenu;
     }
+    if (isScreenFocus(m_focus)) {
+      // MENU is one of the three ways out of a read-only screen. It CLOSES
+      // rather than opening the carousel on top: the operator got here through
+      // the menu, so the key that took them in is the obvious one to take them
+      // back out, and re-opening the carousel would put a picker over a screen
+      // that was itself opened from that picker. CloseMenu, not None - it is
+      // still "the MENU key dismissed what was on screen", the caller has
+      // nothing to execute for it either way, and a non-None result is the
+      // display's redraw hint.
+      m_focus = UiFocus::Jog;
+      return UiIntent::CloseMenu;
+    }
     m_menuOpen = true;
     m_focus = UiFocus::Menu;
     m_menuIndex = 0;  // the carousel is not resumable; every open starts at 0
@@ -380,7 +422,39 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       return UiIntent::None;  // Press / Release / Hold are all inert here
     }
     if (key == UiKey::Ok) {
-      return UiIntent::MenuActivate;  // tiles toggle in place; menu stays open
+      // OK ALWAYS CLOSES THE MENU, and focus goes wherever the result of the
+      // tile is visible (menuTileDestination(), uistate.h). This replaces the
+      // old "tiles toggle in place; menu stays open", which was the source of
+      // the owner's complaint that OK does nothing visible: the carousel is a
+      // full-width panel sitting directly on top of the pitch, the theme and
+      // the travel bar - the three things the tiles actually change - so every
+      // tile that DID fire changed something the operator could not see, and
+      // the four that did nothing at all were indistinguishable from it.
+      //
+      // THE ONE EXCEPTION: a refused tile. It changes nothing and the carousel
+      // stays open, because the reason is already on screen - the display
+      // evaluates this same menuTileBlock() every tick, so the tile is drawn
+      // dim and the hint row reads "stop the carriage first" / "needs thread
+      // mode". Closing on a refusal would throw that explanation away at the
+      // exact moment the operator needs to read it, and land them on a rest
+      // screen where nothing happened for no stated reason.
+      //
+      // The block is evaluated HERE, from the fresh UiContext, because the
+      // destination cannot be chosen without knowing whether the tile fires at
+      // all. It is the same shared rule the display dims with and the same one
+      // ButtonPad re-checks against GlobalState immediately before executing -
+      // NOT a second copy. ButtonPad's check stays: it samples the machine
+      // rather than a context, and it is the one that must be authoritative if
+      // motion starts in the microseconds between the two.
+      if (menuTileBlock(m_menuIndex, ctx.motionActive, ctx.threadMode) !=
+          MTB_NONE) {
+        return UiIntent::None;
+      }
+      m_menuOpen = false;
+      // m_menuIndex is deliberately left alone - ButtonPad reads it back after
+      // this returns to decide which tile to execute (see menuIndex()).
+      m_focus = menuTileDestination(m_menuIndex);
+      return UiIntent::MenuActivate;
     }
     if (key == UiKey::Left) {
       // Saturating, not wrapping. A blocked move returns None so the caller can
@@ -522,8 +596,13 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // -------------------------------------------------------------------------
   if (key == UiKey::Ok) {
     if (ev == UiKeyEvent::Click) {
-      if (isWidgetFocus(m_focus)) {
-        m_focus = UiFocus::Jog;  // commit and dismiss
+      if (isWidgetFocus(m_focus) || isScreenFocus(m_focus)) {
+        // Commit and dismiss. DroDatum rides on this branch unchanged: its
+        // arrows have already emitted their intent and the caller has already
+        // applied it, so "commit" here means the same thing it means for Mode -
+        // stop editing, go back and look at the result. The read-only screens
+        // have nothing to commit; OK is simply the most obvious way out.
+        m_focus = UiFocus::Jog;
         return UiIntent::None;
       }
       // At rest: open the jog-speed widget, the setting the arrows already
@@ -566,6 +645,72 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
         return UiIntent::None;
       }
       return left ? UiIntent::ModePrev : UiIntent::ModeNext;
+
+    case UiFocus::DroDatum:
+      // Which end of the travel the DRO reads zero from. Same shape as Mode - a
+      // small set of choices, arrows pick, OK commits and dismisses, HALT and
+      // the 4 s idle both drop back to Jog - but the intents are ABSOLUTE
+      // (DroDatumLeft / DroDatumRight), not a ModeNext/ModePrev pair. Three
+      // reasons, and the first is the one that matters:
+      //
+      //   * With only two choices, a next/prev pair is a TOGGLE, and a toggle
+      //     cannot be pressed twice safely: two presses of "next" land back
+      //     where they started. So a double-tap, a bouncing contact, or an
+      //     operator who is not sure the first press registered (which is the
+      //     entire complaint this feature set exists to fix) silently undoes
+      //     itself. LEFT means left however many times it is pressed.
+      //   * The choice is SPATIAL - it names an end of the carriage travel - so
+      //     the left arrow meaning the left-hand end is a mapping the operator
+      //     cannot get wrong, and it needs no memory of what is currently
+      //     selected to predict.
+      //   * It lets the caller skip the write. Persisting the datum is a flash
+      //     sector erase (saveLathePreferences()), which stalls both cores for
+      //     tens of milliseconds; an absolute intent can be compared against
+      //     what is stored and dropped when it matches. A next/prev pair cannot
+      //     be - by construction it always names a different value.
+      //
+      // Click only, like every other widget's arrows: a Hold here has no
+      // meaning, and Press/Release must stay inert or one tap acts twice.
+      if (ev != UiKeyEvent::Click) {
+        return UiIntent::None;
+      }
+      // Inhibited under power, using the SAME predicate as the stop edits.
+      //
+      // This is the one place a widget's arrows are inhibited where Rate and
+      // Mode's are not, and the difference is real rather than a lapse: a pitch
+      // or mode step is a RAM write that takes effect on the next update, which
+      // is why §3 insists RATE keeps working mid-cut. Persisting the datum is a
+      // flash sector erase, and saveLathePreferences() REFUSES outright while
+      // the carriage is under power (src/WebSettings.h) - so without this the
+      // press would emit an intent that is certain to be silently dropped one
+      // layer down. An offered gesture the machine will ignore is exactly what
+      // menuTileBlock() and §4's STOPS hint both exist to prevent; the same
+      // reasoning that dims the tile has to hold once the widget is open.
+      //
+      // Reachable, though rare: menuTileBlock() means the widget can only be
+      // OPENED at rest, but motion can start underneath it from the web UI or a
+      // spindle-driven feed before the 4 s idle closes it - the same window the
+      // clear-both hold re-checks against a fresh context for.
+      if (underPower(ctx)) {
+        return UiIntent::None;  // display says "stop the carriage first"
+      }
+      return left ? UiIntent::DroDatumLeft : UiIntent::DroDatumRight;
+
+    case UiFocus::Diagnostics:
+    case UiFocus::About:
+      // INERT, deliberately, and not "not yet implemented".
+      //
+      // Paging was considered and rejected. There is one screen of content per
+      // spec (§6: position error and pulse counts; version, IP and uptime), so
+      // a page intent would be a control with nothing on the other side of it -
+      // the decorative-guard pattern this branch has already had to remove
+      // three times. Add it when a second page exists, and pin it then.
+      //
+      // Inert is also the safe reading for these two keys specifically: LEFT
+      // and RIGHT are the JOG keys, and they are the ones an operator's hand
+      // goes to by reflex. A read-only screen is exactly where a reflex press
+      // should do nothing at all.
+      return UiIntent::None;
 
     case UiFocus::Stops: {
       // No stop edits while the carriage is under power - ONE rule, both
@@ -713,8 +858,11 @@ int UiState::stopsConfirmPermille(unsigned long nowMs) const {
 }
 
 bool UiState::tick(unsigned long nowMs) {
-  // Only the selector widgets expire. Jog is the rest state (nothing to fall
-  // back to) and Menu is exempt: it leaves on MENU or HALT only (§1).
+  // Only the selector widgets expire - the five of isWidgetFocus(), DroDatum
+  // included. Jog is the rest state (nothing to fall back to), Menu leaves on
+  // MENU or HALT only (§1), and Diagnostics / About are read-only screens the
+  // operator is meant to be able to WATCH for longer than four seconds; the
+  // ruling and its reasoning are on the UiFocus enum in uistate.h.
   if (!isWidgetFocus(m_focus)) {
     return false;
   }
