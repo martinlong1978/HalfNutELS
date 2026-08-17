@@ -1388,10 +1388,31 @@ TEST(UiStateMenuTileBlock, AboutNeverBlockedByMotionOrFeedMode) {
 //   Menu           move between tiles
 //   Stops          INERT   <- a knob is far easier to nudge than a key, and
 //                             setting an endstop stays a deliberate keypress
+//
+// ...and, on top of that mapping, one blanket rule: while the carriage is under
+// power the knob is inert in EVERY focus (owner ruling - see the
+// UiStateEncoderInhibit block below). The mapping above is what the knob does
+// at rest.
 // ===========================================================================
 
 UiIntent turn(Rig& r, bool cw, const UiContext& c = kNoStops) {
   return r.key(cw ? UiKey::EncoderCw : UiKey::EncoderCcw, UiKeyEvent::Click, c);
+}
+
+// What one clockwise detent means in each focus WHEN THE CARRIAGE IS AT REST.
+// The table above, as data, so the inhibit tests can assert both directions of
+// the contract - dead under power, and this again at rest - without either
+// passing on a knob that is simply broken everywhere.
+UiIntent restingCwIntent(UiFocus f) {
+  switch (f) {
+    case UiFocus::Jog: return UiIntent::PitchNext;
+    case UiFocus::Rate: return UiIntent::PitchNext;
+    case UiFocus::JogSpeed: return UiIntent::JogSpeedNext;
+    case UiFocus::Mode: return UiIntent::ModeNext;
+    case UiFocus::Menu: return UiIntent::MenuNext;
+    case UiFocus::Stops: return UiIntent::None;  // inert at rest as well
+  }
+  return UiIntent::None;
 }
 
 TEST(UiStateEncoder, AtRestStepsThePitch) {
@@ -1556,49 +1577,119 @@ TEST(UiStateEncoder, IsInertOnEveryEventThatIsNotAClick) {
   }
 }
 
-TEST(UiStateEncoder, AtRestIsInhibitedWhileMotionEnabled) {
-  // The knob inherits, focus by focus, whatever inhibit the arrows already
-  // have. At Jog focus the arrows are inhibited while MM_ENABLED (§3), so the
-  // knob is too - and here that matters for its own reason: at the rest screen
-  // the knob steps the PITCH, and a stray nudge mid-cut would rewrite the pitch
-  // of the thread being cut.
+// ---------------------------------------------------------------------------
+// The motion inhibit (OWNER RULING, and a change from the first cut of this
+// feature).
+//
+// The knob used to inherit the arrows' inhibit focus by focus: dead at Jog while
+// MM_ENABLED, live in Rate / Mode / JogSpeed. It is now dead EVERYWHERE while
+// the carriage is under power. A knob is the input most easily disturbed by
+// accident on a running machine, and - unlike the arrows, which must stay live
+// because they cancel a powered run and terminate a dead-man jog - the knob has
+// no job to do during motion, so the blanket rule costs no capability.
+//
+// The KEYS are unchanged. UiStateSelectors.SelectorsStillWorkWhileMotionEnabled
+// still pins that RATE + arrows changes pitch mid-cut. Only the knob is dead.
+//
+// The predicate is motionEnabled OR motionActive - the same one the stop edits
+// use. The engaged feed is not the only state worth protecting: the powered run
+// to a stop, the interactive jog and the deceleration tail are all "the
+// carriage is moving", and none of them are MM_ENABLED.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateEncoderInhibit, IsDeadInEveryFocusWhileEngaged) {
   const bool directions[] = {true, false};
   const bool stopStates[] = {false, true};
-  for (bool cw : directions) {
-    for (bool s : stopStates) {
-      Rig r;
-      UiContext c = ctx(s, s, /*motionEnabled=*/true);
-      ASSERT_EQ(UiFocus::Jog, r.focus());
-      EXPECT_EQ(UiIntent::None, turn(r, cw, c))
-          << "cw=" << cw << " stopsSet=" << s;
+  for (UiFocus f : kAllFocuses) {
+    for (bool cw : directions) {
+      for (bool s : stopStates) {
+        Rig r;
+        r.enterFocus(f);  // entered at rest, as an operator would
+        ASSERT_EQ(f, r.focus());
+        UiContext c = ctx(s, s, /*motionEnabled=*/true);
+        EXPECT_EQ(UiIntent::None, turn(r, cw, c))
+            << "focus=" << f << " cw=" << cw << " stopsSet=" << s;
+      }
     }
   }
 }
 
-TEST(UiStateEncoder, RateFocusStillStepsThePitchWhileMotionEnabled) {
-  // The counterpart to the test above, and the reason the inhibit is stated
-  // per-focus rather than as a blanket rule: pressing RATE is a deliberate act,
-  // and UiStateSelectors.SelectorsStillWorkWhileMotionEnabled already pins that
-  // changing pitch mid-cut must stay possible with the arrows. The knob matches
-  // the arrows exactly in each focus.
+TEST(UiStateEncoderInhibit, IsDeadInEveryFocusWhileMotionActive) {
+  // motionActive WITHOUT motionEnabled: the powered run to a stop (MM_JOG_*),
+  // the interactive jog and the deceleration tail. This is the half the old
+  // per-focus rule missed entirely, and it is the half where the carriage is
+  // actually moving.
+  const bool directions[] = {true, false};
+  for (UiFocus f : kAllFocuses) {
+    for (bool cw : directions) {
+      Rig r;
+      r.enterFocus(f);
+      UiContext c = ctx(true, true, /*motionEnabled=*/false,
+                        /*motionActive=*/true);
+      EXPECT_EQ(UiIntent::None, turn(r, cw, c))
+          << "focus=" << f << " cw=" << cw;
+    }
+  }
+}
+
+TEST(UiStateEncoderInhibit, IsLiveAgainInEveryFocusOnceTheCarriageIsAtRest) {
+  // The other direction of the contract: without it the two tests above would
+  // pass on a knob that had simply been unplugged. Same rig, same focus, the
+  // only difference is the motion flags going false.
+  //
+  // Stops is skipped because it is inert at rest too (that is its own rule,
+  // pinned by UiStateEncoderStops), so it cannot tell the two states apart.
+  for (UiFocus f : kAllFocuses) {
+    if (f == UiFocus::Stops) {
+      continue;
+    }
+    Rig r;
+    r.enterFocus(f);
+    UiContext engaged = ctx(false, false, /*motionEnabled=*/true);
+    ASSERT_EQ(UiIntent::None, turn(r, true, engaged)) << "focus=" << f;
+    EXPECT_EQ(restingCwIntent(f), turn(r, true, kNoStops)) << "focus=" << f;
+    EXPECT_EQ(f, r.focus()) << "focus=" << f;
+  }
+}
+
+TEST(UiStateEncoderInhibit, RateFocusIsDeadWhileEngagedButTheArrowsAreNot) {
+  // The accepted cost of the blanket rule, stated explicitly: the knob is dead
+  // inside a widget the operator opened on purpose. Changing pitch mid-cut is
+  // still possible, with the keys - which is the capability §3 requires.
   Rig r;
   UiContext c = ctx(false, false, /*motionEnabled=*/true);
   r.click(UiKey::Rate, c);
   ASSERT_EQ(UiFocus::Rate, r.focus());
-  EXPECT_EQ(UiIntent::PitchNext, turn(r, true, c));
-  EXPECT_EQ(UiIntent::PitchPrev, turn(r, false, c));
+  EXPECT_EQ(UiIntent::None, turn(r, true, c));
+  EXPECT_EQ(UiIntent::None, turn(r, false, c));
+  EXPECT_EQ(UiIntent::PitchNext, r.click(UiKey::Right, c));
+  EXPECT_EQ(UiIntent::PitchPrev, r.click(UiKey::Left, c));
+}
+
+TEST(UiStateEncoderInhibit, TheMenuCarouselIsAlsoInhibited) {
+  // "Anywhere" includes the menu: the knob does not move the carousel under
+  // power either. The arrows still do - and menuTileBlock() is what refuses the
+  // dangerous tiles once OK is pressed.
+  Rig r;
+  UiContext c = ctx(false, false, /*motionEnabled=*/true);
+  r.click(UiKey::Menu, c);
+  ASSERT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiIntent::None, turn(r, true, c));
+  EXPECT_EQ(0, r.ui().menuIndex());
+  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right, c));
+  EXPECT_EQ(1, r.ui().menuIndex());
 }
 
 TEST(UiStateEncoder, DoesNotCancelAPoweredRun) {
   // The knob is not an actuator, so it neither starts nor stops carriage
-  // motion: a detent mid-run steps the pitch and leaves the run alone. The
-  // arrows are still the cancel, and must still work afterwards - i.e. the
-  // detent must not have quietly dropped the run latch.
+  // motion. Under the blanket inhibit a detent mid-run now does nothing at all
+  // - but "nothing" has to mean nothing: it must not quietly drop the run
+  // latch, so the arrows still cancel the run afterwards.
   Rig r;
   ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
   const UiContext running = ctx(true, false, /*motionEnabled=*/false,
                                 /*motionActive=*/true);
-  EXPECT_EQ(UiIntent::PitchNext, turn(r, true, running));
+  EXPECT_EQ(UiIntent::None, turn(r, true, running));
   EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, running));
 }
 
@@ -1667,32 +1758,92 @@ TEST(UiStateClearBoth, DoesNothingWhenNoStopIsSet) {
   EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
 }
 
-TEST(UiStateClearBoth, StopsHeldFromTheRestScreenDoesNothing) {
-  // Deliberately a two-gesture action: tap STOPS to open the widget, THEN hold
-  // it. No Click follows a Hold, so a hold from the rest screen never even
-  // moves focus - and must not clear anything.
+// ---------------------------------------------------------------------------
+// STOPS takes focus on the PRESS (OWNER RULING, and a change from the first cut
+// of this feature).
+//
+// It used to take focus on the Click like MODE and RATE, and since the keypad
+// emits no Click after a Hold, holding STOPS from the rest screen did nothing
+// whatsoever - no focus change, no bar, no clear. Clear-both was reachable only
+// as tap-then-hold, with the widget already open.
+//
+// Moving the focus change one event earlier makes press-and-hold work from the
+// rest screen AND puts the widget on screen while the bar fills, over the stop
+// markers and the travel bar the operator is about to lose. MODE and RATE stay
+// Click-only: STOPS is the only selector whose Hold means anything, so it is
+// the only one where Click-only focus loses a gesture.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateClearBoth, StopsPressAloneTakesFocus) {
+  // The mechanism, on its own. The Press is what opens the widget; the Click of
+  // an ordinary tap then lands on an already-focused widget.
   Rig r;
   ASSERT_EQ(UiFocus::Jog, r.focus());
-  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, kBothStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+}
+
+TEST(UiStateClearBoth, StopsHeldFromTheRestScreenClearsBoth) {
+  // The ruling, end to end: press and hold from the rest screen, one gesture.
+  Rig r;
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+}
+
+TEST(UiStateClearBoth, StopsHeldFromTheRestScreenNeedsAStopToClear) {
+  // The gate is unchanged by opening on the Press: with nothing to clear the
+  // hold still does nothing (and the bar below never fills for it).
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, kNoStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());  // it still OPENED the widget
+}
+
+TEST(UiStateClearBoth, StopsHeldFromTheRestScreenIsStillRefusedUnderPower) {
+  // The at-rest gate is unchanged too. Opening the widget on the Press must not
+  // have bought the gesture a way past the motion inhibit.
+  const bool flags[] = {false, true};
+  for (bool enabled : flags) {
+    for (bool active : flags) {
+      if (!enabled && !active) {
+        continue;
+      }
+      Rig r;
+      UiContext c = ctx(true, true, enabled, active);
+      ASSERT_EQ(UiFocus::Jog, r.focus());
+      EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, c))
+          << "motionEnabled=" << enabled << " motionActive=" << active;
+    }
+  }
 }
 
 TEST(UiStateClearBoth, StopsHeldWithTheMenuOpenDoesNothing) {
+  // The one focus the Press does NOT take, and the reason it does not: the menu
+  // branch swallows every non-Click event while the carousel is up (§6 - the
+  // menu leaves on MENU or HALT only), so the press never reaches the STOPS
+  // code at all. No focus theft, no bar, no clear.
   Rig r;
   r.click(UiKey::Menu, kBothStops);
   ASSERT_TRUE(r.ui().menuOpen());
   EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, kBothStops));
   EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Menu, r.focus());
 }
 
-TEST(UiStateClearBoth, StopsHeldInAnotherWidgetDoesNothing) {
+TEST(UiStateClearBoth, StopsHeldFromAnyOtherWidgetAlsoClearsBoth) {
+  // The consequence of the ruling, spelled out: STOPS is a selector, so its
+  // Press moves focus from wherever it was - including out of another widget -
+  // and the hold then clears both. One rule, every non-menu focus.
   const UiFocus others[] = {UiFocus::Jog, UiFocus::JogSpeed, UiFocus::Rate,
-                            UiFocus::Mode};
+                            UiFocus::Mode, UiFocus::Stops};
   for (UiFocus f : others) {
     Rig r;
     r.enterFocus(f);
     ASSERT_EQ(f, r.focus());
-    EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, kBothStops))
+    EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops))
         << "focus=" << f;
+    EXPECT_EQ(UiFocus::Stops, r.focus()) << "focus=" << f;
   }
 }
 
@@ -1740,6 +1891,21 @@ TEST(UiStateClearBoth, IsRefusedIfMotionStartsDuringTheHold) {
   EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, moving));
 }
 
+TEST(UiStateClearBoth, IsRefusedIfTheStopsVanishDuringTheHold) {
+  // The Hold's OTHER re-check, and the only test that can see it. Every other
+  // "no stops" case is refused one step earlier, by the Press declining to arm,
+  // so deleting this half of the gate would leave them all green - the exact
+  // untested-guard trap. Here the press arms legitimately (both stops set, at
+  // rest) and the stops are then cleared from under it - by the web UI, or by
+  // the arrows of a gesture that raced this one - so only the re-check on the
+  // fresh context can refuse it.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(UiState::kStopsConfirmMs);
+  ASSERT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, kNoStops));
+}
+
 TEST(UiStateClearBoth, IsAllowedOnceTheCarriageIsAtRest) {
   // The other direction of the contract: without this the refusals above would
   // pass on a gesture that had simply never been implemented.
@@ -1761,6 +1927,30 @@ TEST(UiStateClearBoth, DoesNotDisturbTheSingleStopGestures) {
   Rig r2;
   r2.click(UiKey::Stops, kNoStops);
   EXPECT_EQ(UiIntent::SetLeftStop, r2.click(UiKey::Left, kNoStops));
+}
+
+TEST(UiStateClearBoth, StopsTapFromTheRestScreenStillJustOpensTheWidget) {
+  // The tap case, in the exact order ButtonPad's drain loop delivers it
+  // (Press -> Click -> Release, all in one pass). Taking focus on the Press
+  // must not have turned a tap into anything more than "open the widget": no
+  // intent anywhere in the gesture, and no bar left behind.
+  Rig r;
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops));
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+}
+
+TEST(UiStateClearBoth, AStopsClickThatLostItsPressStillOpensTheWidget) {
+  // KeyArray can drop events (see the hazards in buttonpad.cpp). The Click arm
+  // still sets focus, so a Click arriving without its Press is not a lost
+  // gesture.
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateClearBoth, StopsClickStillJustTakesFocus) {
@@ -1868,10 +2058,80 @@ TEST(UiStateConfirmBar, DoesNotFillForAGestureThatWouldBeRefused) {
   noStops.advance(500);
   EXPECT_EQ(0, noStops.ui().stopsConfirmPermille(noStops.now()));
 
-  Rig wrongFocus;  // STOPS held from the rest screen
-  wrongFocus.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
-  wrongFocus.advance(500);
-  EXPECT_EQ(0, wrongFocus.ui().stopsConfirmPermille(wrongFocus.now()));
+  Rig menuOpen;  // the one focus the press does not reach out of
+  menuOpen.click(UiKey::Menu, kBothStops);
+  ASSERT_TRUE(menuOpen.ui().menuOpen());
+  menuOpen.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  menuOpen.advance(500);
+  EXPECT_EQ(0, menuOpen.ui().stopsConfirmPermille(menuOpen.now()));
+}
+
+TEST(UiStateConfirmBar, FillsWhileHeldFromTheRestScreen) {
+  // The point of the owner's ruling: the bar has to be VISIBLE while it fills,
+  // and from the rest screen it now is - the Press opens the widget, so the
+  // operator watches the second run out over the stop markers and the travel
+  // bar they are about to lose. (Before, a hold from rest armed nothing and
+  // showed nothing.)
+  Rig r;
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());  // the widget the bar is drawn over
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+  r.advance(300);
+  EXPECT_EQ(300, r.ui().stopsConfirmPermille(r.now()));
+  r.advance(400);
+  EXPECT_EQ(700, r.ui().stopsConfirmPermille(r.now()));
+  r.advance(UiState::kStopsConfirmMs - 700);
+  EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::ClearBothStops,
+            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+}
+
+TEST(UiStateConfirmBar, DoesNotFillFromTheRestScreenForAGestureThatWouldFail) {
+  // ...and it still arms only when the gesture would succeed. Opening the
+  // widget on the Press must not arm a bar that is going to be refused.
+  Rig noStops;
+  noStops.key(UiKey::Stops, UiKeyEvent::Press, kNoStops);
+  noStops.advance(500);
+  EXPECT_EQ(0, noStops.ui().stopsConfirmPermille(noStops.now()));
+
+  Rig underPower;
+  UiContext moving = ctx(true, true, /*motionEnabled=*/false,
+                         /*motionActive=*/true);
+  underPower.key(UiKey::Stops, UiKeyEvent::Press, moving);
+  underPower.advance(500);
+  EXPECT_EQ(0, underPower.ui().stopsConfirmPermille(underPower.now()));
+}
+
+TEST(UiStateConfirmBar, ReleaseFromTheRestScreenCancelsButLeavesTheWidgetOpen) {
+  // Letting go early is the escape hatch: the bar goes, nothing is cleared, and
+  // the widget the Press opened stays up - the operator is now simply in the
+  // STOPS widget, exactly as a tap would have left them.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(600);
+  ASSERT_EQ(600, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+}
+
+TEST(UiStateConfirmBar, HaltDuringARestScreenHoldCancelsEverything) {
+  // HALT outranks the new gesture like it outranks every other one: the bar
+  // goes, focus returns to Jog, and the Hold that arrives afterwards - the
+  // operator has not let go yet - must not clear anything. Also the self-heal
+  // path if the STOPS Release is ever dropped: any event on any other key ends
+  // the confirm.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(500);
+  ASSERT_EQ(500, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::CancelMotion,
+            r.key(UiKey::Halt, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
 }
 
 TEST(UiStateConfirmBar, IsCancelledByAnyOtherKeyEvent) {

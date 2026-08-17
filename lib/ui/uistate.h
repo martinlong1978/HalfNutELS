@@ -34,7 +34,9 @@ enum class UiFocus { Jog, JogSpeed, Rate, Mode, Stops, Menu };
 // used to reach past the focus model entirely and drive the pitch directly out
 // of src/keyarray.cpp, so turning it inside any widget silently stepped the
 // pitch behind the operator's back. Routing it through handleKey() means it
-// obeys focus, the idle timeout and the motion inhibits like everything else.
+// obeys focus, the idle timeout and the motion inhibit like everything else -
+// and that inhibit is a blanket one: while the carriage is under power the knob
+// does nothing in ANY focus (see the encoder branch in uistate.cpp).
 // src/buttonpad.cpp delivers exactly one Click per detent (no Press/Release -
 // a detent is instantaneous, there is nothing to hold), and every other event
 // on these two keys is inert.
@@ -169,11 +171,12 @@ class UiState {
 
   // The clear-both confirm gesture (§4). m_stopsConfirming is true only while a
   // STOPS press is physically down AND that press could still succeed - it is
-  // set on the Press only when focus is already on the STOPS widget, the
-  // carriage is at rest and there is at least one stop to clear. m_stopsPressMs
-  // is the timestamp of that Press and is meaningless while m_stopsConfirming
-  // is false. Both are cleared by the Release, by the Hold that consumes them,
-  // by HALT, and by any event on any other key.
+  // set on the Press, which is also where STOPS takes focus, when the carriage
+  // is at rest and there is at least one stop to clear. (With the menu open the
+  // press never reaches that code at all, so the bar cannot arm from there.)
+  // m_stopsPressMs is the timestamp of that Press and is meaningless while
+  // m_stopsConfirming is false. Both are cleared by the Release, by the Hold
+  // that consumes them, by HALT, and by any event on any other key.
   bool m_stopsConfirming;
   unsigned long m_stopsPressMs;
 };

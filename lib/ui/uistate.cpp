@@ -41,14 +41,28 @@ inline bool isEncoder(UiKey k) {
   return k == UiKey::EncoderCw || k == UiKey::EncoderCcw;
 }
 
-// No stop may be edited while the carriage is under power - §4's rule, in one
-// place so the per-arrow edits and the clear-both gesture can never drift
-// apart. See the long note in the Stops arrow branch for why BOTH flags are
-// needed: motionEnabled alone misses the powered run to a stop, during which
-// clearing the stop being travelled towards deletes that run's only arrest.
-inline bool stopEditsInhibited(const UiContext& ctx) {
+// "The carriage is under power, in any form." The one place the two motion
+// flags are combined, so every rule that depends on the machine being at rest
+// asks the same question and they can never drift apart.
+//
+// Both flags, not just motionActive, even though UiContext documents the latter
+// as a superset: the OR is what makes the rule correct for any caller, and it
+// costs nothing. See the long note in the Stops arrow branch for why
+// motionEnabled alone is NOT enough - it misses the powered run to a stop,
+// during which clearing the stop being travelled towards deletes that run's
+// only arrest.
+inline bool underPower(const UiContext& ctx) {
   return ctx.motionEnabled || ctx.motionActive;
 }
+
+// No stop may be edited while the carriage is under power - §4's rule, so the
+// per-arrow edits and the clear-both gesture can never drift apart.
+inline bool stopEditsInhibited(const UiContext& ctx) { return underPower(ctx); }
+
+// The knob does nothing at all while the carriage is under power - see the
+// encoder branch for why this is a blanket rule and not the arrows' per-focus
+// one.
+inline bool encoderInhibited(const UiContext& ctx) { return underPower(ctx); }
 
 // --- The powered-run latch, m_runPhase ------------------------------------
 //
@@ -259,25 +273,41 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // equivalent of "hold" on a knob, so the answer here is that the knob does
   // not touch stops at all. Setting an endstop stays a deliberate keypress.
   //
-  // The encoder never commands the carriage, so §3's arrow inhibit has no
-  // direct analogue - but it inherits the inhibit its focus already imposes on
-  // the arrows, focus by focus, which is what keeps the two consistent:
-  //   * Jog focus + MM_ENABLED: inert, because the arrows are inert there.
-  //     This is the one that matters. At the rest screen the knob steps the
-  //     PITCH, and a stray nudge mid-cut would rewrite the pitch of the thread
-  //     being cut. Wanting to change pitch while engaged is a real thing to
-  //     want, and it is still possible - press RATE first, which is a
-  //     deliberate act, and matches the arrows exactly (see below).
-  //   * Rate / Mode / JogSpeed: live while engaged, because the arrows are
-  //     (UiStateSelectors.SelectorsStillWorkWhileMotionEnabled pins that
-  //     changing pitch or mode mid-cut must stay possible).
-  //   * Stops: inert always, which is a superset of the arrows' inhibit there.
-  //   * Menu: no motion inhibit on movement between tiles, same as the arrows;
-  //     menuTileBlock() gates what OK may then activate.
+  // MOTION INHIBIT: while the carriage is under power the knob does NOTHING,
+  // in every focus, including the menu (OWNER RULING). This used to inherit the
+  // arrows' inhibit focus by focus - dead at Jog, live in Rate / Mode /
+  // JogSpeed - and that is exactly what changed. Three reasons the blanket rule
+  // is the right one, and one accepted cost:
+  //   * A knob is the input most easily disturbed by accident on a running
+  //     machine: a sleeve, a chip, a knock on the panel. A key has to be
+  //     pressed; a knob only has to be brushed.
+  //   * Unlike the arrows, the knob has no job to do during motion. The arrows
+  //     MUST stay live under power - they cancel a powered run and they are the
+  //     dead-man terminator for a jog - so their inhibit has to be stated focus
+  //     by focus. Nothing the knob emits is ever needed while metal is moving,
+  //     so the broad rule costs no capability at all.
+  //   * "The knob is dead while the machine is running" is a rule an operator
+  //     can hold in their head. "Dead on the rest screen, live inside three of
+  //     the four widgets" is not.
+  // The cost: the knob is dead inside a widget the operator opened on purpose,
+  // e.g. RATE while engaged. That is the accepted trade - the KEYS are
+  // untouched, so RATE + arrows still changes pitch mid-cut
+  // (UiStateSelectors.SelectorsStillWorkWhileMotionEnabled), which is the
+  // capability §3 actually requires. Only the knob is inhibited.
+  //
+  // The predicate is underPower() - motionEnabled OR motionActive - not
+  // motionEnabled alone. The engaged feed is not the only state worth
+  // protecting: the powered run to a stop, the interactive jog and the
+  // deceleration tail are all "the carriage is moving", which is precisely when
+  // a stray step of pitch or mode is most costly, and none of them are
+  // MM_ENABLED. It is the same predicate the stop edits use.
   // -------------------------------------------------------------------------
   if (isEncoder(key)) {
     if (ev != UiKeyEvent::Click) {
       return UiIntent::None;  // one Click per detent; nothing else means a turn
+    }
+    if (encoderInhibited(ctx)) {
+      return UiIntent::None;  // see MOTION INHIBIT above - dead in every focus
     }
     const bool ccw = (key == UiKey::EncoderCcw);
 
@@ -307,11 +337,8 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       case UiFocus::Mode:
         return ccw ? UiIntent::ModePrev : UiIntent::ModeNext;
       case UiFocus::Jog:
-        // The rest screen: the knob is the pitch control. Inherits the arrows'
-        // §3 inhibit for this focus.
-        if (ctx.motionEnabled) {
-          return UiIntent::None;
-        }
+        // The rest screen: the knob is the pitch control. (The motion inhibit
+        // is the blanket one above - by here the carriage is at rest.)
         return ccw ? UiIntent::PitchPrev : UiIntent::PitchNext;
       case UiFocus::Rate:
         return ccw ? UiIntent::PitchPrev : UiIntent::PitchNext;
@@ -388,9 +415,28 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
-  // STOPS is a selector like MODE and RATE on a Click, but it is also the only
-  // selector with a gesture of its own: held, it clears BOTH stops behind a one
-  // second confirm bar (§4).
+  // STOPS is a selector like MODE and RATE, but it is also the only selector
+  // with a gesture of its own: held, it clears BOTH stops behind a one second
+  // confirm bar (§4).
+  //
+  // That gesture is why STOPS takes focus on the PRESS, where MODE and RATE
+  // take it on the Click. The keypad emits no Click after a Hold
+  // (src/keyarray.cpp:144-170), so a Click-only selector can never be focused
+  // by the same gesture that holds it: holding STOPS from the rest screen used
+  // to do nothing whatsoever - no focus change, no bar, no clear - and
+  // clear-both was reachable only as tap-then-hold. Moving the focus change one
+  // event earlier makes press-and-hold work from the rest screen AND puts the
+  // widget on screen while the bar fills, so the operator watches it fill over
+  // the stop markers and the travel bar they are about to lose, which is the
+  // whole point of having a confirm bar rather than an instant action.
+  //
+  // MODE and RATE stay Click-only, deliberately. The asymmetry is not "STOPS is
+  // special" for its own sake: STOPS is the only selector where the Hold means
+  // something, so it is the only one where taking focus on the Click loses a
+  // gesture. Acting on Press has a real cost - a press that is never followed
+  // by a Click (KeyArray can drop events; see the buttonpad.cpp hazards) still
+  // moves focus - and there is nothing to buy with it on a selector whose only
+  // job is to open a picker.
   //
   // There is no second timer here, and there must not be one. KeyArray's hold
   // timer is already one second (src/keyarray.cpp:58), so the Hold event IS the
@@ -407,18 +453,29 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // -------------------------------------------------------------------------
   if (key == UiKey::Stops) {
     if (ev == UiKeyEvent::Press) {
+      // Take focus HERE, not on the Click - see the note above. The widget is
+      // then on screen for the whole of the confirm bar, and the Click that
+      // follows an ordinary tap lands on an already-focused widget and changes
+      // nothing.
+      //
+      // Note where this sits: the menu branch above swallows every non-Click
+      // event while the carousel is open, so a STOPS press cannot steal focus
+      // from the menu (§6: the menu leaves on MENU or HALT only), and cannot
+      // arm the bar from there either.
+      m_focus = UiFocus::Stops;
+
       // Arm the confirm bar - but ONLY if this hold could actually succeed, so
       // the bar never fills for a gesture the machine is going to refuse (§4
       // calls that out for the STOPS hint; menuTileBlock() makes the same
-      // point for the menu). Three preconditions, all re-checked on the Hold:
-      //   * focus is already on the STOPS widget. Holding STOPS from the rest
-      //     screen must not clear anything: the Click that would have moved
-      //     focus never arrives after a Hold, so this is a genuine two-gesture
-      //     action - tap STOPS to open the widget, then hold it.
+      // point for the menu). Two preconditions, both re-checked on the Hold:
       //   * the carriage is at rest. Same gate as every other stop edit.
       //   * there is at least one stop to clear.
-      m_stopsConfirming = (m_focus == UiFocus::Stops &&
-                           !stopEditsInhibited(ctx) &&
+      // The focus precondition this used to carry is gone because it is now
+      // trivially satisfied by the line above - opening the widget on the Press
+      // is exactly what makes the hold reachable from the rest screen. Focus is
+      // still what decides whether the bar can arm at all, though: with the
+      // menu open this code never runs.
+      m_stopsConfirming = (!stopEditsInhibited(ctx) &&
                            (ctx.leftStopSet || ctx.rightStopSet));
       m_stopsPressMs = nowMs;
       return UiIntent::None;
@@ -450,8 +507,11 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       return UiIntent::None;
     }
 
-    // Click: the ordinary selector behaviour. (The Release that follows it has
-    // already cleared m_stopsConfirming above, in event order.)
+    // Click: the ordinary selector behaviour, now a no-op in all but name - the
+    // Press of the same tap already took focus. Kept as the belt to that
+    // braces: KeyArray can drop events, and a Click that arrives without its
+    // Press must still open the widget. (The Release that follows has already
+    // cleared m_stopsConfirming above, in event order.)
     m_focus = UiFocus::Stops;
     return UiIntent::None;
   }
