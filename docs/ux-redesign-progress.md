@@ -2,6 +2,39 @@
 
 Working log for the `ux-redesign` branch build-out. Written for Martin to read on return.
 
+## State as of the second flash
+
+Everything from the first-hardware feedback is done, and there is now a screen renderer, so
+visual claims can be checked instead of argued.
+
+| | |
+|---|---|
+| Host tests | 354, 12 suites |
+| Device build | clean — Flash ~75.9%, RAM 35.1% |
+| Screens rendered | 38, in `tools/screenshot/out/` |
+
+**Done since the first flash:** the real palette (dark is now actually dark); the pitch slider
+replaced by discrete pips, which is what the mockup always specified and is honest about a
+twenty-value list; bands re-spaced; state chip back to 26; soft-key hints removed; the menu
+carousel three-across as the mockup; every menu tile given a destination with `OK` closing the
+carousel; `DroDatum`, `Diagnostics` and `About` screens built; the Wi-Fi screens brought onto the
+palette; the sync **anchor source** surfaced for the first time.
+
+**Known imperfect, deliberately:**
+- Light-theme green stop ticks are 2.24:1 on white — below the 3:1 component guideline. Fixing it
+  properly means diverging the two palettes' state hues, which §8 says to share.
+- Light-theme accent fill vs surface is 1.84:1; the selected tile leans on hue plus dark ink.
+- Setup screen: the gap between credential *rows* is airier than label-to-value.
+- `diagnostics-error` shows `NOT SYNCED` beside `ANCHOR L stop` — honest (an anchor exists, sync is
+  lost) but a reader might expect the anchor to dim.
+- `getEstimatedVelocityInPulsesPerSecond()` returns 0 below ~1000 pps, so Diagnostics will read
+  `CARRIAGE 0.00` on very slow fine feeds. Firmware behaviour, not display — but it will look like
+  a fault on the bench.
+
+**Still not done:** the clear-both confirm bar does not render (the widget opens, but no filling
+bar); `GlobalButtonLock` still exists unused; and the imperial-feed 1000× bug is still there by
+your decision.
+
 ## Read this first
 
 The branch builds clean and every host test passes. Nine of the twelve feature sets are
