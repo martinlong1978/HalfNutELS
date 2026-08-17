@@ -360,20 +360,56 @@ def ascii_art(data, ramp=RAMPS[-1], pair_rows=True):
     return out
 
 
+def mirror_rows(data):
+    """Flip the raster horizontally.
+
+    The arrowhead shows the DIRECTION OF TRAVEL. Cutting a normal right-hand
+    thread (and ordinary power feed) the carriage runs toward the headstock -
+    right to left as you face the machine - so those two glyphs point left. A
+    left-hand thread cuts the other way, so it points right.
+
+    That makes the two thread glyphs exact mirrors of each other, which is
+    correct for a deeper reason than symmetry: reversing the hand of a helix
+    reverses BOTH the visible crest lean and the direction the carriage
+    travels, so the whole glyph flips as one. Mirroring the raster rather than
+    the geometry keeps that guarantee exact - the two cannot drift apart.
+
+    Because a mirror also flips the crest lean, the thread glyphs are built
+    with the OPPOSITE lean and then mirrored back, so each ends up with the
+    lean its hand actually has.
+    """
+    out = bytearray(len(data))
+    for y in range(H):
+        row = data[y * W:(y + 1) * W]
+        row.reverse()
+        out[y * W:(y + 1) * W] = row
+    return out
+
+
+# (file, symbol, map name, attribute, builder, mirror?)
+# Mirrored glyphs point LEFT - the direction the carriage travels for ordinary
+# feed and for a right-hand thread. Left-hand threading is the exception and
+# points right. See mirror_rows() for why the thread pair are exact mirrors.
 GLYPHS = [
     ("feedSymbol.c", "feedSymbol", "feed_map",
-     "LV_ATTRIBUTE_IMG_FEED", glyph_feed),
+     "LV_ATTRIBUTE_IMG_FEED", glyph_feed, True),
+    # Built with the reverse lean, then mirrored - so the crests end up leaning
+    # "\\" (right-hand) with the arrow pointing left.
     ("threadSymbol.c", "threadSymbol", "threadSymbol_map",
-     "LV_ATTRIBUTE_IMG_THREADSYMBOL", lambda: glyph_thread(+CREST_LEAN)),
+     "LV_ATTRIBUTE_IMG_THREADSYMBOL", lambda: glyph_thread(-CREST_LEAN), True),
+    # Left-hand: crests lean "/" and the carriage runs the other way, so this
+    # one is not mirrored. It is the exact mirror image of threadSymbol.
     ("threadSymbolReverse.c", "threadSymbolReverse", "threadSymbolReverse_map",
-     "LV_ATTRIBUTE_IMG_THREADSYMBOLREVERSE", lambda: glyph_thread(-CREST_LEAN)),
+     "LV_ATTRIBUTE_IMG_THREADSYMBOLREVERSE", lambda: glyph_thread(-CREST_LEAN), False),
 ]
 
 
 def main():
     show = "--ascii" in sys.argv
-    for fname, sym, mapname, attr, build in GLYPHS:
+    for fname, sym, mapname, attr, build, mirror in GLYPHS:
         data = rasterise(build())
+        if mirror:
+            data = mirror_rows(data)
         path = os.path.normpath(os.path.join(OUT_DIR, fname))
         emit(path, sym, mapname, attr, data)
         print("wrote %s (%d bytes of image data)" % (path, len(data)))
