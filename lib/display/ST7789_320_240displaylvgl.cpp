@@ -236,6 +236,31 @@ void Display::init() {
   lv_image_set_src(enableObj, &pauseSymbol);
   lv_image_set_src(syncObj, &syncSymbol);
 
+  // These icons were converted from I1 (2-entry palette, ink colour baked in) to A8
+  // (alpha-only; colour comes from the image's recolor style). LVGL's A8 blend path
+  // applies draw_dsc->recolor unconditionally (unlike other formats, which gate on
+  // recolor_opa > LV_OPA_MIN), and the style default for LV_STYLE_IMAGE_RECOLOR is
+  // black -- so without an explicit recolor here every one of these renders black.
+  // Set it explicitly per object (not per source -- drawMode()/drawEnabled()/
+  // drawLocked() swap lv_image_set_src at runtime on these same objects) to restore
+  // the original baked-in ink colours: white for the 32x32 status icons that sit on
+  // coloured state rectangles, black for the 128x64 mode symbol on the white
+  // background. Pure white/black are unaffected by this panel's R<->B swap (unlike
+  // the COLOUR_* constants above), so no swapping is needed here -- but any future
+  // recolour to an actual colour would need to be authored pre-swapped like those.
+  lv_obj_set_style_image_recolor(feedSymbolObj, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_image_recolor_opa(feedSymbolObj, LV_OPA_COVER, 0);
+  lv_obj_set_style_image_recolor(leftStopObj, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_image_recolor_opa(leftStopObj, LV_OPA_COVER, 0);
+  lv_obj_set_style_image_recolor(rightStopObj, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_image_recolor_opa(rightStopObj, LV_OPA_COVER, 0);
+  lv_obj_set_style_image_recolor(lockedObj, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_image_recolor_opa(lockedObj, LV_OPA_COVER, 0);
+  lv_obj_set_style_image_recolor(enableObj, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_image_recolor_opa(enableObj, LV_OPA_COVER, 0);
+  lv_obj_set_style_image_recolor(syncObj, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_image_recolor_opa(syncObj, LV_OPA_COVER, 0);
+
   // "L"/"R" thread-hand indicator, sat over the thread mode icon.
   threadHandLabel = lv_label_create(lv_screen_active());
   lv_obj_set_style_text_font(threadHandLabel, &lv_font_montserrat_26, 0);

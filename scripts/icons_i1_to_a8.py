@@ -82,12 +82,18 @@ def convert(text: str, path_for_errors: str) -> str:
     if not (cf and cf.group(1) == "LV_COLOR_FORMAT_I1"):
         raise ValueError(f"{path_for_errors}: unexpected .header.cf ({cf.group(1) if cf else '???'}), expected LV_COLOR_FORMAT_I1")
 
-    w = int(W_RE.search(desc_match.group("body")).group(1))
-    h = int(H_RE.search(desc_match.group("body")).group(1))
-    stride = int(STRIDE_RE.search(desc_match.group("body")).group(1))
+    def require_field(field_re, field_desc):
+        m = field_re.search(desc_match.group("body"))
+        if not m:
+            raise ValueError(f"{path_for_errors}: could not locate {field_desc} in descriptor")
+        return m.group(1)
+
+    w = int(require_field(W_RE, ".header.w"))
+    h = int(require_field(H_RE, ".header.h"))
+    stride = int(require_field(STRIDE_RE, ".header.stride"))
     symbol = desc_match.group("symbol")
     map_name = map_match.group("map_name")
-    data_field = DATA_FIELD_RE.search(desc_match.group("body")).group(1)
+    data_field = require_field(DATA_FIELD_RE, ".data")
     if data_field != map_name:
         raise ValueError(
             f"{path_for_errors}: .data field ({data_field}) doesn't match map array name ({map_name})"
