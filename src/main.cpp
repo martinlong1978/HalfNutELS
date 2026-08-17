@@ -183,7 +183,13 @@ void setup() {
 
     keyArray = new KeyArray(leadscrew);
     keyPad = new ButtonPad(spindle, leadscrew, keyArray);
-    display = new Display(spindle, leadscrew);
+    // ButtonPad owns the UiState; the display only reads it, to know which
+    // selector overlay to show. Both run on the DisplayTask (displayLoop()
+    // below calls keyPad->handle() then display->update()), so this is a
+    // same-task read and needs no volatile or GlobalState round trip -- but it
+    // does mean ButtonPad MUST be constructed first, as it is here: the
+    // reference is taken now and held for the life of the display.
+    display = new Display(spindle, leadscrew, &keyPad->ui());
 
 
 

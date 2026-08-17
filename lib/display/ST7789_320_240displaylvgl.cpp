@@ -43,6 +43,16 @@ struct DisplayPalette {
                               // screen no longer draws any of them (the chips
                               // they sat on are gone -- see the header); kept
                               // for the FS-I3 overlays/menu.
+  lv_color_t surface;        // ground of the selector overlay panel. MUST differ
+                              // from `background`: the panel is opaque (no
+                              // translucency is affordable, section 8) and its
+                              // only other edge cue is a 2px border, so a panel
+                              // painted the same colour as the screen would read
+                              // as an outline floating over live content rather
+                              // than as a thing that has replaced it.
+  lv_color_t accent;         // focus accent: the overlay border and the selected
+                              // MODE tile. The one colour that means "the arrows
+                              // drive THIS" (section 1).
 };
 
 // Dark palette (THEME_DARK, the default). NOTE the naming is historical: these
@@ -67,6 +77,14 @@ static const DisplayPalette PALETTE_DARK = {
   lv_color_hex(0xCCCCCC), // colourDisabled: was COLOUR_DISABLED.
   lv_color_hex(0xFFFFFF), // iconInk: was the hardcoded white status-icon ink
                           // -- R==B, no swap needed.
+  lv_color_hex(0xFFFFFF), // surface: white, one step UP from this palette's
+                          // 0xF5F5F5 ground (see the naming note above: "dark"
+                          // is historically a light-ground look). R==B, no swap.
+  lv_color_hex(0xF8BD38), // accent: docs/ux-redesign.md section 8 "Colour"
+                          // gives the focus accent as natural #38BDF8 ->
+                          // R=38,G=BD,B=F8 -> swap R/B -> F8,BD,38 -> 0xF8BD38.
+                          // A pale sky blue, so this palette's black
+                          // textPrimary is what goes on top of it.
 };
 
 // Light palette: not reachable yet -- no menu wires LatheConfig::theme to
@@ -110,6 +128,13 @@ static const DisplayPalette PALETTE_LIGHT = {
   // once (black ink landing on the green "engaged" chip), so it is spelled out
   // rather than left to be rediscovered.
   lv_color_hex(0x000000),
+  lv_color_hex(0xF5F5F5), // surface: one step DOWN from this palette's white
+                          // ground -- the opposite direction to dark's, because
+                          // there is nowhere above white to go. R==B, no swap.
+  lv_color_hex(0xF8BD38), // accent: same focus accent as dark, see the swap
+                          // working there. Section 8 "Theme" says the accent
+                          // hue is SHARED between the two palettes, so unlike
+                          // the state colours these two are meant to match.
 };
 
 // --- Layout ------------------------------------------------------------------
@@ -224,6 +249,11 @@ static const int FONT26_H = 29;
 static const int FONT48_H = 52;
 static const int GLYPH_W = 128;
 static const int GLYPH_H = 64;
+// Ascents (line_height - base_line), from the same metrics table. Needed to
+// baseline-align labels of different sizes on one row: a label's box top is
+// `baseline - ascent`, so aligning a 26 to a 48 is y26 = y48 + (43 - 24).
+static const int FONT26_ASCENT = 24;
+static const int FONT48_ASCENT = 43;
 
 // Measured advance widths of the worst-case string in each fixed slot, summed
 // from the adv_w fields of the same lv_font_montserrat_*.c files the metrics
@@ -238,6 +268,101 @@ static const int TEXT14_SYNC_W = 39;       // "SYNC"
 static const int TEXT14_RPM_UNIT_W = 33;   // "RPM"
 static const int TEXT26_RPM_VALUE_W = 64;  // "9999"
 static const int TEXT26_STATE_W = 161;     // "RETURNING" (longest state word)
+
+// --- Selector overlay --------------------------------------------------------
+//
+// docs/ux-redesign.md section 4: press MODE / RATE / STOPS (or OK at rest for
+// jog speed) and a solid panel replaces the CENTRE of the screen; the arrows
+// adjust, OK or 4 s of idle dismisses it. Four focuses, one panel: the status
+// bar (band 1) and the state bar (band 5) stay visible underneath so the
+// machine never disappears while a setting is being changed.
+//
+//    40 +--- 2px accent border ----------------------+
+//       |                  PITCH                     |  title      (14, dim)
+//       |    1.00        1.25        1.50            |  ticker  (26/48/26)
+//       |                  mm                        |  unit       (26, dim)
+//       |  <> pitch                        OK done   |  hints      (14, dim)
+//   188 +--------------------------------------------+
+//
+// The panel is 8..311 x 40..187. Child coordinates below are relative to its
+// CONTENT area, which LVGL insets by the border width (lv_obj_get_style_space_*
+// adds border_width to the padding), so the usable box is 300 x 144 and every
+// child x/y is measured from (OVERLAY_X + OVERLAY_BORDER, OVERLAY_Y +
+// OVERLAY_BORDER). Groups sit at (0,0) at full content size and pass their
+// children's coordinates through unchanged.
+static const int OVERLAY_X = 8;
+static const int OVERLAY_Y = 40;
+static const int OVERLAY_W = 304;   // 8..311
+static const int OVERLAY_H = 148;   // 40..187
+static const int OVERLAY_BORDER = 2;
+static const int OVERLAY_CONTENT_W = OVERLAY_W - (2 * OVERLAY_BORDER);  // 300
+static const int OVERLAY_CONTENT_H = OVERLAY_H - (2 * OVERLAY_BORDER);  // 144
+
+// Rows shared by all four focuses: a title at the top, a hint row at the
+// bottom, and the body between them.
+static const int OVERLAY_TITLE_Y = 5;    // 14 -> 5..20
+static const int OVERLAY_BODY_TOP = 24;
+static const int OVERLAY_BODY_BOTTOM = 118;
+static const int OVERLAY_HINT_Y = 122;   // 14 -> 122..137
+static const int OVERLAY_HINT_L_X = 6;
+static const int OVERLAY_HINT_L_W = 190;  // 6..195
+static const int OVERLAY_HINT_R_X = 200;
+static const int OVERLAY_HINT_R_W = 94;   // 200..293
+
+// Ticker (RATE and JOG SPEED): value at 48 in the centre, one neighbour either
+// side at 26, both dimmed. Three fixed boxes rather than a layout manager, so
+// the value stays put as its width changes instead of the whole row shuffling.
+static const int OVERLAY_TICK_SIDE_W = 76;
+static const int OVERLAY_TICK_PREV_X = 6;     // 6..81
+static const int OVERLAY_TICK_VALUE_X = 88;   // 88..211
+static const int OVERLAY_TICK_VALUE_W = 124;
+static const int OVERLAY_TICK_NEXT_X = 218;   // 218..293
+static const int OVERLAY_TICK_VALUE_Y = 30;   // 48 -> 30..81
+// Neighbours share the value's BASELINE, not its box top.
+static const int OVERLAY_TICK_SIDE_Y =
+  OVERLAY_TICK_VALUE_Y + (FONT48_ASCENT - FONT26_ASCENT);  // 49 -> 49..77
+static const int OVERLAY_TICK_UNIT_Y = 84;    // 26 -> 84..112
+
+// MODE: three tiles in a row, 4..95 / 104..195 / 204..295.
+static const int OVERLAY_MODE_TILE_W = 92;
+static const int OVERLAY_MODE_TILE_H = 56;
+static const int OVERLAY_MODE_GAP = 8;
+static const int OVERLAY_MODE_X0 = 4;
+static const int OVERLAY_MODE_TILE_Y = 34;   // 34..89
+// 14 centred in the tile: 34 + (56-16)/2 = 54.
+static const int OVERLAY_MODE_LABEL_Y = 54;
+
+// STOPS: the travel bar again, full panel width.
+static const int OVERLAY_STOP_TRACK_X = 10;
+static const int OVERLAY_STOP_TRACK_W = 280;  // 10..289
+static const int OVERLAY_STOP_TRACK_Y = 34;   // 34..43
+static const int OVERLAY_STOP_TRACK_H = 10;
+static const int OVERLAY_STOP_MARK_Y = 30;    // 30..47, overhanging the track
+static const int OVERLAY_STOP_MARK_H = 18;
+static const int OVERLAY_STOP_MARK_W = 4;
+static const int OVERLAY_STOP_CARRIAGE_W = 8;
+static const int OVERLAY_STOP_LABEL_Y = 54;   // 14 -> 54..69
+static const int OVERLAY_STOP_LEFT_X = 10;    // 10..99
+static const int OVERLAY_STOP_RIGHT_X = 200;  // 200..289
+static const int OVERLAY_STOP_END_W = 90;
+static const int OVERLAY_STOP_POS_Y = 76;     // 26 -> 76..104
+static const int OVERLAY_STOP_POS_X = 20;     // 20..279
+static const int OVERLAY_STOP_POS_W = 260;
+
+// Measured worst-case ink for the overlay's fixed boxes, on the same basis as
+// the main screen's constants above (summed adv_w, no kerning credit).
+// The 48 and 26 ticker widths are "6.00" -- the longest string ANY of the four
+// tables can produce through formatPitch(): threadPitchMetric tops out at 6.00
+// and feedPitchMetric at 0.75 (both 4 chars, and Montserrat's digits are all
+// the same advance), threadPitchImperial renders as at most "80", the imperial
+// feed table as at most "30" thou, and jogSpeeds as at most "100".
+static const int TEXT48_TICKER_W = 105;    // "6.00" at 48
+static const int TEXT26_TICKER_W = 56;     // "6.00" at 26
+static const int TEXT26_TICKER_UNIT_W = 64;  // "thou", the longest unit word
+static const int TEXT14_HINT_W = 161;      // "moving - stops locked"
+static const int TEXT14_HINT_OK_W = 64;    // "OK done"
+static const int TEXT14_STOP_END_W = 69;   // "L -1200.00"
+static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
 
 // --- Layout assertions -------------------------------------------------------
 // There is no host test for this file (lvgl is lib_ignore'd on the native env),
@@ -297,6 +422,71 @@ static_assert(STATE_DOT_X + STATE_DOT_SIZE < STATE_WORD_X, "state dot collides w
 static_assert(SOFTKEY_Y + FONT14_H <= SCREEN_H, "soft-key hints off the bottom");
 static_assert(SOFTKEY_X0 + (3 * SOFTKEY_W) <= SCREEN_W, "soft-key columns off the right edge");
 
+// --- Selector overlay assertions ---------------------------------------------
+// Same deal as above: no host test reaches this file, so the panel's arithmetic
+// is checked by the compiler. The panel is opaque and sits on top of everything,
+// so the first two are the ones that matter most -- an overlay that grew over
+// either bar would hide machine state (RPM, or the CUTTING/HALTED word) behind
+// a settings widget, which section 4 explicitly does not allow.
+static_assert(OVERLAY_Y > BAND_STATUS_BOTTOM, "overlay covers the status bar");
+static_assert(OVERLAY_Y + OVERLAY_H <= BAND_TRAVEL_BOTTOM, "overlay covers the state bar");
+static_assert(OVERLAY_X + OVERLAY_W <= SCREEN_W, "overlay off the right edge");
+static_assert(OVERLAY_X > 0, "overlay has no left margin");
+// Shared rows. Everything below is in CONTENT coordinates, so the bound is the
+// content size, not the panel size -- getting that wrong is exactly the mistake
+// these catch (the border inset is 2px at each edge, i.e. 4 in each axis).
+static_assert(OVERLAY_TITLE_Y + FONT14_H <= OVERLAY_BODY_TOP, "overlay title overlaps the body");
+static_assert(OVERLAY_BODY_TOP < OVERLAY_BODY_BOTTOM, "overlay body has no height");
+static_assert(OVERLAY_BODY_BOTTOM <= OVERLAY_HINT_Y, "overlay body overlaps the hint row");
+static_assert(OVERLAY_HINT_Y + FONT14_H <= OVERLAY_CONTENT_H, "overlay hint row falls off the panel");
+static_assert(OVERLAY_HINT_L_X + OVERLAY_HINT_L_W <= OVERLAY_HINT_R_X, "overlay hints collide");
+static_assert(OVERLAY_HINT_R_X + OVERLAY_HINT_R_W <= OVERLAY_CONTENT_W, "overlay right hint off the panel");
+static_assert(TEXT14_HINT_W <= OVERLAY_HINT_L_W, "longest arrow hint wider than its box");
+static_assert(TEXT14_HINT_OK_W <= OVERLAY_HINT_R_W, "\"OK done\" wider than its box");
+// Ticker. The neighbour boxes are the only thing stopping a long neighbour
+// value from running under the 48, so check the ink, not just the boxes.
+static_assert(OVERLAY_TICK_PREV_X + OVERLAY_TICK_SIDE_W <= OVERLAY_TICK_VALUE_X, "ticker neighbour runs into the value");
+static_assert(OVERLAY_TICK_VALUE_X + OVERLAY_TICK_VALUE_W <= OVERLAY_TICK_NEXT_X, "ticker value runs into its neighbour");
+static_assert(OVERLAY_TICK_NEXT_X + OVERLAY_TICK_SIDE_W <= OVERLAY_CONTENT_W, "ticker off the right of the panel");
+static_assert(TEXT48_TICKER_W <= OVERLAY_TICK_VALUE_W, "ticker value wider than its box");
+static_assert(TEXT26_TICKER_W <= OVERLAY_TICK_SIDE_W, "ticker neighbour wider than its box");
+static_assert(TEXT26_TICKER_UNIT_W <= OVERLAY_TICK_VALUE_W, "ticker unit wider than its box");
+static_assert(OVERLAY_TICK_VALUE_Y >= OVERLAY_BODY_TOP, "ticker value overlaps the title");
+static_assert(OVERLAY_TICK_VALUE_Y + FONT48_H <= OVERLAY_TICK_UNIT_Y, "ticker value overlaps its unit");
+static_assert(OVERLAY_TICK_UNIT_Y + FONT26_H <= OVERLAY_BODY_BOTTOM, "ticker unit overflows the body");
+// The neighbours are baseline-aligned to the value, which means their box tops
+// differ by the ascent difference. Written out rather than left implicit in the
+// initialiser so that changing either font size fails here.
+static_assert(OVERLAY_TICK_SIDE_Y - OVERLAY_TICK_VALUE_Y == FONT48_ASCENT - FONT26_ASCENT,
+              "ticker neighbours are off the value's baseline");
+static_assert(OVERLAY_TICK_SIDE_Y + FONT26_H <= OVERLAY_TICK_UNIT_Y, "ticker neighbours overlap the unit");
+// MODE tiles.
+static_assert(OVERLAY_MODE_X0 + (3 * OVERLAY_MODE_TILE_W) + (2 * OVERLAY_MODE_GAP) <= OVERLAY_CONTENT_W,
+              "mode tiles off the right of the panel");
+static_assert(TEXT14_MODE_W <= OVERLAY_MODE_TILE_W, "\"THREAD R\" wider than a mode tile");
+static_assert(OVERLAY_MODE_TILE_Y >= OVERLAY_BODY_TOP, "mode tiles overlap the title");
+static_assert(OVERLAY_MODE_TILE_Y + OVERLAY_MODE_TILE_H <= OVERLAY_BODY_BOTTOM, "mode tiles overflow the body");
+static_assert(OVERLAY_MODE_LABEL_Y >= OVERLAY_MODE_TILE_Y &&
+              OVERLAY_MODE_LABEL_Y + FONT14_H <= OVERLAY_MODE_TILE_Y + OVERLAY_MODE_TILE_H,
+              "mode tile label is not inside its tile");
+// STOPS.
+static_assert(OVERLAY_STOP_TRACK_X + OVERLAY_STOP_TRACK_W <= OVERLAY_CONTENT_W, "stops track off the right of the panel");
+static_assert(OVERLAY_STOP_MARK_Y >= OVERLAY_BODY_TOP, "stops markers overlap the title");
+static_assert(OVERLAY_STOP_MARK_Y <= OVERLAY_STOP_TRACK_Y &&
+              OVERLAY_STOP_TRACK_Y + OVERLAY_STOP_TRACK_H <= OVERLAY_STOP_MARK_Y + OVERLAY_STOP_MARK_H,
+              "stops markers no longer overhang the track");
+static_assert(OVERLAY_STOP_MARK_Y + OVERLAY_STOP_MARK_H <= OVERLAY_STOP_LABEL_Y, "stops markers collide with the end labels");
+static_assert(OVERLAY_STOP_LABEL_Y + FONT14_H <= OVERLAY_STOP_POS_Y, "stops end labels collide with the live readout");
+static_assert(OVERLAY_STOP_POS_Y + FONT26_H <= OVERLAY_BODY_BOTTOM, "stops readout overflows the body");
+static_assert(OVERLAY_STOP_LEFT_X + OVERLAY_STOP_END_W <= OVERLAY_STOP_RIGHT_X, "stops end labels collide");
+static_assert(OVERLAY_STOP_RIGHT_X + OVERLAY_STOP_END_W <= OVERLAY_CONTENT_W, "stops right label off the panel");
+static_assert(TEXT14_STOP_END_W <= OVERLAY_STOP_END_W, "stop end label wider than its box");
+static_assert(OVERLAY_STOP_POS_X + OVERLAY_STOP_POS_W <= OVERLAY_CONTENT_W, "stops readout off the panel");
+static_assert(TEXT26_STOP_POS_W <= OVERLAY_STOP_POS_W, "stops readout wider than its box");
+// The carriage must have somewhere to travel: it is placed by fraction across
+// (track width - its own width), which is only a scale if that is positive.
+static_assert(OVERLAY_STOP_CARRIAGE_W < OVERLAY_STOP_TRACK_W, "carriage marker wider than the track");
+
 // Radii. LV_DRAW_SW_CIRCLE_CACHE_SIZE is 4, so keep the number of DISTINCT
 // radii small (docs/ux-redesign.md section 8 "Renderer constraints"): this
 // screen uses exactly three -- 0 (rules, band fills), 4 (tracks and markers)
@@ -342,6 +532,27 @@ static lv_obj_t* createLabel(lv_obj_t* parent, const lv_font_t* font,
 // readouts, the soft-key columns). LONG_MODE_CLIP rather than the default WRAP:
 // if a value ever does exceed the box, clipping it keeps the single-line layout
 // instead of silently growing the label downwards into the next band.
+// One switchable content group inside the selector overlay: an invisible box
+// filling the panel's content area, whose only job is to be shown or hidden as
+// a unit. Sized and positioned so its children's coordinates are the panel's
+// content coordinates unchanged (pad 0, border 0 -> content origin == origin).
+//
+// bg_opa TRANSP is NOT translucency in the sense section 8 forbids: it skips
+// drawing the background entirely. Only LV_STYLE_OPA (whole-object opacity)
+// forces LVGL to allocate an intermediate layer, and nothing here sets it.
+static lv_obj_t* createOverlayGroup(lv_obj_t* parent) {
+  lv_obj_t* group = lv_obj_create(parent);
+  lv_obj_remove_flag(group, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_border_width(group, 0, 0);
+  lv_obj_set_style_pad_all(group, 0, 0);
+  lv_obj_set_style_radius(group, 0, 0);
+  lv_obj_set_style_bg_opa(group, LV_OPA_TRANSP, 0);
+  lv_obj_set_size(group, OVERLAY_CONTENT_W, OVERLAY_CONTENT_H);
+  lv_obj_set_pos(group, 0, 0);
+  lv_obj_add_flag(group, LV_OBJ_FLAG_HIDDEN);
+  return group;
+}
+
 static void fixLabelBox(lv_obj_t* label, int width, lv_text_align_t align) {
   lv_obj_set_width(label, width);
   lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
@@ -361,9 +572,189 @@ static void formatTravelValue(char* buf, size_t len, float millimetres,
   }
 }
 
-Display::Display(Spindle* spindle, Leadscrew* leadscrew) {
+// --- Pitch / jog-speed tables ------------------------------------------------
+//
+// ONE place decides which table the current (feed mode x unit mode) pair
+// selects and how a value out of it is rendered. drawPitch() (the main readout)
+// and the RATE / JOG SPEED overlays all go through here, so they cannot drift
+// apart -- previously the whole if/else chain lived inside drawPitch().
+//
+// It is NOT legitimate to render GlobalState::getCurrentFeedPitch() instead:
+// that returns mm/rev in EVERY mode (so imperial would show the metric
+// equivalent) and it negates for FM_THREAD_REVERSE. Note also that
+// feedPitchImperial[] is commented thou/rev but actually holds INCHES -- the
+// x1000 in PF_THOU is what makes this readout correct, and it is deliberately
+// left in place; the array's mislabelling (and getCurrentFeedPitch()'s
+// consequent 1000x error) is tracked separately and must not be "fixed" here.
+enum PitchFormat {
+  PF_MM,       // metric pitch, mm/rev to 2 dp
+  PF_TPI,      // imperial thread, whole TPI
+  PF_THOU,     // imperial feed, inches in the table -> thou on screen
+  PF_PERCENT,  // jog speed, a 0..1 fraction shown as a percentage
+};
+
+struct PitchTable {
+  const float* values;
+  int count;
+  const char* unit;  // static literal; never formatted into a buffer
+  PitchFormat format;
+};
+
+// jogSpeeds[] is the JOG SPEED widget's list whatever the feed mode is, which
+// is why this is reachable independently of currentPitchTable().
+static PitchTable jogSpeedTable() {
+  PitchTable table;
+  table.values = jogSpeeds;
+  table.count = (int)ARRAY_SIZE(jogSpeeds);
+  table.unit = "%";
+  table.format = PF_PERCENT;
+  return table;
+}
+
+static PitchTable currentPitchTable(GlobalFeedMode mode, GlobalUnitMode unit) {
+  if (mode == FM_JOG) {
+    // FM_JOG is on its way out of the mode cycle (section 3), but it is still a
+    // value GlobalState can hold, so the main readout still has to render it.
+    return jogSpeedTable();
+  }
+
+  const bool thread = (mode == FM_THREAD || mode == FM_THREAD_REVERSE);
+  PitchTable table;
+  if (unit == METRIC) {
+    table.values = thread ? threadPitchMetric : feedPitchMetric;
+    table.count = thread ? (int)ARRAY_SIZE(threadPitchMetric)
+                         : (int)ARRAY_SIZE(feedPitchMetric);
+    table.unit = "mm";
+    table.format = PF_MM;
+  } else if (thread) {
+    table.values = threadPitchImperial;
+    table.count = (int)ARRAY_SIZE(threadPitchImperial);
+    table.unit = "TPI";
+    table.format = PF_TPI;
+  } else {
+    table.values = feedPitchImperial;
+    table.count = (int)ARRAY_SIZE(feedPitchImperial);
+    table.unit = "thou";
+    table.format = PF_THOU;
+  }
+  return table;
+}
+
+// Renders one entry of `table`. An out-of-range index yields an EMPTY string
+// rather than reading off the end of the array: the overlay ticker asks for
+// index-1 and index+1 on purpose, and a blank neighbour is exactly the right
+// rendering at the ends of the list. (It also stops a stale m_feedSelect from
+// indexing a shorter table, which the old inline code would have done.)
+//
+// The two integer conversions round (+0.5f) where the previous inline code
+// truncated. Every value in all five tables is unchanged by that -- the nearest
+// float to each happens to land just above its integer target -- but truncation
+// only ever worked by luck, and one edited table entry would have shown 13 thou
+// as "12".
+static void formatPitch(char* buf, size_t len, const PitchTable& table,
+                        int index) {
+  if (index < 0 || index >= table.count) {
+    buf[0] = '\0';
+    return;
+  }
+  const float value = table.values[index];
+  switch (table.format) {
+  case PF_TPI:
+    snprintf(buf, len, "%d", (int)value);
+    break;
+  case PF_THOU:
+    snprintf(buf, len, "%d", (int)((value * 1000.0f) + 0.5f));
+    break;
+  case PF_PERCENT:
+    snprintf(buf, len, "%d", (int)((value * 100.0f) + 0.5f));
+    break;
+  case PF_MM:
+  default:
+    snprintf(buf, len, "%.2f", (double)value);
+    break;
+  }
+}
+
+// The list the pitch ticker is showing, and the index within it. `jogSpeed`
+// forces the jog list whatever the feed mode is -- the JOG SPEED widget is
+// reachable from every mode (section 3: OK at rest opens it), which is the one
+// case where the list on screen is not the one the feed mode implies.
+//
+// The index rule lives here rather than in currentPitchTable() so that a
+// PitchTable stays a pure description of a LIST, which is what lets the overlay
+// ticker ask it for index-1 and index+1.
+static PitchTable tickerTable(GlobalState* state, bool jogSpeed, int& index) {
+  const GlobalFeedMode mode = state->getFeedMode();
+  if (jogSpeed || mode == FM_JOG) {
+    index = state->getJogIndex();
+    return jogSpeedTable();
+  }
+  index = state->getFeedSelect();
+  return currentPitchTable(mode, state->getUnitMode());
+}
+
+// Where the carriage sits between the two stops, 0..1 across the span. Returns
+// false when there is no span to measure against: with fewer than two stops
+// there is no scale, and parking a marker anywhere would be a made-up reading.
+// Position increases to the RIGHT (LeadscrewDirection::RIGHT = 1), so a
+// non-positive span means the stops are the wrong way round and is treated the
+// same way. Shared by band 4 and the STOPS overlay so the two bars can never
+// disagree about where the carriage is.
+static bool carriageFraction(Leadscrew* leadscrew, bool leftSet, bool rightSet,
+                             float& fraction) {
+  if (!leftSet || !rightSet) {
+    return false;
+  }
+  const float lo = leadscrew->getStopPositionMM(LeadscrewStopPosition::LEFT);
+  const float hi = leadscrew->getStopPositionMM(LeadscrewStopPosition::RIGHT);
+  const float span = hi - lo;
+  if (span <= 0.0f) {
+    return false;
+  }
+  float f = (leadscrew->getPositionMM() - lo) / span;
+  if (f < 0.0f) {
+    f = 0.0f;
+  } else if (f > 1.0f) {
+    f = 1.0f;
+  }
+  fraction = f;
+  return true;
+}
+
+// --- Overlay strings ---------------------------------------------------------
+// The hint row names what the arrows do on the left and what OK does on the
+// right (section 4). All of these are static literals chosen by a small enum,
+// NOT cached through m_textCache -- see the TextSlot comment in the header.
+//
+// STOPS is the asymmetric one and its hint has to say so: a click SETS, only a
+// HOLD clears (setting a stop is cheap to undo, clearing one loses a position
+// that may have taken time to find). And UiState refuses every stop edit while
+// the carriage is under power (uistate.cpp, UiFocus::Stops), so when that
+// inhibit is live the hint must say THAT instead -- offering a gesture the
+// machine will silently ignore is the one thing this row must not do.
+enum OverlayHint {
+  OH_NONE, OH_PITCH, OH_SPEED, OH_MODE, OH_STOPS, OH_STOPS_LOCKED
+};
+// LV_SYMBOL_* are the FontAwesome codepoints carried by every built-in
+// Montserrat face (the same ones drawStateBar() uses), so no extra font is
+// pulled in by these.
+#define OVERLAY_ARROWS LV_SYMBOL_LEFT LV_SYMBOL_RIGHT
+static const char* overlayHintText(OverlayHint hint) {
+  switch (hint) {
+  case OH_PITCH:        return OVERLAY_ARROWS " pitch";
+  case OH_SPEED:        return OVERLAY_ARROWS " speed";
+  case OH_MODE:         return OVERLAY_ARROWS " mode";
+  case OH_STOPS:        return OVERLAY_ARROWS " set, hold to clear";
+  case OH_STOPS_LOCKED: return "moving - stops locked";
+  case OH_NONE:
+  default:              return "";
+  }
+}
+
+Display::Display(Spindle* spindle, Leadscrew* leadscrew, const UiState* ui) {
   this->m_spindle = spindle;
   this->m_leadscrew = leadscrew;
+  this->m_ui = ui;
   this->m_globalState = GlobalState::getInstance();
   // Theme is picked once here, not re-read from config on every init() rebuild
   // (Display::update() calls init() whenever getDisplayReset() fires) -- if it
@@ -392,6 +783,11 @@ Display::Display() {
   // holding garbage, hence the explicit nullptr rather than omitting them.
   this->m_spindle = nullptr;
   this->m_leadscrew = nullptr;
+  // No ButtonPad exists on the setup path (main.cpp never builds one), so there
+  // is no focus to render. drawOverlay() is not reached from showWifi() /
+  // showConnected() at all, but every overlay path still tests this for nullptr
+  // rather than assuming that stays true.
+  this->m_ui = nullptr;
   this->m_globalState = GlobalState::getInstance();
   this->m_palette = &PALETTE_DARK;  // no config available on this path -- default dark.
   this->disp = nullptr;             // see the other constructor.
@@ -433,6 +829,28 @@ void Display::resetObjectTree() {
   for (int i = 0; i < 4; i++) {
     bandRule[i] = nullptr;
   }
+  overlayPanel = nullptr;
+  overlayTitle = nullptr;
+  overlayHintLeft = nullptr;
+  overlayHintRight = nullptr;
+  overlayTickerGroup = nullptr;
+  overlayTickerPrev = nullptr;
+  overlayTickerValue = nullptr;
+  overlayTickerNext = nullptr;
+  overlayTickerUnit = nullptr;
+  overlayModeGroup = nullptr;
+  for (int i = 0; i < 3; i++) {
+    overlayModeTile[i] = nullptr;
+    overlayModeTileLabel[i] = nullptr;
+  }
+  overlayStopsGroup = nullptr;
+  overlayStopsTrack = nullptr;
+  overlayStopsLeftMark = nullptr;
+  overlayStopsRightMark = nullptr;
+  overlayStopsCarriage = nullptr;
+  overlayStopsLeftLabel = nullptr;
+  overlayStopsRightLabel = nullptr;
+  overlayStopsPosLabel = nullptr;
   updateSlider = nullptr;
   updateLabel = nullptr;
 
@@ -448,6 +866,17 @@ void Display::resetObjectTree() {
   m_lastCarriageShown = false;
   m_lastLeftStopSet = false;
   m_lastRightStopSet = false;
+  // -1, not UiFocus::Jog: the first drawOverlay() after a rebuild must run its
+  // focus-changed branch even if focus has been sitting on Jog the whole time,
+  // because that branch is what puts the freshly-built panel into the hidden
+  // state and selects a content group.
+  m_lastFocus = -1;
+  m_lastHintVariant = (int)OH_NONE;
+  m_lastModeTile = -1;
+  m_lastOverlayLeftStopSet = false;
+  m_lastOverlayRightStopSet = false;
+  m_lastOverlayCarriageX = -1;
+  m_lastOverlayCarriageShown = false;
 }
 
 bool Display::setLabelText(lv_obj_t* label, int slot, const char* text) {
@@ -770,6 +1199,125 @@ void Display::init() {
     fixLabelBox(softKeyLabel[i], SOFTKEY_W, LV_TEXT_ALIGN_CENTER);
     lv_label_set_text(softKeyLabel[i], hints[i]);
   }
+
+  // --- the selector overlay (docs/ux-redesign.md section 4) -----------------
+  // Built LAST, so it is the last sibling on the screen and therefore drawn on
+  // top of every band above. Built ONCE and left hidden: drawOverlay() only
+  // toggles LV_OBJ_FLAG_HIDDEN and pushes values, it never creates or deletes
+  // anything, because this whole tree would otherwise be rebuilt ten times a
+  // second and every redraw cache would be pointless.
+  overlayPanel = createRect(lv_screen_active(), OVERLAY_X, OVERLAY_Y,
+                            OVERLAY_W, OVERLAY_H, m_palette->surface,
+                            RADIUS_TRACK);
+  // Solid fill (from createRect) plus a border in the focus accent: the accent
+  // is what says "the arrows drive what is in here" (section 1). The fill has
+  // to be opaque -- LV_DRAW_LAYER_SIMPLE_BUF_SIZE is 24 KB and a translucent
+  // 304x148 RGB565 panel would need ~90 KB (section 8).
+  lv_obj_set_style_border_width(overlayPanel, OVERLAY_BORDER, 0);
+  lv_obj_set_style_border_color(overlayPanel, m_palette->accent, 0);
+  lv_obj_set_style_border_opa(overlayPanel, LV_OPA_COVER, 0);
+  // Explicit, because the content-area arithmetic every child coordinate is
+  // written in depends on the border being inset on all four sides.
+  lv_obj_set_style_border_side(overlayPanel, LV_BORDER_SIDE_FULL, 0);
+  lv_obj_add_flag(overlayPanel, LV_OBJ_FLAG_HIDDEN);
+
+  // Title and hints are shared by all four focuses; only their text changes.
+  overlayTitle = createLabel(overlayPanel, &lv_font_montserrat_14,
+                             m_palette->textDim, 0, OVERLAY_TITLE_Y);
+  fixLabelBox(overlayTitle, OVERLAY_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+  overlayHintLeft = createLabel(overlayPanel, &lv_font_montserrat_14,
+                                m_palette->textDim, OVERLAY_HINT_L_X,
+                                OVERLAY_HINT_Y);
+  fixLabelBox(overlayHintLeft, OVERLAY_HINT_L_W, LV_TEXT_ALIGN_LEFT);
+  overlayHintRight = createLabel(overlayPanel, &lv_font_montserrat_14,
+                                 m_palette->textDim, OVERLAY_HINT_R_X,
+                                 OVERLAY_HINT_Y);
+  fixLabelBox(overlayHintRight, OVERLAY_HINT_R_W, LV_TEXT_ALIGN_RIGHT);
+  lv_label_set_text(overlayHintRight, "OK done");
+
+  // Group A: the ticker. RATE and JOG SPEED share it -- section 4 gives them
+  // the same shape, and the only difference is which table feeds it.
+  overlayTickerGroup = createOverlayGroup(overlayPanel);
+  overlayTickerPrev = createLabel(overlayTickerGroup, &lv_font_montserrat_26,
+                                  m_palette->textDim, OVERLAY_TICK_PREV_X,
+                                  OVERLAY_TICK_SIDE_Y);
+  fixLabelBox(overlayTickerPrev, OVERLAY_TICK_SIDE_W, LV_TEXT_ALIGN_RIGHT);
+  overlayTickerNext = createLabel(overlayTickerGroup, &lv_font_montserrat_26,
+                                  m_palette->textDim, OVERLAY_TICK_NEXT_X,
+                                  OVERLAY_TICK_SIDE_Y);
+  fixLabelBox(overlayTickerNext, OVERLAY_TICK_SIDE_W, LV_TEXT_ALIGN_LEFT);
+  overlayTickerValue = createLabel(overlayTickerGroup, &lv_font_montserrat_48,
+                                   m_palette->textPrimary,
+                                   OVERLAY_TICK_VALUE_X, OVERLAY_TICK_VALUE_Y);
+  fixLabelBox(overlayTickerValue, OVERLAY_TICK_VALUE_W, LV_TEXT_ALIGN_CENTER);
+  overlayTickerUnit = createLabel(overlayTickerGroup, &lv_font_montserrat_26,
+                                  m_palette->textDim, OVERLAY_TICK_VALUE_X,
+                                  OVERLAY_TICK_UNIT_Y);
+  fixLabelBox(overlayTickerUnit, OVERLAY_TICK_VALUE_W, LV_TEXT_ALIGN_CENTER);
+
+  // Group B: MODE. Tiles first, labels after, so the labels are the later
+  // siblings and draw on top of the fills (they are siblings, not children of
+  // the tiles, which keeps every coordinate in one space).
+  overlayModeGroup = createOverlayGroup(overlayPanel);
+  for (int i = 0; i < 3; i++) {
+    overlayModeTile[i] = createRect(
+      overlayModeGroup,
+      OVERLAY_MODE_X0 + (i * (OVERLAY_MODE_TILE_W + OVERLAY_MODE_GAP)),
+      OVERLAY_MODE_TILE_Y, OVERLAY_MODE_TILE_W, OVERLAY_MODE_TILE_H,
+      m_palette->colourDisabled, RADIUS_TRACK);
+  }
+  // Same three words the status bar uses for the same three modes; FM_JOG is
+  // deliberately absent (section 3: jog is no longer a mode).
+  const char* modeNames[3] = { "FEED", "THREAD R", "THREAD L" };
+  for (int i = 0; i < 3; i++) {
+    overlayModeTileLabel[i] = createLabel(
+      overlayModeGroup, &lv_font_montserrat_14, m_palette->textDim,
+      OVERLAY_MODE_X0 + (i * (OVERLAY_MODE_TILE_W + OVERLAY_MODE_GAP)),
+      OVERLAY_MODE_LABEL_Y);
+    fixLabelBox(overlayModeTileLabel[i], OVERLAY_MODE_TILE_W,
+                LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(overlayModeTileLabel[i], modeNames[i]);
+  }
+
+  // Group C: STOPS. Same construction as band 4 -- markers and carriage are
+  // siblings of the track, not children, because they overhang it vertically
+  // and a child would be clipped to the track's height.
+  overlayStopsGroup = createOverlayGroup(overlayPanel);
+  overlayStopsTrack = createRect(overlayStopsGroup, OVERLAY_STOP_TRACK_X,
+                                 OVERLAY_STOP_TRACK_Y, OVERLAY_STOP_TRACK_W,
+                                 OVERLAY_STOP_TRACK_H,
+                                 m_palette->colourDisabled, RADIUS_TRACK);
+  overlayStopsLeftMark = createRect(overlayStopsGroup, OVERLAY_STOP_TRACK_X,
+                                    OVERLAY_STOP_MARK_Y, OVERLAY_STOP_MARK_W,
+                                    OVERLAY_STOP_MARK_H, m_palette->colourRun, 0);
+  overlayStopsRightMark = createRect(
+    overlayStopsGroup,
+    OVERLAY_STOP_TRACK_X + OVERLAY_STOP_TRACK_W - OVERLAY_STOP_MARK_W,
+    OVERLAY_STOP_MARK_Y, OVERLAY_STOP_MARK_W, OVERLAY_STOP_MARK_H,
+    m_palette->colourRun, 0);
+  overlayStopsCarriage = createRect(overlayStopsGroup, OVERLAY_STOP_TRACK_X,
+                                    OVERLAY_STOP_MARK_Y,
+                                    OVERLAY_STOP_CARRIAGE_W,
+                                    OVERLAY_STOP_MARK_H,
+                                    m_palette->textPrimary, RADIUS_TRACK);
+  lv_obj_add_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
+  overlayStopsLeftLabel = createLabel(overlayStopsGroup,
+                                      &lv_font_montserrat_14,
+                                      m_palette->textDim, OVERLAY_STOP_LEFT_X,
+                                      OVERLAY_STOP_LABEL_Y);
+  fixLabelBox(overlayStopsLeftLabel, OVERLAY_STOP_END_W, LV_TEXT_ALIGN_LEFT);
+  overlayStopsRightLabel = createLabel(overlayStopsGroup,
+                                       &lv_font_montserrat_14,
+                                       m_palette->textDim,
+                                       OVERLAY_STOP_RIGHT_X,
+                                       OVERLAY_STOP_LABEL_Y);
+  fixLabelBox(overlayStopsRightLabel, OVERLAY_STOP_END_W, LV_TEXT_ALIGN_RIGHT);
+  overlayStopsPosLabel = createLabel(overlayStopsGroup, &lv_font_montserrat_26,
+                                     m_palette->textPrimary,
+                                     OVERLAY_STOP_POS_X, OVERLAY_STOP_POS_Y);
+  fixLabelBox(overlayStopsPosLabel, OVERLAY_STOP_POS_W, LV_TEXT_ALIGN_CENTER);
 }
 
 void showWifi(const char* ssid, const char* password, IPAddress ip) {
@@ -807,6 +1355,11 @@ void Display::update() {
     drawPitch();
     drawTravel();
     drawStateBar();
+    // MUST stay after drawTravel(): the STOPS overlay renders the travel
+    // figures out of the TS_TRAVEL_* caches that drawTravel() has just
+    // refreshed, which is what guarantees the two bars agree (see
+    // drawOverlayStops()). It is also drawn last because it sits on top.
+    drawOverlay();
   }
   writeLed();
 }
@@ -931,55 +1484,22 @@ void Display::drawMode() {
 // Band 2 value + band 3 ticker.
 //
 // UNITS (docs/ux-redesign.md section 8): thread pitch reads mm metric / TPI
-// imperial; feed pitch reads mm metric / THOU imperial; jog reads %.
-//
-// The pitch tables are indexed directly here, exactly as before. It is NOT
-// legitimate to render GlobalState::getCurrentFeedPitch() instead: that returns
-// mm/rev in every mode (so imperial would show the metric equivalent) and it
-// negates for FM_THREAD_REVERSE. Note also that feedPitchImperial[] is
-// commented thou/rev but actually holds INCHES -- the `* 1000` below is what
-// makes this readout correct, and it is deliberately left in place; the array's
-// mislabelling (and getCurrentFeedPitch()'s consequent 1000x error) is tracked
-// separately and must not be "fixed" from here.
+// imperial; feed pitch reads mm metric / THOU imperial; jog reads %. All of
+// that -- which table, which unit word, which format -- now lives in
+// currentPitchTable()/formatPitch() above, because the RATE and JOG SPEED
+// overlays have to render the identical thing from the identical source. Read
+// the warning there about getCurrentFeedPitch() before touching any of it.
 void Display::drawPitch() {
-  const GlobalUnitMode unit = m_globalState->getUnitMode();
-  const GlobalFeedMode mode = m_globalState->getFeedMode();
-  const bool thread = (mode == FM_THREAD || mode == FM_THREAD_REVERSE);
-  const int feedSelect = m_globalState->getFeedSelect();
+  // Exactly what the RATE overlay renders, from the same call -- this readout
+  // and that widget are the same number and must never disagree.
+  int tickerIndex = 0;
+  const PitchTable table = tickerTable(m_globalState, false, tickerIndex);
 
   char value[TEXT_SLOT_LEN];
-  const char* unitText;
-  int tickerCount;
-  int tickerIndex;
-
-  if (mode == FM_JOG) {
-    snprintf(value, sizeof(value), "%d", (int)(m_globalState->getJogSpeed() * 100));
-    unitText = "%";
-    tickerCount = (int)ARRAY_SIZE(jogSpeeds);
-    tickerIndex = m_globalState->getJogIndex();
-  } else if (unit == METRIC) {
-    snprintf(value, sizeof(value), "%.2f",
-             (double)(thread ? threadPitchMetric[feedSelect]
-                             : feedPitchMetric[feedSelect]));
-    unitText = "mm";
-    tickerCount = thread ? (int)ARRAY_SIZE(threadPitchMetric)
-                         : (int)ARRAY_SIZE(feedPitchMetric);
-    tickerIndex = feedSelect;
-  } else if (thread) {
-    snprintf(value, sizeof(value), "%d", (int)threadPitchImperial[feedSelect]);
-    unitText = "TPI";
-    tickerCount = (int)ARRAY_SIZE(threadPitchImperial);
-    tickerIndex = feedSelect;
-  } else {
-    snprintf(value, sizeof(value), "%d",
-             (int)(feedPitchImperial[feedSelect] * 1000));
-    unitText = "thou";
-    tickerCount = (int)ARRAY_SIZE(feedPitchImperial);
-    tickerIndex = feedSelect;
-  }
+  formatPitch(value, sizeof(value), table, tickerIndex);
 
   const bool valueChanged = setLabelText(pitchLabel, TS_PITCH, value);
-  setLabelText(pitchUnitLabel, TS_PITCH_UNIT, unitText);
+  setLabelText(pitchUnitLabel, TS_PITCH_UNIT, table.unit);
   // The unit hangs off the right-hand edge of the value, so it only has to move
   // when the VALUE's width changes. Doing this unconditionally would re-position
   // (and so invalidate) it on every one of the 10 ticks a second.
@@ -991,7 +1511,7 @@ void Display::drawPitch() {
   // lv_bar_set_value/range compare before acting, so these are free when
   // nothing has changed. Range is 0..count-1 against a 0-based index.
   lv_slider_set_min_value(pitchSlider, 0);
-  lv_slider_set_max_value(pitchSlider, tickerCount > 0 ? tickerCount - 1 : 0);
+  lv_slider_set_max_value(pitchSlider, table.count > 0 ? table.count - 1 : 0);
   lv_slider_set_value(pitchSlider, tickerIndex, LV_ANIM_OFF);
 }
 
@@ -1110,28 +1630,16 @@ void Display::drawTravel() {
   }
 
   // The carriage marker needs a SPAN to sit in, and only two set stops provide
-  // one -- with a single stop (or none) there is no scale, and parking the
-  // marker anywhere would be a made-up reading. It is hidden in that case; the
-  // numeric readout still shows where the carriage is. Position increases to
-  // the right (LeadscrewDirection::RIGHT = 1), so a non-positive span means the
-  // stops are the wrong way round and is treated the same way.
+  // one; carriageFraction() owns that rule (and is shared with the STOPS
+  // overlay). It is hidden when there is no span; the numeric readout still
+  // shows where the carriage is.
   bool showCarriage = false;
   int carriageX = m_lastCarriageX;
-  if (leftSet && rightSet) {
-    const float lo = m_leadscrew->getStopPositionMM(LeadscrewStopPosition::LEFT);
-    const float hi = m_leadscrew->getStopPositionMM(LeadscrewStopPosition::RIGHT);
-    const float span = hi - lo;
-    if (span > 0.0f) {
-      float fraction = (m_leadscrew->getPositionMM() - lo) / span;
-      if (fraction < 0.0f) {
-        fraction = 0.0f;
-      } else if (fraction > 1.0f) {
-        fraction = 1.0f;
-      }
-      carriageX = TRAVEL_TRACK_X +
-        (int)(fraction * (float)(TRAVEL_TRACK_W - TRAVEL_CARRIAGE_W));
-      showCarriage = true;
-    }
+  float fraction = 0.0f;
+  if (carriageFraction(m_leadscrew, leftSet, rightSet, fraction)) {
+    carriageX = TRAVEL_TRACK_X +
+      (int)(fraction * (float)(TRAVEL_TRACK_W - TRAVEL_CARRIAGE_W));
+    showCarriage = true;
   }
   if (showCarriage && carriageX != m_lastCarriageX) {
     m_lastCarriageX = carriageX;
@@ -1197,6 +1705,242 @@ void Display::drawStateBar() {
   setLabelText(softKeyLabel[2], TS_SOFTKEY, mode == MM_ENABLED ? "STOP" : "RUN");
 
   updateLed();
+}
+
+// --- The selector overlay (docs/ux-redesign.md section 4) --------------------
+//
+// One panel for all four selector focuses, its CONTENTS swapped rather than the
+// panel rebuilt. Show/hide is LV_OBJ_FLAG_HIDDEN only -- never a delete and
+// re-create: this runs at 10 Hz, and rebuilding would both burn the frame and
+// throw away every redraw cache below.
+//
+// UiFocus::Jog hides it: the main screen IS the jog view, and section 3 has the
+// arrows driving the carriage there, so nothing should be covering the travel
+// bar while that is true.
+//
+// UiFocus::Menu deliberately draws NOTHING here and leaves the main screen up.
+// The menu carousel and its tile actions are owned by the MENU feature set, not
+// this one; ButtonPad::applyIntent() likewise no-ops the Menu* intents today.
+void Display::drawOverlay() {
+  if (overlayPanel == nullptr) {
+    return;
+  }
+  // No ButtonPad on the Wi-Fi setup path, so no focus: behave as if resting.
+  const UiFocus focus = (m_ui != nullptr) ? m_ui->focus() : UiFocus::Jog;
+
+  // Stop edits are refused outright while the carriage is under power. This is
+  // NOT a display rule -- it mirrors UiState (uistate.cpp, UiFocus::Stops:
+  // `if (ctx.motionEnabled || ctx.motionActive) return UiIntent::None`), and the
+  // same expression ButtonPad::buildContext() builds motionActive from, so the
+  // hint cannot end up advertising a gesture the machine will ignore.
+  // motionEnabled (MM_ENABLED) is a subset of motionActive, so testing the
+  // broader one alone is exactly equivalent.
+  const GlobalMotionMode motion = m_globalState->getMotionMode();
+  const bool stopsLocked = (motion != MM_DISABLED && motion != MM_UNSET);
+
+  lv_obj_t* group = nullptr;
+  const char* title = "";
+  OverlayHint hint = OH_NONE;
+  switch (focus) {
+  case UiFocus::Rate:
+    group = overlayTickerGroup;
+    title = "PITCH";
+    hint = OH_PITCH;
+    break;
+  case UiFocus::JogSpeed:
+    group = overlayTickerGroup;
+    title = "JOG SPEED";
+    hint = OH_SPEED;
+    break;
+  case UiFocus::Mode:
+    group = overlayModeGroup;
+    title = "MODE";
+    hint = OH_MODE;
+    break;
+  case UiFocus::Stops:
+    group = overlayStopsGroup;
+    title = "STOPS";
+    hint = stopsLocked ? OH_STOPS_LOCKED : OH_STOPS;
+    break;
+  case UiFocus::Jog:
+  case UiFocus::Menu:
+  default:
+    break;
+  }
+
+  // Group + title + panel visibility all change together, and only on a focus
+  // change -- lv_label_set_text() and the HIDDEN flag both invalidate
+  // unconditionally, so none of it may run per tick.
+  if ((int)focus != m_lastFocus) {
+    m_lastFocus = (int)focus;
+    lv_obj_add_flag(overlayTickerGroup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(overlayModeGroup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(overlayStopsGroup, LV_OBJ_FLAG_HIDDEN);
+    if (group != nullptr) {
+      lv_label_set_text(overlayTitle, title);
+      lv_obj_remove_flag(group, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(overlayPanel, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayPanel, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  if (group == nullptr) {
+    return;  // hidden: nothing to push, and the caches stay as they were.
+  }
+
+  // The hint is a literal picked by variant, so the variant is what is cached
+  // (see the TextSlot note in the header). It changes on focus AND, for STOPS,
+  // on the machine starting or stopping underneath a panel that is already up.
+  if ((int)hint != m_lastHintVariant) {
+    m_lastHintVariant = (int)hint;
+    lv_label_set_text(overlayHintLeft, overlayHintText(hint));
+    lv_obj_set_style_text_color(overlayHintLeft,
+                                hint == OH_STOPS_LOCKED
+                                  ? m_palette->colourCaution
+                                  : m_palette->textDim, 0);
+  }
+
+  switch (focus) {
+  case UiFocus::Rate:
+    drawOverlayTicker(false);
+    break;
+  case UiFocus::JogSpeed:
+    drawOverlayTicker(true);
+    break;
+  case UiFocus::Mode:
+    drawOverlayMode();
+    break;
+  case UiFocus::Stops:
+  default:
+    drawOverlayStops();
+    break;
+  }
+}
+
+// RATE and JOG SPEED. Same widget, different list: the current entry large in
+// the centre with its unit under it, and the entry either side of it dimmed at
+// 26 so the direction each arrow will move you in is visible before you press.
+// At the ends of the list the outer label is simply blank (formatPitch() writes
+// an empty string for an out-of-range index) rather than wrapping, because the
+// underlying next/prevFeedPitch() saturate rather than wrapping too.
+void Display::drawOverlayTicker(bool jogSpeed) {
+  int index = 0;
+  const PitchTable table = tickerTable(m_globalState, jogSpeed, index);
+
+  char buf[TEXT_SLOT_LEN];
+  formatPitch(buf, sizeof(buf), table, index - 1);
+  setLabelText(overlayTickerPrev, TS_OV_TICK_PREV, buf);
+  formatPitch(buf, sizeof(buf), table, index);
+  setLabelText(overlayTickerValue, TS_OV_TICK_VALUE, buf);
+  formatPitch(buf, sizeof(buf), table, index + 1);
+  setLabelText(overlayTickerNext, TS_OV_TICK_NEXT, buf);
+  setLabelText(overlayTickerUnit, TS_OV_TICK_UNIT, table.unit);
+}
+
+// MODE. Three tiles, the current one filled with the focus accent.
+void Display::drawOverlayMode() {
+  // Tile order matches the IncFeedMode() cycle (FEED -> THREAD ->
+  // THREAD_REVERSE -> FEED), so the arrows move the fill along the row.
+  const GlobalFeedMode mode = m_globalState->getFeedMode();
+  int tile;
+  switch (mode) {
+  case FM_THREAD:
+    tile = 1;
+    break;
+  case FM_THREAD_REVERSE:
+    tile = 2;
+    break;
+  case FM_FEED:
+    tile = 0;
+    break;
+  default:
+    // FM_JOG has no tile: jog stopped being a mode in section 3. Nothing is
+    // filled rather than something being filled wrongly.
+    tile = -1;
+    break;
+  }
+
+  if (tile == m_lastModeTile) {
+    return;
+  }
+  m_lastModeTile = tile;
+  for (int i = 0; i < 3; i++) {
+    const bool selected = (i == tile);
+    lv_obj_set_style_bg_color(overlayModeTile[i],
+                              selected ? m_palette->accent
+                                       : m_palette->colourDisabled, 0);
+    // The accent is a pale blue, so the selected tile takes the high-emphasis
+    // ink; the unselected ones stay dim on their grey.
+    lv_obj_set_style_text_color(overlayModeTileLabel[i],
+                                selected ? m_palette->textPrimary
+                                         : m_palette->textDim, 0);
+  }
+}
+
+// STOPS. The band-4 travel bar again, at the panel's full width.
+//
+// The three readouts are taken from the TS_TRAVEL_* caches rather than
+// recomputed: drawTravel() has already refreshed them THIS tick (update()
+// calls it immediately before drawOverlay(), and says so), so the values are
+// current, and reusing them means the overlay cannot disagree with the bar
+// underneath it about a stop position or a datum. Recomputing would mean
+// duplicating the whole lib/dro datum resolution here, which is exactly the
+// kind of second opinion the datum rules must not have.
+void Display::drawOverlayStops() {
+  const bool leftSet = m_leadscrew->getStopPositionState(
+                         LeadscrewStopPosition::LEFT) == LeadscrewStopState::SET;
+  const bool rightSet = m_leadscrew->getStopPositionState(
+                          LeadscrewStopPosition::RIGHT) == LeadscrewStopState::SET;
+
+  setLabelText(overlayStopsLeftLabel, TS_OV_STOP_LEFT,
+               m_textCache[TS_TRAVEL_LEFT]);
+  setLabelText(overlayStopsRightLabel, TS_OV_STOP_RIGHT,
+               m_textCache[TS_TRAVEL_RIGHT]);
+  // Value and unit are one label here (the panel has room), so they are joined
+  // rather than positioned relative to each other as band 4 does.
+  char pos[TEXT_SLOT_LEN];
+  snprintf(pos, sizeof(pos), "%s %s", m_textCache[TS_TRAVEL_POS],
+           m_textCache[TS_TRAVEL_UNIT]);
+  setLabelText(overlayStopsPosLabel, TS_OV_STOP_POS, pos);
+
+  if (leftSet != m_lastOverlayLeftStopSet) {
+    m_lastOverlayLeftStopSet = leftSet;
+    if (leftSet) {
+      lv_obj_remove_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayStopsLeftMark, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (rightSet != m_lastOverlayRightStopSet) {
+    m_lastOverlayRightStopSet = rightSet;
+    if (rightSet) {
+      lv_obj_remove_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayStopsRightMark, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  bool showCarriage = false;
+  int carriageX = m_lastOverlayCarriageX;
+  float fraction = 0.0f;
+  if (carriageFraction(m_leadscrew, leftSet, rightSet, fraction)) {
+    carriageX = OVERLAY_STOP_TRACK_X +
+      (int)(fraction * (float)(OVERLAY_STOP_TRACK_W - OVERLAY_STOP_CARRIAGE_W));
+    showCarriage = true;
+  }
+  if (showCarriage && carriageX != m_lastOverlayCarriageX) {
+    m_lastOverlayCarriageX = carriageX;
+    lv_obj_set_pos(overlayStopsCarriage, carriageX, OVERLAY_STOP_MARK_Y);
+  }
+  if (showCarriage != m_lastOverlayCarriageShown) {
+    m_lastOverlayCarriageShown = showCarriage;
+    if (showCarriage) {
+      lv_obj_remove_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(overlayStopsCarriage, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void Display::writeLed() {

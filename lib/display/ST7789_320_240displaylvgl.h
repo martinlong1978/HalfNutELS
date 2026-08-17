@@ -3,6 +3,11 @@
 #include <globalstate.h>
 #include <leadscrew.h>
 #include <spindle.h>
+// The focus model (lib/ui). Read-only here: the display renders whichever
+// selector overlay UiState says has focus, it never drives it. ButtonPad owns
+// the UiState value and BOTH run on the DisplayTask (main.cpp), so this is a
+// same-task read and needs no volatile / GlobalState round trip.
+#include <uistate.h>
 
 
 #include <lvgl.h>
@@ -43,6 +48,10 @@ private:
   Spindle* m_spindle;
   Leadscrew* m_leadscrew;
   GlobalState* m_globalState;
+  // Focus state, owned by ButtonPad (main.cpp constructs it first and passes
+  // &keyPad->ui() here). nullptr on the Wi-Fi-setup path, where no ButtonPad
+  // exists -- every overlay path must tolerate that.
+  const UiState* m_ui;
   const DisplayPalette* m_palette;  // selected in the constructor (see .cpp);
                                      // re-pointed at runtime only by setTheme().
 #ifdef ELS_UI_ENCODER
@@ -91,6 +100,47 @@ private:
 
   lv_obj_t* bandRule[4];      // the four band separators
 
+  // --- Selector overlay (docs/ux-redesign.md section 4) ----------------------
+  // ONE panel, built once in init() alongside the main screen and left hidden.
+  // Its three content groups are swapped by drawOverlay() as focus moves; the
+  // panel is never rebuilt or deleted (a rebuild at 10 Hz would be wasteful and
+  // would defeat the redraw caches below). It is created LAST so it sits on top
+  // of the main screen in the sibling z-order, and it is opaque, so whatever it
+  // covers simply is not visible -- LV_DRAW_LAYER_SIMPLE_BUF_SIZE is 24 KB and a
+  // translucent panel this size needs ~84 KB (section 8).
+  //
+  // UiFocus::Menu deliberately renders NOTHING here (the main screen stays
+  // visible): the menu carousel and its tile actions are owned by the menu
+  // feature set, not this one.
+  lv_obj_t* overlayPanel;      // the solid ground + accent border
+  lv_obj_t* overlayTitle;      // PITCH / JOG SPEED / MODE / STOPS
+  lv_obj_t* overlayHintLeft;   // what the arrows do
+  lv_obj_t* overlayHintRight;  // "OK done"
+
+  // Group A -- the horizontal ticker, shared by Rate and JogSpeed (section 4
+  // gives them the same shape: value large, neighbours dimmed either side).
+  lv_obj_t* overlayTickerGroup;
+  lv_obj_t* overlayTickerPrev;   // neighbour below the current value (26, dim)
+  lv_obj_t* overlayTickerValue;  // current value (48)
+  lv_obj_t* overlayTickerNext;   // neighbour above (26, dim)
+  lv_obj_t* overlayTickerUnit;   // mm / TPI / thou / %
+
+  // Group B -- MODE, three tiles in a row; the current one is filled accent.
+  lv_obj_t* overlayModeGroup;
+  lv_obj_t* overlayModeTile[3];
+  lv_obj_t* overlayModeTileLabel[3];
+
+  // Group C -- STOPS, the travel bar again (full width of the panel) with both
+  // markers and the live carriage.
+  lv_obj_t* overlayStopsGroup;
+  lv_obj_t* overlayStopsTrack;
+  lv_obj_t* overlayStopsLeftMark;
+  lv_obj_t* overlayStopsRightMark;
+  lv_obj_t* overlayStopsCarriage;
+  lv_obj_t* overlayStopsLeftLabel;
+  lv_obj_t* overlayStopsRightLabel;
+  lv_obj_t* overlayStopsPosLabel;
+
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
   lv_obj_t* updateLabel;
@@ -104,7 +154,17 @@ private:
   enum TextSlot {
     TS_MODE, TS_UNIT, TS_RPM, TS_PITCH, TS_PITCH_UNIT,
     TS_TRAVEL_POS, TS_TRAVEL_UNIT, TS_TRAVEL_LEFT, TS_TRAVEL_RIGHT,
-    TS_STATE, TS_SOFTKEY, TS_COUNT
+    TS_STATE, TS_SOFTKEY,
+    // Overlay slots. The title and the two hints are NOT here: every string
+    // they can hold is a compile-time literal, so drawOverlay() caches the
+    // VARIANT (m_lastFocus / m_lastHintVariant) and pushes the literal only
+    // when that changes. Cheaper than a strcmp, and it sidesteps the
+    // TEXT_SLOT_LEN cap -- a cached string longer than 19 bytes would be
+    // truncated by setLabelText() and then never compare equal again, which
+    // silently turns the cache into a per-tick repaint.
+    TS_OV_TICK_PREV, TS_OV_TICK_VALUE, TS_OV_TICK_NEXT, TS_OV_TICK_UNIT,
+    TS_OV_STOP_LEFT, TS_OV_STOP_RIGHT, TS_OV_STOP_POS,
+    TS_COUNT
   };
   // Plain enum constant, not a `static const size_t`: an in-class static const
   // still needs an out-of-line definition if it is ever ODR-used (passed by
@@ -123,6 +183,18 @@ private:
   bool m_lastLeftStopSet;
   bool m_lastRightStopSet;
 
+  // Overlay caches. Separate from the band-4 ones above because they drive
+  // separate objects (the panel keeps its own markers/carriage), and because
+  // the overlay is not drawn at all while it is hidden -- so these must not be
+  // disturbed by the main screen's per-tick updates.
+  int m_lastFocus;                // last UiFocus rendered (-1 = nothing yet)
+  int m_lastHintVariant;          // last OverlayHint pushed into the hint row
+  int m_lastModeTile;             // last mode tile filled with the accent
+  bool m_lastOverlayLeftStopSet;
+  bool m_lastOverlayRightStopSet;
+  int m_lastOverlayCarriageX;
+  bool m_lastOverlayCarriageShown;
+
   void initDisplay();
   void initialiseOta();
   void resetObjectTree();   // null every object pointer + clear the caches
@@ -133,7 +205,9 @@ private:
 public:
   // Definitions in .cpp: both need PALETTE_DARK/PALETTE_LIGHT (static, defined
   // there) to pick the initial m_palette, so they can no longer be inline here.
-  Display(Spindle* spindle, Leadscrew* leadscrew);
+  // `ui` may be nullptr (and always is on the Wi-Fi-setup path); the overlay
+  // then never opens.
+  Display(Spindle* spindle, Leadscrew* leadscrew, const UiState* ui);
   Display();
 
   void init();
@@ -152,6 +226,11 @@ protected:
   void drawPitch();       // band 2 value + band 3 ticker
   void drawTravel();      // band 4
   void drawStateBar();    // band 5
+  void drawOverlay();     // the selector overlay, on top of bands 2-4
+  // Called by drawOverlay() only, once the panel is known to be visible.
+  void drawOverlayTicker(bool jogSpeed);
+  void drawOverlayMode();
+  void drawOverlayStops();
   void updateLed();
   void writeLed();
   void drawOTA();
