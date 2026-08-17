@@ -21,6 +21,7 @@
 // pre-C++17 as well.
 const unsigned long UiState::kFocusTimeoutMs;
 const int UiState::kMenuItemCount;
+const unsigned long UiState::kStopsConfirmMs;
 
 namespace {
 
@@ -33,6 +34,20 @@ inline int arrowDir(UiKey key) { return key == UiKey::Left ? -1 : +1; }
 inline bool isWidgetFocus(UiFocus f) {
   return f == UiFocus::JogSpeed || f == UiFocus::Rate || f == UiFocus::Mode ||
          f == UiFocus::Stops;
+}
+
+// One detent of the rotary encoder, either way.
+inline bool isEncoder(UiKey k) {
+  return k == UiKey::EncoderCw || k == UiKey::EncoderCcw;
+}
+
+// No stop may be edited while the carriage is under power - §4's rule, in one
+// place so the per-arrow edits and the clear-both gesture can never drift
+// apart. See the long note in the Stops arrow branch for why BOTH flags are
+// needed: motionEnabled alone misses the powered run to a stop, during which
+// clearing the stop being travelled towards deletes that run's only arrest.
+inline bool stopEditsInhibited(const UiContext& ctx) {
+  return ctx.motionEnabled || ctx.motionActive;
 }
 
 // --- The powered-run latch, m_runPhase ------------------------------------
@@ -75,7 +90,9 @@ UiState::UiState()
       m_menuIndex(0),
       m_lastActivityMs(0),
       m_runPhase(RunPhase::None),
-      m_jogDir(0) {}
+      m_jogDir(0),
+      m_stopsConfirming(false),
+      m_stopsPressMs(0) {}
 
 UiFocus UiState::focus() const { return m_focus; }
 
@@ -88,6 +105,16 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // Any key event - even an inert one - counts as activity and restarts the
   // idle clock (§1).
   m_lastActivityMs = nowMs;
+
+  // Any event on any OTHER key ends an in-progress clear-both confirm. The
+  // matrix reports one key at a time, so this should not normally happen - but
+  // it is also the self-healing path for a STOPS Release that KeyArray drops
+  // (the debounce and one-second-rescan holes documented in buttonpad.cpp), and
+  // without it a dropped Release would leave the bar pinned full on screen for
+  // ever. Above HALT deliberately, since HALT returns early.
+  if (key != UiKey::Stops) {
+    m_stopsConfirming = false;
+  }
 
   // -------------------------------------------------------------------------
   // HALT: checked before focus, before overlays, before anything (§5).
@@ -175,6 +202,128 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
+  // ENABLE: first press dismisses, second engages (§5, refined).
+  //
+  // §5 says only "ENABLE toggles MM_ENABLED <-> MM_DECELLERATE, exactly as
+  // today", and that is still what the toggle DOES - ButtonPad's ToggleEngage
+  // arm is the old enableHandler() verbatim. What changed is when the toggle is
+  // reached: engaging is a commitment to start cutting, and it must not happen
+  // while the operator's attention is still inside a picker. So with a widget or
+  // the menu up, ENABLE is a dismiss and nothing else; you come back to the rest
+  // screen, see the state chip, and press it again deliberately.
+  //
+  // Note the asymmetry this creates and why it is acceptable: DISengaging also
+  // costs the extra press. That is not a safety hole, because it is not the only
+  // way to stop - HALT is unconditional, works from every focus, and is the key
+  // §5 makes "always live" precisely so that stopping never depends on where the
+  // UI happens to be. ENABLE is the deliberate one; HALT is the reflex.
+  //
+  // Click only. Press/Release would double-fire the toggle across one tap, and
+  // the old handler in ButtonPad already acted on BS_CLICKED alone.
+  //
+  // Deliberately BELOW the run-phase reconciliation, so a dismiss still cleans
+  // up a run that finished while the widget was open, and ABOVE the menu branch,
+  // which swallows every key it does not recognise.
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Enable) {
+    if (ev != UiKeyEvent::Click) {
+      return UiIntent::None;
+    }
+    if (m_menuOpen || isWidgetFocus(m_focus)) {
+      m_menuOpen = false;
+      m_focus = UiFocus::Jog;
+      return UiIntent::None;  // dismiss only - does NOT engage
+    }
+    return UiIntent::ToggleEngage;
+  }
+
+  // -------------------------------------------------------------------------
+  // The rotary encoder. One detent = one discrete step of whatever the current
+  // focus owns, with two deliberate departures from what the arrows do:
+  //
+  //   Focus       Encoder
+  //   Jog         PITCH        <- NOT what the arrows do here (they jog). The
+  //                               knob fills the gap, so pitch is adjustable
+  //                               from the rest screen without pressing RATE.
+  //   Rate        pitch
+  //   JogSpeed    jog speed
+  //   Mode        mode
+  //   Menu        move between tiles
+  //   Stops       INERT        <- the second departure, and the important one.
+  //
+  // STOPS is inert BY DESIGN, not by omission. A knob is far easier to nudge
+  // than a key is to press - a sleeve, a chip, a knock on the panel - and every
+  // gesture in the STOPS widget either destroys a position the operator spent
+  // time finding or plants one in a place they never saw. §4 already answers
+  // this for the keys by making a click set and only a hold clear; there is no
+  // equivalent of "hold" on a knob, so the answer here is that the knob does
+  // not touch stops at all. Setting an endstop stays a deliberate keypress.
+  //
+  // The encoder never commands the carriage, so §3's arrow inhibit has no
+  // direct analogue - but it inherits the inhibit its focus already imposes on
+  // the arrows, focus by focus, which is what keeps the two consistent:
+  //   * Jog focus + MM_ENABLED: inert, because the arrows are inert there.
+  //     This is the one that matters. At the rest screen the knob steps the
+  //     PITCH, and a stray nudge mid-cut would rewrite the pitch of the thread
+  //     being cut. Wanting to change pitch while engaged is a real thing to
+  //     want, and it is still possible - press RATE first, which is a
+  //     deliberate act, and matches the arrows exactly (see below).
+  //   * Rate / Mode / JogSpeed: live while engaged, because the arrows are
+  //     (UiStateSelectors.SelectorsStillWorkWhileMotionEnabled pins that
+  //     changing pitch or mode mid-cut must stay possible).
+  //   * Stops: inert always, which is a superset of the arrows' inhibit there.
+  //   * Menu: no motion inhibit on movement between tiles, same as the arrows;
+  //     menuTileBlock() gates what OK may then activate.
+  // -------------------------------------------------------------------------
+  if (isEncoder(key)) {
+    if (ev != UiKeyEvent::Click) {
+      return UiIntent::None;  // one Click per detent; nothing else means a turn
+    }
+    const bool ccw = (key == UiKey::EncoderCcw);
+
+    if (m_menuOpen) {
+      // Saturating, exactly like the arrows in the menu branch below - the
+      // carousel does not wrap, and a blocked move returns None so the caller
+      // can still treat any non-None result as "redraw".
+      if (ccw) {
+        if (m_menuIndex <= 0) {
+          return UiIntent::None;
+        }
+        --m_menuIndex;
+        return UiIntent::MenuPrev;
+      }
+      if (m_menuIndex >= kMenuItemCount - 1) {
+        return UiIntent::None;
+      }
+      ++m_menuIndex;
+      return UiIntent::MenuNext;
+    }
+
+    switch (m_focus) {
+      case UiFocus::Stops:
+        return UiIntent::None;  // inert - see the note above
+      case UiFocus::JogSpeed:
+        return ccw ? UiIntent::JogSpeedPrev : UiIntent::JogSpeedNext;
+      case UiFocus::Mode:
+        return ccw ? UiIntent::ModePrev : UiIntent::ModeNext;
+      case UiFocus::Jog:
+        // The rest screen: the knob is the pitch control. Inherits the arrows'
+        // §3 inhibit for this focus.
+        if (ctx.motionEnabled) {
+          return UiIntent::None;
+        }
+        return ccw ? UiIntent::PitchPrev : UiIntent::PitchNext;
+      case UiFocus::Rate:
+        return ccw ? UiIntent::PitchPrev : UiIntent::PitchNext;
+      case UiFocus::Menu:
+        // Unreachable: Menu focus and m_menuOpen move together, and the
+        // m_menuOpen branch above already returned.
+        return UiIntent::None;
+    }
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
   // MENU: top level, so it opens over any widget and closes from anywhere (§6).
   // Acts on Click only - the Press and Release of the same tap would otherwise
   // toggle the menu straight back shut.
@@ -230,13 +379,80 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // repeat of the same selector is a no-op that merely restarts the idle timer
   // (§1 lists the leave conditions as OK / HALT / idle - not the key itself).
   // -------------------------------------------------------------------------
-  if (key == UiKey::Mode || key == UiKey::Rate || key == UiKey::Stops) {
+  if (key == UiKey::Mode || key == UiKey::Rate) {
     if (ev != UiKeyEvent::Click) {
       return UiIntent::None;
     }
-    m_focus = (key == UiKey::Mode)   ? UiFocus::Mode
-              : (key == UiKey::Rate) ? UiFocus::Rate
-                                     : UiFocus::Stops;
+    m_focus = (key == UiKey::Mode) ? UiFocus::Mode : UiFocus::Rate;
+    return UiIntent::None;
+  }
+
+  // -------------------------------------------------------------------------
+  // STOPS is a selector like MODE and RATE on a Click, but it is also the only
+  // selector with a gesture of its own: held, it clears BOTH stops behind a one
+  // second confirm bar (§4).
+  //
+  // There is no second timer here, and there must not be one. KeyArray's hold
+  // timer is already one second (src/keyarray.cpp:58), so the Hold event IS the
+  // one-second gesture - it arrives exactly when the bar should be full. All
+  // this branch adds is the press bookkeeping the bar is drawn from.
+  //
+  // Why clear-both needs the confirm bar when the single-stop clear does not:
+  // the per-arrow clear takes one stop and leaves the other, so the helix
+  // re-anchors onto the survivor and the setup is recoverable. Clearing both
+  // leaves nothing to re-anchor onto - syncPositionState goes UNSET and the
+  // thread can never be picked up again for a second cut - so the whole setup
+  // is gone, and the operator gets a second of visible progress in which to let
+  // go instead.
+  // -------------------------------------------------------------------------
+  if (key == UiKey::Stops) {
+    if (ev == UiKeyEvent::Press) {
+      // Arm the confirm bar - but ONLY if this hold could actually succeed, so
+      // the bar never fills for a gesture the machine is going to refuse (§4
+      // calls that out for the STOPS hint; menuTileBlock() makes the same
+      // point for the menu). Three preconditions, all re-checked on the Hold:
+      //   * focus is already on the STOPS widget. Holding STOPS from the rest
+      //     screen must not clear anything: the Click that would have moved
+      //     focus never arrives after a Hold, so this is a genuine two-gesture
+      //     action - tap STOPS to open the widget, then hold it.
+      //   * the carriage is at rest. Same gate as every other stop edit.
+      //   * there is at least one stop to clear.
+      m_stopsConfirming = (m_focus == UiFocus::Stops &&
+                           !stopEditsInhibited(ctx) &&
+                           (ctx.leftStopSet || ctx.rightStopSet));
+      m_stopsPressMs = nowMs;
+      return UiIntent::None;
+    }
+
+    if (ev == UiKeyEvent::Hold) {
+      const bool armed = m_stopsConfirming;
+      m_stopsConfirming = false;  // consumed either way; the bar is done
+      if (!armed) {
+        return UiIntent::None;
+      }
+      // Re-check against the FRESH context, not the one the Press saw. A whole
+      // second has passed, and the machine can have been started in it - by the
+      // web UI, by a spindle-driven feed, by anything. This is the gate that
+      // actually matters; the one on the Press only decides whether to draw.
+      if (stopEditsInhibited(ctx)) {
+        return UiIntent::None;
+      }
+      if (!ctx.leftStopSet && !ctx.rightStopSet) {
+        return UiIntent::None;
+      }
+      return UiIntent::ClearBothStops;
+    }
+
+    if (ev == UiKeyEvent::Release) {
+      // Let go before the hold fired: cancel, cleanly and with no intent. This
+      // is the escape hatch the confirm bar exists to offer.
+      m_stopsConfirming = false;
+      return UiIntent::None;
+    }
+
+    // Click: the ordinary selector behaviour. (The Release that follows it has
+    // already cleared m_stopsConfirming above, in event order.)
+    m_focus = UiFocus::Stops;
     return UiIntent::None;
   }
 
@@ -330,7 +546,7 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       // INT32_MIN, so the run does not overshoot, it never terminates.
       // motionActive is the broader signal - engaged feed, powered run,
       // interactive jog, deceleration - and gates the edits the same way.
-      if (ctx.motionEnabled || ctx.motionActive) {
+      if (stopEditsInhibited(ctx)) {
         return UiIntent::None;  // display says "stop the carriage to edit stops"
       }
 
@@ -415,6 +631,25 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     return (dir < 0) ? UiIntent::JogLeftStart : UiIntent::JogRightStart;
   }
   return UiIntent::None;
+}
+
+int UiState::stopsConfirmPermille(unsigned long nowMs) const {
+  if (!m_stopsConfirming) {
+    return 0;
+  }
+  // Unsigned subtraction, so a millis() rollover between the press and the poll
+  // yields the correct small elapsed time rather than a huge one - the same
+  // trick tick() relies on.
+  const unsigned long elapsed = nowMs - m_stopsPressMs;
+  // Saturate BEFORE multiplying. On the device unsigned long is 32 bits, and if
+  // the Release is ever dropped (see the KeyArray hazards in buttonpad.cpp) this
+  // can be asked with a very large elapsed; `elapsed * 1000` would then wrap and
+  // the bar would appear to restart. Saturating also covers the ordinary case
+  // where the Hold event has not yet been drained by the 100 ms display loop.
+  if (elapsed >= kStopsConfirmMs) {
+    return 1000;
+  }
+  return (int)((elapsed * 1000UL) / kStopsConfirmMs);
 }
 
 bool UiState::tick(unsigned long nowMs) {

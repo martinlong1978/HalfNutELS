@@ -42,7 +42,8 @@ class ButtonPad {
   // roll back when a save is refused.
 
   // Matrix code (ELS_*_BUTTON, lib/config/board.h) -> UiKey. Returns false for
-  // 0 / unknown codes and for ENABLE, which is not part of the focus model.
+  // 0 / unknown codes. ENABLE maps like every other key now: UiState decides
+  // whether it dismisses an open widget or toggles the leadscrew.
   static bool codeToKey(int code, UiKey &key);
 
   // KeyArray ButtonState -> UiKeyEvent. Returns false for states UiState has no
@@ -59,9 +60,10 @@ class ButtonPad {
   // enum in lib/ui/uistate.h, shared with the carousel that renders it.
   void activateMenuTile();
 
-  // ENABLE sits outside the focus model (it is machine state, not a focus
-  // target), so it is handled here rather than by UiState.
-  void enableHandler(ButtonInfo press);
+  // The MM_ENABLED <-> MM_DECELLERATE swap behind UiIntent::ToggleEngage. Pure
+  // execution: whether ENABLE toggles at all, or merely dismisses whatever is
+  // on screen, is decided in UiState so it can be host-tested.
+  void enableHandler();
 
  public:
   ButtonPad(Spindle *spindle, Leadscrew *leadscrew, KeyArray *pad);

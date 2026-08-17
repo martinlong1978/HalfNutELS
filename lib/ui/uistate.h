@@ -18,10 +18,30 @@
 // The field the arrows currently drive. Rests on Jog and returns there.
 enum class UiFocus { Jog, JogSpeed, Rate, Mode, Stops, Menu };
 
-// The eight physical keys of the Mk2 panel (ENABLE is handled outside the focus
-// model - it is machine state, not a focus target, so it has no entry here
-// beyond the panel itself).
-enum class UiKey { Mode, Rate, Stops, Left, Ok, Right, Halt, Menu };
+// The nine physical keys of the Mk2 panel, plus the two synthetic keys the
+// rotary encoder produces.
+//
+// ENABLE is IN the focus model, not beside it. It used to be handled in
+// src/buttonpad.cpp ahead of this translation, but §5's "toggle MM_ENABLED" is
+// only half of what the key does: engaging is a commitment to cut, and it must
+// not happen while the operator's attention is still inside a picker. That
+// "first press dismisses, second engages" decision is exactly the kind of thing
+// that has to be host-testable, so it lives here and ButtonPad only executes
+// the resulting UiIntent::ToggleEngage.
+//
+// EncoderCw / EncoderCcw are one detent of the rotary encoder, clockwise and
+// anticlockwise. They are keys and not a separate API on purpose: the encoder
+// used to reach past the focus model entirely and drive the pitch directly out
+// of src/keyarray.cpp, so turning it inside any widget silently stepped the
+// pitch behind the operator's back. Routing it through handleKey() means it
+// obeys focus, the idle timeout and the motion inhibits like everything else.
+// src/buttonpad.cpp delivers exactly one Click per detent (no Press/Release -
+// a detent is instantaneous, there is nothing to hold), and every other event
+// on these two keys is inert.
+enum class UiKey {
+  Mode, Rate, Stops, Left, Ok, Right, Halt, Menu, Enable,
+  EncoderCw, EncoderCcw
+};
 
 enum class UiKeyEvent { Press, Release, Click, Hold };
 
@@ -36,9 +56,11 @@ enum class UiIntent {
   ModeNext, ModePrev,
   SetLeftStop, ClearLeftStop,
   SetRightStop, ClearRightStop,
+  ClearBothStops,
   ZeroDro,
   MenuNext, MenuPrev, MenuActivate,
   CloseMenu,
+  ToggleEngage,
 };
 
 // Machine state the decision depends on. Supplied fresh by the caller on every
@@ -80,9 +102,43 @@ class UiState {
   // fired and focus changed, so the caller can use it as a redraw trigger.
   bool tick(unsigned long nowMs);
 
+  // How far through the "hold STOPS to clear BOTH stops" gesture we are, in
+  // permille: 0 at the instant of the press, 1000 when the hold fires (§4,
+  // "STOPS hold - clear both, after a 1 s confirm bar"). 0 whenever the gesture
+  // is not running.
+  //
+  // OWNER: the display feature set (lib/display) - it is the only caller. This
+  // class provides the number and renders nothing; drawing the bar over the
+  // STOPS widget belongs to whoever owns that overlay.
+  //
+  // Why a permille poll and not an "armed" flag plus a start time: the display
+  // redraws on its own 100 ms cadence with no key event to hang off, so it needs
+  // to be able to ask "how full is the bar NOW" at an arbitrary moment. Handing
+  // out the raw press timestamp would export a member that only means anything
+  // in combination with the gesture's own preconditions (focus, motion state,
+  // whether any stop exists at all), and the display would then have to re-derive
+  // those - a second copy of the rule, which is exactly the drift §4 and the
+  // menuTileBlock() note below both warn about. An integer fraction keeps the
+  // decision here: a non-zero return means "this hold is live and WILL clear
+  // both stops if it completes", so the bar can never fill for a gesture the
+  // machine is going to refuse.
+  //
+  // NOT a timer. The gesture's one second is KeyArray's existing hold timer
+  // (src/keyarray.cpp:58, `timerAlarmWrite(Timer0_Cfg, 1000000, true)`), which
+  // is what delivers the Hold that actually fires the intent. This is only the
+  // fill fraction for the same second, so the two cannot disagree about when
+  // the hold completes - see kStopsConfirmMs.
+  int stopsConfirmPermille(unsigned long nowMs) const;
+
   // Focus falls back to Jog after this long with no key events (§1). Menu focus
   // is exempt - the menu leaves only on MENU or HALT.
   static const unsigned long kFocusTimeoutMs = 4000;
+
+  // The length of the clear-both confirm bar. This MIRRORS KeyArray's hold
+  // timer (src/keyarray.cpp:58) - it does not define the gesture, it only says
+  // how fast the bar fills so that it reaches full exactly as the Hold arrives.
+  // If that timer ever changes, change this with it.
+  static const unsigned long kStopsConfirmMs = 1000;
 
   // Number of menu tiles (docs/ux-redesign.md §6: Units, Theme, DRO datum, Jog
   // speed, Sync, Software update, Setup/Wi-Fi, Diagnostics, About). menuIndex()
@@ -110,6 +166,16 @@ class UiState {
   RunPhase m_runPhase;
   // Direction of an in-flight hold-to-jog: -1 left, +1 right, 0 none.
   int m_jogDir;
+
+  // The clear-both confirm gesture (§4). m_stopsConfirming is true only while a
+  // STOPS press is physically down AND that press could still succeed - it is
+  // set on the Press only when focus is already on the STOPS widget, the
+  // carriage is at rest and there is at least one stop to clear. m_stopsPressMs
+  // is the timestamp of that Press and is meaningless while m_stopsConfirming
+  // is false. Both are cleared by the Release, by the Hold that consumes them,
+  // by HALT, and by any event on any other key.
+  bool m_stopsConfirming;
+  unsigned long m_stopsPressMs;
 };
 
 // --- The menu tiles (docs/ux-redesign.md section 6, "MENU") ----------------

@@ -77,8 +77,12 @@ bool ButtonPad::codeToKey(int code, UiKey& key) {
   case ELS_RIGHT_BUTTON: key = UiKey::Right; return true;
   case ELS_HALT_BUTTON:  key = UiKey::Halt;  return true;
   case ELS_MENU_BUTTON:  key = UiKey::Menu;  return true;
-  // ELS_ENABLE_BUTTON is intentionally absent: ENABLE is machine state, not a
-  // focus target, and is handled by enableHandler() before we get here.
+  // ENABLE is now part of the focus model rather than being intercepted ahead
+  // of it. It still does exactly what it did - the ToggleEngage arm of
+  // applyIntent() is the old enableHandler() body verbatim - but WHETHER it
+  // toggles is now UiState's decision (dismiss first, engage second), which is
+  // a decision that has to be host-testable.
+  case ELS_ENABLE_BUTTON: key = UiKey::Enable; return true;
   default: return false;
   }
 }
@@ -131,11 +135,6 @@ void ButtonPad::handle() {
       break;
     }
 
-    if (press.button == ELS_ENABLE_BUTTON) {
-      enableHandler(press);
-      continue;
-    }
-
     UiKey key;
     UiKeyEvent ev;
     if (!codeToKey(press.button, key) || !stateToEvent(press.buttonState, ev)) {
@@ -143,6 +142,33 @@ void ButtonPad::handle() {
     }
 
     applyIntent(m_ui.handleKey(key, ev, buildContext(), now));
+  }
+
+  // The rotary encoder, fed through the identical path. KeyArray no longer acts
+  // on it at all (it used to call GlobalState::next/prevFeedPitch() directly,
+  // which is how the knob stepped the pitch from inside a widget); it just
+  // counts detents, and each one becomes one UiKey::EncoderCw/Ccw Click.
+  //
+  // A Click and nothing else: a detent is instantaneous, so there is no Press
+  // to pair a Release with and nothing to hold. This is not the forbidden kind
+  // of synthesis - the HAZARD note below warns against inventing a Release for
+  // a key that is still physically down, and a detent asserts nothing about any
+  // key's physical state.
+  //
+  // One handleKey per detent rather than a single stepped-by-N call, so a spin
+  // saturates at the ends of the pitch table exactly as repeated key presses
+  // would, and so each step is gated by a fresh context. The loop is bounded:
+  // consumeEncoderDelta() clamps what one pass can return.
+  int detents = m_pad->consumeEncoderDelta();
+  while (detents > 0) {
+    applyIntent(m_ui.handleKey(UiKey::EncoderCw, UiKeyEvent::Click,
+                               buildContext(), now));
+    detents--;
+  }
+  while (detents < 0) {
+    applyIntent(m_ui.handleKey(UiKey::EncoderCcw, UiKeyEvent::Click,
+                               buildContext(), now));
+    detents++;
   }
 
   // Must run every pass, not only when a key arrived: this is what expires the
@@ -277,6 +303,27 @@ void ButtonPad::applyIntent(UiIntent intent) {
     break;
   case UiIntent::ClearRightStop:
     m_leadscrew->unsetStopPosition(LeadscrewStopPosition::RIGHT);
+    break;
+
+  case UiIntent::ClearBothStops:
+    // STOPS held for a second inside the STOPS widget (Sec. 4). UiState has
+    // already applied the same at-rest gate as every other stop edit, checked
+    // it a second time against a fresh context when the hold fired, and made
+    // sure at least one stop existed to clear.
+    //
+    // Two calls, not a bulk API: unsetStopPosition() is where the helix
+    // re-anchor lives (LeadscrewStopSync::unsetStop, leadscrew.cpp:56-96) and
+    // it must run for each stop. Clearing LEFT first re-anchors onto RIGHT, and
+    // clearing RIGHT then leaves syncPositionState UNSET with no anchor at all
+    // - which is the correct end state for "no stops", and precisely why this
+    // gesture is the one with a confirm bar in front of it.
+    m_leadscrew->unsetStopPosition(LeadscrewStopPosition::LEFT);
+    m_leadscrew->unsetStopPosition(LeadscrewStopPosition::RIGHT);
+    break;
+
+  // --- ENABLE (Sec. 5) -----------------------------------------------------
+  case UiIntent::ToggleEngage:
+    enableHandler();
     break;
 
   // --- Not yet implemented -------------------------------------------------
@@ -506,20 +553,27 @@ void ButtonPad::activateMenuTile() {
   }
 }
 
-void ButtonPad::enableHandler(ButtonInfo press) {
-  // Unchanged from the Mk1 panel apart from the lock check: ENABLE toggles
-  // MM_ENABLED <-> MM_DECELLERATE (Sec. 5). Deliberately outside UiState - it
-  // is machine state, not a focus target, so it neither reads nor moves focus.
+void ButtonPad::enableHandler() {
+  // The toggle itself: MM_ENABLED <-> MM_DECELLERATE (Sec. 5). Byte for byte
+  // what this method has always done, minus the BS_CLICKED test - that has
+  // moved, unchanged in meaning, into UiState, which only emits ToggleEngage on
+  // a Click. Everything else is preserved deliberately:
+  //   * motionMode is read ONCE, up front, and both `if`s test that snapshot,
+  //     so a single press can never transition twice.
+  //   * any other mode (MM_DECELLERATE, MM_JOG_*, MM_INTERACTIVE_JOG_*,
+  //     MM_UNSET) is a no-op. ENABLE does not interrupt a powered run or a jog;
+  //     HALT does.
+  // What is NEW is the decision about whether to get here at all - with a
+  // widget or the menu open, UiState returns None and closes it instead (first
+  // press dismisses, second engages).
   GlobalState* globalState = GlobalState::getInstance();
   GlobalMotionMode motionMode = globalState->getMotionMode();
 
-  if (press.buttonState == BS_CLICKED) {
-    if (motionMode == GlobalMotionMode::MM_ENABLED) {
-      globalState->setMotionMode(GlobalMotionMode::MM_DECELLERATE);
-    }
-    if (motionMode == GlobalMotionMode::MM_DISABLED) {
-      globalState->setMotionMode(GlobalMotionMode::MM_ENABLED);
-    }
+  if (motionMode == GlobalMotionMode::MM_ENABLED) {
+    globalState->setMotionMode(GlobalMotionMode::MM_DECELLERATE);
+  }
+  if (motionMode == GlobalMotionMode::MM_DISABLED) {
+    globalState->setMotionMode(GlobalMotionMode::MM_ENABLED);
   }
 }
 
