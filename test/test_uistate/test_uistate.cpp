@@ -280,6 +280,81 @@ TEST(UiStateJog, ArrowsInhibitedWhileMotionEnabled) {
   }
 }
 
+TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenIfTheStopAppeared) {
+  // Regression: a dead-man jog is only safe if letting go ALWAYS stops it.
+  // If a stop becomes set between the Press and the Release, the Release must
+  // still emit JogStop - otherwise the release falls into the click-to-run
+  // branch (where Press/Release are inert), m_jogDir is stranded, and the
+  // carriage keeps moving with no JogStop ever emitted.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
+  // And the jog is genuinely over: a fresh Press starts a new one.
+  EXPECT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+}
+
+TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenIfMotionBecameEnabled) {
+  // Same hazard via the other early return: the §3 MM_ENABLED inhibit must not
+  // swallow the Release that ends a jog already in flight.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogRightStart, r.key(UiKey::Right, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Right, UiKeyEvent::Release, ctx(false, false, true)));
+}
+
+TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenFromAnotherFocus) {
+  // Focus cannot normally change mid-jog (the matrix scans one key at a time),
+  // but if it did, the widget branch would swallow the Release. The terminator
+  // sits above every focus test precisely so that cannot happen.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  r.click(UiKey::Rate);
+  ASSERT_EQ(UiFocus::Rate, r.focus());
+  EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Left, UiKeyEvent::Release, kNoStops));
+  EXPECT_EQ(UiFocus::Rate, r.focus()) << "stopping the jog must not steal focus";
+}
+
+TEST(UiStateJog, ReleaseAlwaysStopsAnInFlightJogEvenWithTheMenuOpen) {
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  r.click(UiKey::Menu);
+  ASSERT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Left, UiKeyEvent::Release, kNoStops));
+  EXPECT_TRUE(r.ui().menuOpen()) << "stopping the jog must not close the menu";
+}
+
+TEST(UiStateJog, OppositeArrowReleaseAlsoStopsAnInFlightJog) {
+  // Decision: the terminator is NOT direction-matched. A stray release of the
+  // other arrow should not be able to leave the carriage running; erring
+  // towards "stop" costs a shortened jog, erring the other way costs a crash.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::JogStop, r.key(UiKey::Right, UiKeyEvent::Release, kNoStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kNoStops))
+      << "the jog is already stopped; a second release must not re-fire";
+}
+
+TEST(UiStateJog, ArrowReleaseWithNoJogInFlightIsInert) {
+  // The other direction of the same contract: the terminator must fire ONLY
+  // when a jog is actually running, or it would emit JogStop on the release of
+  // every click-to-run tap and abort the run that tap just started.
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kNoStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, UiKeyEvent::Release, kBothStops));
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.key(UiKey::Left, UiKeyEvent::Click, kLeftOnly));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
+}
+
+TEST(UiStateJog, HaltStillOutranksTheJogTerminator) {
+  // HALT is above the terminator in the ladder, so a HALT release stays inert
+  // and a HALT during a jog still reports CancelMotion, not JogStop.
+  Rig r;
+  ASSERT_EQ(UiIntent::JogLeftStart, r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt, kNoStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kNoStops))
+      << "HALT already cleared the jog; the release must not re-fire";
+}
+
 TEST(UiStateJog, ArrowsDoNotChangeFocus) {
   Rig r;
   r.click(UiKey::Left, kLeftOnly);
@@ -516,6 +591,115 @@ TEST(UiStateStops, EachArrowOnlySeesItsOwnStop) {
   EXPECT_EQ(UiIntent::SetRightStop, r.click(UiKey::Right, kLeftOnly));
 }
 
+// ---------------------------------------------------------------------------
+// No stop edits while the leadscrew is engaged.
+//
+// Decision (review of FS-D): the §3 MM_ENABLED inhibit covers STOPS as well as
+// JOG. One rule, both arrows, both directions - you must disengage to change a
+// stop.
+//
+// Clearing is the dangerous half: `hitLeftEndstop()` is the ONLY thing that
+// arrests an MM_ENABLED feed (leadscrew.cpp:239-240) and it is false whenever
+// the stop is UNSET, so clearing the stop you are cutting towards deletes the
+// arrest and the carriage feeds into the chuck. Clearing the far stop instead
+// re-anchors the helix through LeadscrewStopSync::unsetStop, shifting the
+// thread phase mid-cut - or losing the anchor entirely if no stop survives.
+//
+// Setting is unsafe differently: setting the stop you are feeding into slams
+// the feed to MM_DISABLED mid-thread, setting the far one silently latches the
+// spindle sync anchor, and neither can capture the position the operator
+// actually saw, because DisplayTask sleeps 100 ms between polls.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateStops, ClickDoesNotSetAStopWhileMotionEnabled) {
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    Rig r;
+    UiContext c = ctx(false, false, /*motionEnabled=*/true);
+    r.click(UiKey::Stops, c);
+    ASSERT_EQ(UiFocus::Stops, r.focus());
+    EXPECT_EQ(UiIntent::None, r.click(k, c))
+        << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
+  }
+}
+
+TEST(UiStateStops, HoldDoesNotClearAStopWhileMotionEnabled) {
+  // The one that would run the carriage into the chuck.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  for (UiKey k : arrows) {
+    Rig r;
+    UiContext c = ctx(true, true, /*motionEnabled=*/true);
+    r.click(UiKey::Stops, c);
+    ASSERT_EQ(UiFocus::Stops, r.focus());
+    EXPECT_EQ(UiIntent::None, r.hold(k, c))
+        << "arrow=" << (k == UiKey::Left ? "Left" : "Right");
+  }
+}
+
+TEST(UiStateStops, NoStopEditIsPossibleWhileMotionEnabled) {
+  // Exhaustive: every arrow, every event, every stop state, engaged.
+  const UiKey arrows[] = {UiKey::Left, UiKey::Right};
+  const UiKeyEvent events[] = {UiKeyEvent::Press, UiKeyEvent::Release,
+                               UiKeyEvent::Click, UiKeyEvent::Hold};
+  const bool stopStates[] = {false, true};
+  for (UiKey k : arrows) {
+    for (bool ls : stopStates) {
+      for (bool rs : stopStates) {
+        for (UiKeyEvent ev : events) {
+          Rig r;
+          UiContext c = ctx(ls, rs, /*motionEnabled=*/true);
+          r.click(UiKey::Stops, c);
+          ASSERT_EQ(UiFocus::Stops, r.focus());
+          EXPECT_EQ(UiIntent::None, r.key(k, ev, c))
+              << "arrow=" << (k == UiKey::Left ? "Left" : "Right")
+              << " event=" << ev << " left=" << ls << " right=" << rs;
+        }
+      }
+    }
+  }
+}
+
+TEST(UiStateStops, TheInhibitLiftsWhenDisengaged) {
+  // The other direction of the contract: the inhibit is about MM_ENABLED and
+  // nothing else, so the identical gestures work once disengaged. Without this
+  // the tests above would pass on a state machine that had simply broken STOPS.
+  const UiContext engaged = ctx(false, false, true);
+  const UiContext engagedSet = ctx(true, true, true);
+
+  Rig setL;
+  setL.click(UiKey::Stops, engaged);
+  ASSERT_EQ(UiIntent::None, setL.click(UiKey::Left, engaged));
+  EXPECT_EQ(UiIntent::SetLeftStop, setL.click(UiKey::Left, kNoStops));
+
+  Rig setR;
+  setR.click(UiKey::Stops, engaged);
+  ASSERT_EQ(UiIntent::None, setR.click(UiKey::Right, engaged));
+  EXPECT_EQ(UiIntent::SetRightStop, setR.click(UiKey::Right, kNoStops));
+
+  Rig clearL;
+  clearL.click(UiKey::Stops, engagedSet);
+  ASSERT_EQ(UiIntent::None, clearL.hold(UiKey::Left, engagedSet));
+  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.hold(UiKey::Left, kBothStops));
+
+  Rig clearR;
+  clearR.click(UiKey::Stops, engagedSet);
+  ASSERT_EQ(UiIntent::None, clearR.hold(UiKey::Right, engagedSet));
+  EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, kBothStops));
+}
+
+TEST(UiStateStops, TheStopsWidgetStillOpensWhileMotionEnabled) {
+  // Only the edits are inhibited, not the view: the travel bar with both stops
+  // and the live carriage position (§4) is exactly what you want on screen
+  // mid-cut. The widget must still take focus and still time out normally.
+  Rig r;
+  UiContext c = ctx(true, true, /*motionEnabled=*/true);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+  r.advance(kTimeout);
+  EXPECT_TRUE(r.tick());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
 // ===========================================================================
 // 6. HALT is always live and outranks everything (spec §5)
 // ===========================================================================
@@ -665,6 +849,48 @@ TEST(UiStateTimeout, PoweredRunIsNotCancelledByTheTimeout) {
   r.advance(kTimeout * 2);
   EXPECT_FALSE(r.tick()) << "focus was already Jog, so nothing changed";
   EXPECT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, kLeftOnly));
+}
+
+TEST(UiStateTimeout, AnInertKeyEventAlsoResetsTheTimeout) {
+  // The header says "Any key event resets the focus idle timeout" - including
+  // events that produce no intent. Only AKeyEventResetsTheTimeout's acting
+  // Click was pinned; this covers the inert half.
+  Rig r;
+  r.click(UiKey::Mode);
+  r.advance(kTimeout - 1);
+  EXPECT_FALSE(r.tick());
+  // Press is inert inside a widget (it produces no intent) but is still
+  // activity.
+  ASSERT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Press));
+  r.advance(kTimeout - 1);
+  EXPECT_FALSE(r.tick()) << "an inert event must still restart the clock";
+  EXPECT_EQ(UiFocus::Mode, r.focus());
+  r.advance(1);
+  EXPECT_TRUE(r.tick());
+}
+
+TEST(UiStateTimeout, SurvivesMillisRollover) {
+  // nowMs is millis(), which wraps at ~49.7 days. The comparison must be the
+  // unsigned-difference form; `m_lastActivityMs + kFocusTimeoutMs <= nowMs`
+  // would overflow across the wrap and either fire ~49 days early or never.
+  const unsigned long kNearMax = ~0UL - (kTimeout / 2);
+  UiState ui;
+  UiContext c = ctx(false, false);
+
+  // Key event just before the wrap...
+  ASSERT_EQ(UiIntent::None, ui.handleKey(UiKey::Mode, UiKeyEvent::Press, c, kNearMax));
+  ASSERT_EQ(UiIntent::None, ui.handleKey(UiKey::Mode, UiKeyEvent::Click, c, kNearMax));
+  ASSERT_EQ(UiFocus::Mode, ui.focus());
+
+  // ...still inside the window one tick before the deadline, having wrapped.
+  const unsigned long justBefore = kNearMax + kTimeout - 1;  // wraps
+  ASSERT_LT(justBefore, kNearMax) << "the test clock must actually have wrapped";
+  EXPECT_FALSE(ui.tick(justBefore));
+  EXPECT_EQ(UiFocus::Mode, ui.focus());
+
+  // ...and fires at exactly kFocusTimeoutMs across the wrap.
+  EXPECT_TRUE(ui.tick(kNearMax + kTimeout));
+  EXPECT_EQ(UiFocus::Jog, ui.focus());
 }
 
 // ===========================================================================

@@ -75,6 +75,29 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
+  // Dead-man jog terminator, second only to HALT.
+  //
+  // A hold-to-jog is only safe if letting go ALWAYS stops it. That has to be
+  // true no matter what changed between the Press and the Release - focus, an
+  // open menu, a stop appearing, the leadscrew being engaged - because every
+  // one of those would otherwise hit an early `return None` further down and
+  // leave m_jogDir set with the carriage still moving and no JogStop ever
+  // emitted. So the release of EITHER arrow ends an in-flight jog, and it does
+  // so before any other consideration.
+  //
+  // Not direction-matched on purpose. The matrix scan reports one key at a
+  // time, so a release of the opposite arrow mid-jog should not occur; if a
+  // malformed event stream produces one anyway, stopping is the safe reading.
+  // Erring towards "stop" can at worst cut a jog short; erring the other way
+  // runs the carriage into the chuck.
+  // -------------------------------------------------------------------------
+  if ((key == UiKey::Left || key == UiKey::Right) &&
+      ev == UiKeyEvent::Release && m_jogDir != 0) {
+    m_jogDir = 0;
+    return UiIntent::JogStop;
+  }
+
+  // -------------------------------------------------------------------------
   // MENU: top level, so it opens over any widget and closes from anywhere (§6).
   // Acts on Click only - the Press and Release of the same tap would otherwise
   // toggle the menu straight back shut.
@@ -192,6 +215,37 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       return left ? UiIntent::ModePrev : UiIntent::ModeNext;
 
     case UiFocus::Stops: {
+      // No stop edits while the leadscrew is engaged - ONE rule, both
+      // directions, both arrows. You must disengage to change a stop.
+      //
+      // Clearing is the dangerous half. `hitLeftEndstop()` is
+      // `leftStopState == SET && pos <= leftStopPosition`
+      // (leadscrew_stopsync.h:98), and that predicate is the ONLY thing that
+      // arrests an MM_ENABLED feed (leadscrew.cpp:239-240). Clear the stop you
+      // are cutting towards and the arrest is not delayed, it is deleted: the
+      // carriage feeds into the chuck. Clearing the OTHER stop is quieter but
+      // still destructive - LeadscrewStopSync::unsetStop (leadscrew.cpp:56-96)
+      // re-anchors the helix onto the survivor through a truncating
+      // `(int)(delta / ratio)`, so it silently shifts the thread phase for the
+      // next pass; and if no stop survives, syncPositionState goes UNSET, the
+      // anchor is gone, and the thread can never be re-synced for a second cut.
+      //
+      // Setting is unsafe for different reasons. Setting the stop you are
+      // feeding into makes hitEndstop() true on the very next update, so the
+      // feed slams to MM_DISABLED mid-thread with the tool still in the cut.
+      // Setting the far stop instead latches the spindle sync anchor
+      // (setStop(), leadscrew.cpp:104-108) and redefines the thread datum.
+      // And it cannot mean what it says regardless: DisplayTask sleeps 100 ms
+      // (main.cpp:75), so "here" is up to a tenth of a second stale - metres
+      // per minute of carriage travel - and a stop in the wrong place is worse
+      // than no stop, because the operator will trust it on the next pass.
+      //
+      // No workflow in the spec needs it: §4's gestures and §6's Sync tile are
+      // all at-rest operations. The cost of the rule is one press of ENABLE.
+      if (ctx.motionEnabled) {
+        return UiIntent::None;  // display says "disengage to change stops"
+      }
+
       // The deliberate asymmetry of §4: setting a stop is cheap to undo,
       // clearing one loses a position you may have spent time finding. So a
       // click only ever SETS, and only a hold CLEARS. Each arrow sees its own
@@ -259,16 +313,13 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // No stop on this side: dead-man jog, bounded by the physical gesture.
   // "Continuous jog while held" is Press/Release - the Click and Hold that
   // arrive in between are redundant and must be inert.
+  //
+  // Only the Press is handled here. Release is owned by the unconditional
+  // terminator at the top of handleKey, which has already run: reaching this
+  // point with a Release means m_jogDir was 0, i.e. no jog to stop.
   if (ev == UiKeyEvent::Press) {
     m_jogDir = dir;
     return (dir < 0) ? UiIntent::JogLeftStart : UiIntent::JogRightStart;
-  }
-  if (ev == UiKeyEvent::Release) {
-    if (m_jogDir != dir) {
-      return UiIntent::None;  // not the arrow that started this jog
-    }
-    m_jogDir = 0;
-    return UiIntent::JogStop;
   }
   return UiIntent::None;
 }
