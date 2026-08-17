@@ -93,6 +93,35 @@ void setFeedMode(Rig& r, GlobalFeedMode want) {
   }
 }
 
+// spin() plus the SpindleTask's other half: run Leadscrew::update() every
+// virtual-clock step, exactly as test/test_thread_sync drives a cut. This is
+// what makes the Diagnostics screen's numbers REAL -- expected position,
+// position error, pulse output and the leadscrew's own velocity estimate all
+// only move inside update(). Push the current pitch first, the way ButtonPad
+// does after a rate/mode change (the Leadscrew only reads it at construction).
+void spinDriven(Rig& r, float rpm, int ms) {
+  r.ls->setTargetPitchMM(r.gs->getCurrentFeedPitch());
+  const int ppr = r.derived->spindleEncoderPpr();
+  const float pps = -(rpm / 60.0f) * (float)ppr;
+  // 10 us, not spin()'s 100: the leadscrew's velocity estimate is the
+  // reciprocal of ONE inter-pulse gap, so the clock step quantises it -- at
+  // 100 us a ~600 us true period reads up to ~20% fast, which put a fake
+  // mismatch in the Diagnostics CARRIAGE column. 10 us keeps it under ~2%.
+  const uint64_t dt = 10;  // us per step
+  const int steps = (int)((uint64_t)ms * 1000ULL / dt);
+  float carry = 0.0f;
+  for (int i = 0; i < steps; i++) {
+    advanceMockMicros(dt);
+    carry += pps * ((float)dt / 1000000.0f);
+    const int whole = (int)carry;
+    if (whole != 0) {
+      carry -= (float)whole;
+      r.spindle->incrementCurrentPosition(whole);
+    }
+    r.ls->update();
+  }
+}
+
 int pulsesForMM(Rig& r, float mm) {
   return (int)(mm * r.derived->leadscrewStepsPerMm());
 }
@@ -327,6 +356,73 @@ void sc_menuAbout(Rig& r) {  // the far end of the ring: blank right neighbour
   openMenuAt(r, MENU_ABOUT);
 }
 
+// --- The three menu destinations (UiFocus::DroDatum / Diagnostics / About) --
+// All reached the only legitimate way: menu open, arrows to the tile, OK --
+// which exercises menuTileDestination() and the carousel-close in the same
+// image. See ctxOf(): the tile is live because the carriage is at rest.
+
+void sc_overlayDatum(Rig& r) {
+  baseState(r);
+  spin(r, 850, 200);
+  openMenuAt(r, MENU_DRO_DATUM);
+  key(r, UiKey::Ok, UiKeyEvent::Click);  // activate -> UiFocus::DroDatum
+}
+
+// Motion starting UNDER an already-open datum picker (a web-UI engage, a run
+// finishing late): the arrows go dead in UiState, and the hint row must swap
+// to the amber "moving - datum locked" chip rather than keep offering them.
+// The picker itself was opened at rest -- menuTileBlock() would have refused
+// the tile under power, which is why the motion is set afterwards.
+void sc_overlayDatumLocked(Rig& r) {
+  baseState(r);
+  spin(r, 320, 200);
+  openMenuAt(r, MENU_DRO_DATUM);
+  key(r, UiKey::Ok, UiKeyEvent::Click);
+  r.gs->setMotionMode(MM_ENABLED);
+}
+
+// Diagnostics mid-cut, with the leadscrew genuinely driven (spinDriven) so
+// every number on the screen is the machine's own: a live sub-pip position
+// error, a real carriage velocity beside its expectation, SYNCED chip.
+void sc_diagnostics(Rig& r) {
+  baseState(r);
+  setFeedMode(r, FM_THREAD);
+  spinDriven(r, 0, 5);  // settle expected==current while still disabled
+                        // (this also publishes SS_UNSYNC, so SYNC comes after)
+  r.gs->setThreadSyncState(SS_SYNC);
+  r.gs->setMotionMode(MM_ENABLED);
+  // Long enough for the acceleration planner's catch-up margin to settle, so
+  // CARRIAGE is read at ratio speed rather than mid-overshoot.
+  spinDriven(r, 320, 900);
+  openMenuAt(r, MENU_DIAGNOSTICS);
+  key(r, UiKey::Ok, UiKeyEvent::Click);
+}
+
+// Diagnostics with UGLY values: the axis is commanded but update() never runs
+// (a wedged SpindleTask, the fault this screen exists to catch), so the
+// expected position is stranded 12.4 mm from the carriage. The error bar must
+// peg at full deflection in colourFault, the 48 must show a large negative
+// number, and CARRIAGE 0.00 must sit beside a non-zero EXPECT.
+void sc_diagnosticsError(Rig& r) {
+  baseState(r);
+  setFeedMode(r, FM_THREAD);
+  r.gs->setThreadSyncState(SS_UNSYNC);
+  r.gs->setMotionMode(MM_ENABLED);
+  spin(r, 850, 300);  // spindle turns; the leadscrew never updates
+  openMenuAt(r, MENU_DIAGNOSTICS);
+  key(r, UiKey::Ok, UiKeyEvent::Click);
+}
+
+void sc_about(Rig& r) {
+  baseState(r);
+  spin(r, 850, 200);
+  // 3 h 24 m of virtual uptime, so the formatter's h/m branch is on screen.
+  advanceMockMicros((uint64_t)(3 * 3600 + 24 * 60) * 1000000ULL);
+  r.display->hostSetAboutNetwork(IPAddress(192, 168, 1, 123), true);
+  openMenuAt(r, MENU_ABOUT);
+  key(r, UiKey::Ok, UiKeyEvent::Click);
+}
+
 void sc_otaDownloading(Rig& r) {
   baseState(r);
   r.gs->setOTA();
@@ -377,6 +473,12 @@ const SceneDef kScenes[] = {
   { "menu-sync-blocked",      sc_menuSyncBlocked,     THEME_DARK,  false, 0 },
   { "menu-update-blocked",    sc_menuUpdateBlocked,   THEME_DARK,  false, 0 },
   { "menu-about",             sc_menuAbout,           THEME_DARK,  false, 0 },
+  // The three menu destinations.
+  { "overlay-datum",          sc_overlayDatum,        THEME_DARK,  false, 0 },
+  { "overlay-datum-locked",   sc_overlayDatumLocked,  THEME_DARK,  false, 0 },
+  { "diagnostics",            sc_diagnostics,         THEME_DARK,  false, 0 },
+  { "diagnostics-error",      sc_diagnosticsError,    THEME_DARK,  false, 0 },
+  { "about",                  sc_about,               THEME_DARK,  false, 0 },
   // Light palette. Same two states as their dark counterparts above, so the
   // pair is directly comparable.
   { "light-rest-metric-feed", sc_restMetricFeed,      THEME_LIGHT, false, 0 },

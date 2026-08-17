@@ -92,8 +92,16 @@ private:
   lv_obj_t* pitchUnitLabel;  // mm / TPI / thou / % (Montserrat 26)
   lv_obj_t* feedSymbolObj;   // 128x64 mode glyph
 
-  // Band 3, pitch ticker (y 125..145)
-  lv_obj_t* pitchSlider;
+  // Band 3, the pitch pip row. NOT a slider: the pitch list is a discrete set
+  // of values, so the band shows one pip per entry -- current tall + accent,
+  // its neighbours mid-height + textDim, the rest short + colourDisabled --
+  // rather than a continuous track that misreads as a second travel bar.
+  // PIP_MAX rects are built once in init(); drawPitch() positions the first
+  // `count` of them (the table length varies by mode/unit: the four pitch
+  // tables hold 20, jogSpeeds holds 6) and hides the surplus. Reflow happens
+  // only when the COUNT changes, restyle only when the INDEX changes.
+  enum { PIP_MAX = 20 };
+  lv_obj_t* pitchPips[PIP_MAX];
 
   // Band 4, carriage travel -- the small DRO (y 147..191)
   lv_obj_t* travelTrack;      // the full-width track
@@ -167,6 +175,45 @@ private:
   lv_obj_t* overlayMenuTile[3];      // 0 = prev, 1 = current, 2 = next
   lv_obj_t* overlayMenuTileLabel[3];
 
+  // Group E -- DRO DATUM (docs/ux-redesign.md section 8, "The DRO datum"): a
+  // two-choice picker on the same tile grammar as MODE, so the two read as one
+  // family. Selection renders the PERSISTED datum -- m_droDatum is the single
+  // source of truth (the arrows apply live through setDroDatum(); UiState holds
+  // no pending copy). Each tile carries a miniature travel bar with a zero-post
+  // at its end of travel, because the travel-bar metaphor is already
+  // established on the rest screen and "which end reads 0" is exactly what the
+  // setting decides. Bar and post are CHILDREN of their tile (index 0 = LEFT,
+  // 1 = RIGHT), so the selection restyle recolours them with the tile.
+  lv_obj_t* overlayDatumGroup;
+  lv_obj_t* overlayDatumTile[2];
+  lv_obj_t* overlayDatumTileLabel[2];
+  lv_obj_t* overlayDatumBar[2];   // the mini travel track inside each tile
+  lv_obj_t* overlayDatumZero[2];  // the zero-post at that tile's end of travel
+
+  // --- Diagnostics, a full read-only SCREEN (UiFocus::Diagnostics) -----------
+  // Not an overlay: it exists to be WATCHED while the machine runs (no idle
+  // timeout -- see the ruling on the UiFocus enum in uistate.h), so it takes
+  // the whole panel and is built as an instrument: position error dominant
+  // with a centre-zero deflection bar under it, spindle / carriage / expected
+  // rates in three columns so a ratio problem reads as a mismatch, and the
+  // helix sync state as a chip. Static labels (titles, units, hints) are
+  // created in init() without members; only the mutated objects live here.
+  lv_obj_t* diagPanel;        // full-screen opaque ground; hidden at rest
+  lv_obj_t* diagErrValue;     // position error in mm (48)
+  lv_obj_t* diagErrPulses;    // the same error in raw pulses (14)
+  lv_obj_t* diagErrMarker;    // deflection marker on the centre-zero bar
+  lv_obj_t* diagSpindleValue; // spindle RPM (26)
+  lv_obj_t* diagCarriageValue;// measured carriage mm/s (26)
+  lv_obj_t* diagExpectValue;  // RPM x pitch expectation, "--" unless engaged
+  lv_obj_t* diagSyncChip;     // SYNCED / NOT SYNCED, status-bar chip grammar
+
+  // --- About, a full read-only screen (UiFocus::About) -----------------------
+  // Quiet and plain. The IP is the big thing (36): it is the one value someone
+  // stands at the machine to copy. Version is static text set once in init().
+  lv_obj_t* aboutPanel;
+  lv_obj_t* aboutIpValue;
+  lv_obj_t* aboutUptimeValue;
+
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
   lv_obj_t* updateLabel;
@@ -196,6 +243,14 @@ private:
     // into the cache, never compare equal again, and silently repaint at 10 Hz
     // forever; menuTileName() says so at its definition.
     TS_OV_MENU_POS, TS_OV_MENU_NAME, TS_OV_MENU_PREV, TS_OV_MENU_NEXT,
+    // Diagnostics. Every string is short and bounded by its formatter (the
+    // error clamps to +-999.99 mm / +-99999 p before formatting, the rates are
+    // %.2f / %d), so nothing here can approach the TEXT_SLOT_LEN cap.
+    TS_DIAG_ERR, TS_DIAG_ERR_P, TS_DIAG_RPM, TS_DIAG_CARRIAGE, TS_DIAG_EXPECT,
+    TS_DIAG_SYNC,
+    // About. Longest possible IP is "255.255.255.255" -- 15 bytes, inside the
+    // cap; the uptime formats are at most 8 bytes ("999d 23h").
+    TS_ABOUT_IP, TS_ABOUT_UPTIME,
     TS_COUNT
   };
   // Plain enum constant, not a `static const size_t`: an in-class static const
@@ -239,6 +294,30 @@ private:
   // must describe the tree it gates.
   bool m_lastMenuPrevShown;
   bool m_lastMenuNextShown;
+  // Pitch pip row (band 3). Count gates the reflow (positions + surplus
+  // hiding), index gates the restyle; a count change forces the restyle too by
+  // resetting the index cache, because the reflow re-homes every pip.
+  int m_lastPipCount;
+  int m_lastPipIndex;
+  // DRO datum picker: the selected tile last styled (-1 = not styled yet, so
+  // the first draw after a rebuild always paints the selection).
+  int m_lastDatumTile;
+  // Diagnostics caches. Marker x is a position (like m_lastCarriageX); pegged
+  // is the off-scale state that turns the marker colourFault; sync mirrors
+  // m_lastSyncState for the diag chip.
+  int m_lastDiagErrX;
+  bool m_lastDiagErrPegged;
+  int m_lastDiagSyncState;
+  // About: -1 = never drawn, else 0/1 connected state driving the IP colour.
+  int m_lastAboutConnected;
+
+  // About-screen network state on HOST builds only. The device reads
+  // WiFi.localIP()/WiFi.status() directly in drawAbout() (guarded include in
+  // the .cpp); the host has no WiFi, so the test/screenshot harness injects
+  // the address instead. Members exist on both builds (CLAUDE.md: constructors
+  // must initialise all members) but the device path never reads them.
+  IPAddress m_aboutIp;
+  bool m_aboutConnected;
 
   void initDisplay();
   void initialiseOta();
@@ -267,6 +346,15 @@ public:
   void setDroDatum(DroDatumPreference datum);
   void showWifi(const char * ssid, const char * password, IPAddress ip);
   void showConnected(IPAddress ip);
+#if PIO_UNIT_TESTING
+  // Host harness only (tests / the screenshot renderer): inject what the About
+  // screen should report, since there is no WiFi to ask. Compiled out on the
+  // device, where drawAbout() asks WiFi directly.
+  void hostSetAboutNetwork(IPAddress ip, bool connected) {
+    m_aboutIp = ip;
+    m_aboutConnected = connected;
+  }
+#endif
 
 protected:
   void initvars();
@@ -281,6 +369,13 @@ protected:
   void drawOverlayTicker(bool jogSpeed);
   void drawOverlayMode();
   void drawOverlayStops();
+  // The DRO datum picker (group E). Renders m_droDatum as the selection.
+  void drawOverlayDatum();
+  // The two full read-only screens. Routed through drawOverlay()'s focus
+  // switch like the widgets, but they live on their own full-screen panels
+  // (diagPanel / aboutPanel), not on overlayPanel.
+  void drawDiagnostics();
+  void drawAbout();
   // Takes the two machine facts rather than a per-tile verdict: the carousel
   // shows THREE tiles and has to state the availability of each, and running
   // them all through the one menuTileBlock() is what keeps the card, the two

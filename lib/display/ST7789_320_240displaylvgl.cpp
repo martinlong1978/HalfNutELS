@@ -4,9 +4,19 @@
 #include <ST7789_320_240displaylvgl.h>
 #include <globalstate.h>
 #include <dro.h>
+#include <version.h>  // FIRMWARE_VERSION, shown on the About screen
+
+#if !PIO_UNIT_TESTING
+// The About screen reads the station IP straight from WiFi (there is no other
+// runtime holder of it). Device build only: host builds (tests / screenshot
+// renderer) have no WiFi and inject the address via hostSetAboutNetwork()
+// instead -- same guard convention as leadscrew.h.
+#include <WiFi.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>  // fabsf, for the Diagnostics EXPECT column
 
 // --- Runtime colour palette --------------------------------------------------
 //
@@ -160,19 +170,22 @@ static const DisplayPalette PALETTE_LIGHT = {
 //       | THREAD R   mm   SYNC            1250 RPM |  status bar
 //    34 +------------------------------------------+
 //       |  1.25 mm                        [glyph]  |  primary readout
-//   124 +------------------------------------------+
-//       |  . . . . # . . . . . . . .               |  pitch ticker
-//   146 +------------------------------------------+
+//   122 +------------------------------------------+
+//       |  . . . . I . . . . . . . .               |  pitch pips (discrete)
+//   150 +------------------------------------------+
 //       | |--o---------------|                       |
 //       | L 0.00        12.40 mm             48.00 R |  carriage travel
-//   196 +------------------------------------------+
-//       |  [ CUTTING ]                             |  state chip (36)
+//   205 +------------------------------------------+
+//       |  [ CUTTING ]                             |  state chip (26)
 //   240 +------------------------------------------+
 //
 // The soft-key hint row that band 5 used to carry is GONE: the physical caps
-// are properly labelled, so mirroring them wasted the band. Its height went to
-// the state word (26 -> 36, chip-filled) and to band 4, the most information-
-// dense band on the screen (taller track and markers).
+// are properly labelled, so mirroring them wasted the band. Band 3 is a row of
+// discrete PIPS, not a slider: the pitch list is a discrete set of ~20 values,
+// and a continuous track both misrepresented the control and read as a twin of
+// the band-4 travel bar directly below it. The state word is 26 (owner: 36 was
+// slightly too big), and the height that freed went into bands 3/4 as air so
+// the pip row and the travel bar read as two instruments, not one stack.
 //
 // Every y below is derived from those boundaries plus the ACTUAL Montserrat
 // metrics (line_height / base_line from lvgl's lv_font_montserrat_*.c):
@@ -189,9 +202,9 @@ static const int SCREEN_W = 320;
 static const int SCREEN_H = 240;
 
 static const int BAND_STATUS_BOTTOM = 34;
-static const int BAND_PITCH_BOTTOM = 124;
-static const int BAND_TICKER_BOTTOM = 146;
-static const int BAND_TRAVEL_BOTTOM = 196;
+static const int BAND_PITCH_BOTTOM = 122;
+static const int BAND_TICKER_BOTTOM = 150;
+static const int BAND_TRAVEL_BOTTOM = 205;
 
 // Band 1 -- status bar, 0..33 (h 34).
 // 26 centred: (34-29)/2 = 2. 14 centred: (34-16)/2 = 9.
@@ -213,39 +226,49 @@ static const int STATUS_RPM_VALUE_W = 80;   // "9999" @26 = 64px -> ink from 202
 static const int STATUS_RPM_UNIT_X = 272;   // "RPM" @14 = 34px -> 306
 static const int STATUS_RPM_UNIT_Y = 13;
 
-// Band 2 -- primary readout, 35..123 (h 89).
-// 48 centred: 35 + (89-52)/2 = 53. Glyph centred: 35 + (89-64)/2 = 47.
+// Band 2 -- primary readout, 35..121 (h 87).
+// 48 centred: 35 + (87-52)/2 = 52. Glyph centred: 35 + (87-64)/2 = 46.
 static const int PITCH_VALUE_X = 10;
-static const int PITCH_VALUE_Y = 53;
+static const int PITCH_VALUE_Y = 52;
 static const int PITCH_UNIT_GAP = 8;
 // lv_obj_align_to(OUT_RIGHT_BOTTOM) bottom-aligns the two boxes: that puts the
 // 26 at y = 53 + (52-29) = 76, baseline 100, against the 48's baseline 96. The
 // -4 offset pulls it back onto the same baseline.
 static const int PITCH_UNIT_BASELINE_FIX = -4;
 static const int MODE_GLYPH_X = 188;  // 128 wide -> 188..315
-static const int MODE_GLYPH_Y = 47;   // 64 tall  -> 47..110
+static const int MODE_GLYPH_Y = 46;   // 64 tall  -> 46..109
 
-// Band 3 -- pitch ticker, 125..145 (h 21). 8px track centred: 125+(21-8)/2 = 131.
-static const int TICKER_X = 12;
-static const int TICKER_Y = 131;
-static const int TICKER_W = 296;
-static const int TICKER_H = 8;
-static const int TICKER_KNOB_PAD = 3;  // -> a 14x14 marker, 128..141
+// Band 3 -- the pitch pip row, 123..149 (h 27). One pip per entry of the
+// current pitch list, all bottom-aligned on a common baseline like a ruler:
+// the current entry is the tall accent pip, its immediate neighbours are
+// mid-height textDim, the rest are short colourDisabled ticks. Discrete pips,
+// not a slider: the list is a discrete set, and the old continuous track read
+// as a second travel bar. The row's usable width matches the travel track so
+// the two bands stay column-aligned.
+// Baseline at 144: tall pip 128..144 (5px clear of each band edge).
+static const int PIP_ROW_X = 12;
+static const int PIP_ROW_W = 296;      // 12..307, same as the travel track
+static const int PIP_BASE_Y = 144;     // common bottom edge of every pip
+static const int PIP_W = 4;
+static const int PIP_H_CURRENT = 16;   // accent
+static const int PIP_H_NEIGHBOUR = 10; // textDim
+static const int PIP_H_OTHER = 6;      // colourDisabled
 
-// Band 4 -- carriage travel, 147..195 (h 49). Grew 4px when the soft-key hint
-// row was removed: the taller track and markers are what make the most
-// information-dense band on the screen readable at a glance.
+// Band 4 -- carriage travel, 151..204 (h 54). Grew again when the state chip
+// dropped 36 -> 26: the extra height is AIR between the pip baseline (144) and
+// the stop markers (156), so the pip row and the travel bar stop reading as
+// one crowded control stack.
 static const int TRAVEL_TRACK_X = 12;
-static const int TRAVEL_TRACK_Y = 153;
+static const int TRAVEL_TRACK_Y = 159;
 static const int TRAVEL_TRACK_W = 296;  // 12..307
 static const int TRAVEL_TRACK_H = 10;
-static const int TRAVEL_MARK_Y = 150;   // 16 tall -> 150..165, clear of the rule
+static const int TRAVEL_MARK_Y = 156;   // 16 tall -> 156..171, clear of the rule
 static const int TRAVEL_MARK_H = 16;
 static const int TRAVEL_MARK_W = 4;
 static const int TRAVEL_CARRIAGE_W = 8;
-// 26 at y 166 -> box 166..194, baseline 190. The 14s sit at 190-13 = 177.
-static const int TRAVEL_VALUE_Y = 166;
-static const int TRAVEL_LABEL_Y = 177;
+// 26 at y 173 -> box 173..201, baseline 197. The 14s sit at 197-13 = 184.
+static const int TRAVEL_VALUE_Y = 173;
+static const int TRAVEL_LABEL_Y = 184;
 static const int TRAVEL_POS_X = 90;    // right-aligned box 90..200
 static const int TRAVEL_POS_W = 110;   // "-300.00" @26 = 100px -> ink from 100
 static const int TRAVEL_POS_UNIT_X = 204;  // "mm" @14 = 30px -> 234
@@ -258,12 +281,12 @@ static const int TRAVEL_LEFT_W = 74;       // 12..85; see fixLabelBox() at its
 static const int TRAVEL_RIGHT_X = 238;     // right-aligned box 238..308
 static const int TRAVEL_RIGHT_W = 70;      // "888.88 R" @14 = 62px -> ink from 246
 
-// Band 5 -- the state chip, 197..239 (h 43). One Montserrat-36 label carrying
-// its own state-coloured background (chip), chipInk text. The soft-key hint row
-// is gone (the physical caps are labelled), so the word grew 26 -> 36 and fills
-// the band: 36 line_height 40, pad_v 0 -> chip 198..237.
+// Band 5 -- the state chip, 206..239 (h 34). One Montserrat-26 label carrying
+// its own state-coloured background (chip), chipInk text. 26, not 36: the
+// owner judged 36 slightly too big, and the freed height went to bands 3/4.
+// 26 line_height 29 -> chip 208..236, centred in the band.
 static const int STATE_CHIP_X = 10;
-static const int STATE_CHIP_Y = 198;
+static const int STATE_CHIP_Y = 208;
 static const int STATE_CHIP_PAD_H = 12;  // horizontal chip padding around the ink
 
 // Font box heights, for the layout assertions below (see the metrics table
@@ -292,7 +315,8 @@ static const int TEXT14_UNIT_W = 32;       // "inch"
 static const int TEXT14_SYNC_W = 39;       // "SYNC"
 static const int TEXT14_RPM_UNIT_W = 33;   // "RPM"
 static const int TEXT26_RPM_VALUE_W = 64;  // "9999"
-static const int TEXT36_STATE_W = 223;     // "RETURNING" (longest state word)
+static const int TEXT26_STATE_W = 161;     // "RETURNING" (longest state word, at
+                                           // the chip's new size 26)
 
 // --- Selector overlay --------------------------------------------------------
 //
@@ -309,20 +333,20 @@ static const int TEXT36_STATE_W = 223;     // "RETURNING" (longest state word)
 //       |  <> pitch                        OK done   |  hints      (14, dim)
 //   196 +--------------------------------------------+
 //
-// The panel is 8..311 x 40..195: its bottom edge lands exactly on the band-4/5
+// The panel is 8..311 x 40..204: its bottom edge lands exactly on the band-4/5
 // rule, so it covers band 4 COMPLETELY. Anything less leaves a strip of the
 // travel readout's half-clipped glyphs visible under the panel edge, which
 // reads as a rendering fault (it did, before the panel grew to meet the rule).
 // Child coordinates below are relative to its CONTENT area, which LVGL insets
 // by the border width (lv_obj_get_style_space_* adds border_width to the
-// padding), so the usable box is 300 x 152 and every child x/y is measured
+// padding), so the usable box is 300 x 161 and every child x/y is measured
 // from (OVERLAY_X + OVERLAY_BORDER, OVERLAY_Y + OVERLAY_BORDER). Groups sit at
 // (0,0) at full content size and pass their children's coordinates through
 // unchanged.
 static const int OVERLAY_X = 8;
 static const int OVERLAY_Y = 40;
 static const int OVERLAY_W = 304;   // 8..311
-static const int OVERLAY_H = 156;   // 40..195
+static const int OVERLAY_H = 165;   // 40..204
 static const int OVERLAY_BORDER = 2;
 static const int OVERLAY_CONTENT_W = OVERLAY_W - (2 * OVERLAY_BORDER);  // 300
 static const int OVERLAY_CONTENT_H = OVERLAY_H - (2 * OVERLAY_BORDER);  // 144
@@ -331,8 +355,8 @@ static const int OVERLAY_CONTENT_H = OVERLAY_H - (2 * OVERLAY_BORDER);  // 144
 // bottom, and the body between them.
 static const int OVERLAY_TITLE_Y = 5;    // 14 -> 5..20
 static const int OVERLAY_BODY_TOP = 24;
-static const int OVERLAY_BODY_BOTTOM = 126;
-static const int OVERLAY_HINT_Y = 130;   // 14 ink -> 130..145
+static const int OVERLAY_BODY_BOTTOM = 135;
+static const int OVERLAY_HINT_Y = 139;   // 14 ink -> 139..154
 // The left hint doubles as a REFUSAL chip ("moving - stops locked"): when the
 // hint variant is a block it takes a colourCaution fill with chipInk text --
 // coloured TEXT would be unreadable on the light surface (caution on #EBEEF0
@@ -415,6 +439,139 @@ static const int OVERLAY_MENU_TILE_Y = 30;   // 30..89
 static const int OVERLAY_MENU_NAME_PAD = 3;  // inset of the name box in its tile
                                              // -> inner width 86
 
+// DRO DATUM: two tiles on the MODE grammar (same 92px tile, same 8px gap, same
+// y band), centred because there are two of them, not three:
+// x0 = (300 - (2*92 + 8)) / 2 = 54 -> tiles 54..145 / 154..245.
+//
+//    40 +--- 2px accent border ----------------------+
+//       |               DRO DATUM                    |  title          (14)
+//       |      +==========+    +----------+          |
+//       |      |   LEFT   |    |  RIGHT   |          |  persisted end = accent
+//       |      | I------  |    |  ------I |          |  mini bar, zero-post at
+//       |      +==========+    +----------+          |  that end of travel
+//       |   <> pick                        OK done   |  hints          (14)
+//   204 +--------------------------------------------+
+//
+// Inside each tile: the name on top, and a MINIATURE travel bar below it with
+// a zero-post at that tile's end -- the travel-bar metaphor is already
+// established on the rest screen, so "which physical end reads 0.00" is shown,
+// not just named. Bar + post are children of the tile (tile-relative
+// coordinates), so the selection restyle recolours them with the tile's fill.
+static const int OVERLAY_DATUM_TILE_W = 92;
+static const int OVERLAY_DATUM_TILE_H = 56;
+static const int OVERLAY_DATUM_GAP = 8;
+static const int OVERLAY_DATUM_X0 =
+  (OVERLAY_CONTENT_W - ((2 * OVERLAY_DATUM_TILE_W) + OVERLAY_DATUM_GAP)) / 2;
+static const int OVERLAY_DATUM_TILE_Y = 34;   // 34..89
+static const int OVERLAY_DATUM_LABEL_Y = 8;   // TILE-relative; 14 -> 8..24
+// The mini bar, tile-relative: track 16..76 x 38..42, zero-post 14..20 (LEFT
+// tile) / 72..78 (RIGHT tile) x 33..47, overhanging the track like the real
+// stop markers do.
+static const int OVERLAY_DATUM_BAR_X = 16;
+static const int OVERLAY_DATUM_BAR_W = 60;
+static const int OVERLAY_DATUM_BAR_Y = 38;
+static const int OVERLAY_DATUM_BAR_H = 4;
+static const int OVERLAY_DATUM_POST_W = 6;
+static const int OVERLAY_DATUM_POST_H = 14;
+static const int OVERLAY_DATUM_POST_Y = 33;
+// Post x inside the tile: flush over the bar's outer end on each side.
+static const int OVERLAY_DATUM_POST_X_LEFT = OVERLAY_DATUM_BAR_X - 2;
+static const int OVERLAY_DATUM_POST_X_RIGHT =
+  OVERLAY_DATUM_BAR_X + OVERLAY_DATUM_BAR_W - (OVERLAY_DATUM_POST_W - 2);
+
+// --- Diagnostics screen ------------------------------------------------------
+//
+// A full 320x240 read-only screen (UiFocus::Diagnostics), built as an
+// instrument panel: it exists to be WATCHED from arm's length while the
+// machine runs (uistate.h exempts it from the idle timeout for exactly that
+// reason), so the one number that diagnoses a lost step or a stiff slide --
+// the live position error -- is the 48px hero, with a centre-zero deflection
+// bar under it so drift reads as movement before the digits are legible.
+//
+//     0 +--------------------------------------------+
+//       | DIAGNOSTICS                       +34 p    |  title + raw pulses (14)
+//       |   POSITION ERROR                           |
+//       |            +0.01  mm                       |  error   (48 + 26)
+//       |  ------------------|------------------     |  centre-zero bar
+//       +--------------------------------------------+  rule
+//       |  SPINDLE      CARRIAGE      EXPECT         |  labels        (14)
+//       |  320          6.72          6.72           |  values        (26)
+//       |  RPM          mm/s          mm/s           |  units         (14)
+//       |  SYNC [SYNCED]         OK / MENU / HALT    |  sync chip + exit hint
+//   240 +--------------------------------------------+
+//
+// CARRIAGE vs EXPECT are deliberately the same unit (mm/s): a ratio problem
+// then reads as two different numbers side by side, not as a thread that
+// "looks wrong". EXPECT is |RPM|/60 x |pitch| and shows "--" unless the axis
+// is engaged -- at rest the carriage legitimately does 0 and a live EXPECT
+// would read as a fault. The arrows are inert on this screen and NOTHING here
+// suggests otherwise; the only hint is the exit.
+static const int DIAG_TITLE_X = 10;
+static const int DIAG_TITLE_Y = 6;         // 14 -> 6..22
+static const int DIAG_ERR_LABEL_Y = 30;    // 14 -> 30..46
+static const int DIAG_ERR_PULSES_X = 200;  // right-aligned box 200..310, row 1
+static const int DIAG_ERR_PULSES_W = 110;
+static const int DIAG_ERR_VALUE_X = 10;
+static const int DIAG_ERR_VALUE_Y = 50;    // 48 -> 50..102
+static const int DIAG_ERR_VALUE_W = 200;   // right-aligned, ink <= 194
+static const int DIAG_ERR_UNIT_X = 216;    // "mm", baseline-aligned to the 48
+static const int DIAG_ERR_UNIT_Y =
+  DIAG_ERR_VALUE_Y + (FONT48_ASCENT - FONT26_ASCENT);  // 69 -> 69..97
+// The centre-zero bar: full-scale deflection is +-DIAG_BAR_FULL_SCALE_MM, half
+// a typical pitch -- an error past that is off any sane scale, so the marker
+// pegs at the end and turns colourFault.
+static const int DIAG_BAR_X = 10;
+static const int DIAG_BAR_W = 300;
+static const int DIAG_TICK_W = 2;          // the zero tick, tallest
+static const int DIAG_TICK_Y = 108;        // 108..128
+static const int DIAG_TICK_H = 20;
+static const int DIAG_TICK_X = DIAG_BAR_X + ((DIAG_BAR_W - DIAG_TICK_W) / 2);
+static const int DIAG_BAR_MARK_W = 8;
+static const int DIAG_BAR_MARK_Y = 110;    // 110..126
+static const int DIAG_BAR_MARK_H = 16;
+static const int DIAG_BAR_TRACK_Y = 114;   // 114..122
+static const int DIAG_BAR_TRACK_H = 8;
+static const float DIAG_BAR_FULL_SCALE_MM = 0.5f;
+static const int DIAG_RULE_Y = 132;
+// The three rate columns.
+static const int DIAG_COL_X0 = 10;
+static const int DIAG_COL_X1 = 115;
+static const int DIAG_COL_X2 = 220;
+static const int DIAG_COL_W = 95;
+static const int DIAG_RATE_LABEL_Y = 138;  // 14 -> 138..154
+static const int DIAG_RATE_VALUE_Y = 157;  // 26 -> 157..186
+static const int DIAG_RATE_UNIT_Y = 188;   // 14 -> 188..204
+// Bottom row: sync chip left, exit hint right.
+static const int DIAG_SYNC_LABEL_X = 10;
+static const int DIAG_SYNC_CHIP_X = 64;    // ink x; the chip pads around it
+static const int DIAG_BOTTOM_Y = 216;      // 14 ink -> 216..232
+static const int DIAG_SYNC_PAD_H = 6;
+static const int DIAG_SYNC_PAD_V = 3;      // chip 213..235
+static const int DIAG_HINT_X = 170;        // right-aligned box 170..310
+static const int DIAG_HINT_W = 140;
+
+// --- About screen ------------------------------------------------------------
+//
+// Quiet and plain (docs/ux-redesign.md section 6: "Firmware version, IP,
+// uptime. Read-only"). The IP is the 36px hero: this is the screen someone
+// stands at the machine to read an address off, so the address is the thing.
+// Version and uptime share a row at 26. Exits like Diagnostics (OK/MENU/HALT,
+// no timeout); arrows are inert and nothing suggests otherwise.
+static const int ABOUT_TITLE_X = 10;
+static const int ABOUT_TITLE_Y = 6;
+static const int ABOUT_IP_LABEL_Y = 44;    // 14 -> 44..60
+static const int ABOUT_IP_X = 10;
+static const int ABOUT_IP_Y = 64;          // 36 -> 64..104
+static const int ABOUT_ROW2_LABEL_Y = 130; // 14 -> 130..146
+static const int ABOUT_ROW2_VALUE_Y = 150; // 26 -> 150..179
+static const int ABOUT_FW_X = 10;
+static const int ABOUT_FW_W = 150;         // 10..160
+static const int ABOUT_UP_X = 170;
+static const int ABOUT_UP_W = 140;         // 170..310
+static const int ABOUT_HINT_X = 170;       // right-aligned box, bottom
+static const int ABOUT_HINT_W = 140;
+static const int ABOUT_HINT_Y = 216;
+
 // Measured worst-case ink for the overlay's fixed boxes, on the same basis as
 // the main screen's constants above (summed adv_w, no kerning credit).
 // The 48 and 26 ticker widths are "6.00" -- the longest string ANY of the four
@@ -425,7 +582,9 @@ static const int OVERLAY_MENU_NAME_PAD = 3;  // inset of the name box in its til
 static const int TEXT48_TICKER_W = 105;    // "6.00" at 48
 static const int TEXT26_TICKER_W = 56;     // "6.00" at 26
 static const int TEXT26_TICKER_UNIT_W = 64;  // "thou", the longest unit word
-static const int TEXT14_HINT_W = 161;      // "moving - stops locked"
+static const int TEXT14_HINT_W = 171;      // "moving - datum locked", now the
+                                           // longest left hint ("moving - stops
+                                           // locked" is 161)
 static const int TEXT14_HINT_OK_W = 64;    // "OK done"
 static const int TEXT14_STOP_END_W = 69;   // "L -1200.00"
 static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
@@ -438,6 +597,28 @@ static const int TEXT26_STOP_POS_W = 158;  // "-1200.000 in"
 static const int TEXT14_MENU_WORD_W = 85;    // "Diagnostics" at 14
 static const int TEXT14_MENU_TITLE_W = 44;   // "MENU"
 static const int TEXT14_MENU_POS_W = 31;     // "9 / 9"
+// Datum picker, same measured-adv_w basis.
+static const int TEXT14_DATUM_NAME_W = 44;   // "RIGHT" (wider than "LEFT", 34)
+// Diagnostics. The 48 error is clamped by its formatter to +-999.99, so the
+// widest ink it can EVER hold is "+999.99" -- 189, but "+300.00" measures 194
+// because 3 is the widest digit; all digits share one advance, so the true
+// bound is sign + 3 digits + point + 2 digits at the common advance = 194.
+static const int TEXT48_DIAG_ERR_W = 194;    // "+300.00" at 48 (digit worst case)
+static const int TEXT26_DIAG_MM_W = 56;      // "mm" at 26
+static const int TEXT14_DIAG_PULSES_W = 67;  // "+99999 p" (formatter-clamped)
+static const int TEXT14_DIAG_LABEL_W = 125;  // "POSITION ERROR"
+static const int TEXT14_DIAG_COL_LABEL_W = 74;  // "CARRIAGE" (longest column label)
+static const int TEXT26_DIAG_RATE_W = 80;    // "-99.99" (both mm/s columns;
+                                             // "-9999" RPM is 74)
+static const int TEXT14_DIAG_SYNC_STATE_W = 95;  // "NOT SYNCED"
+static const int TEXT14_DIAG_HINT_W = 129;   // "OK / MENU / HALT"
+// About.
+static const int TEXT36_ABOUT_IP_W = 276;    // "255.255.255.255" at 36
+                                             // ("not connected" is 272)
+static const int TEXT26_ABOUT_FW_W = 139;    // "v99.99.999" -- a version longer
+                                             // than that clips, it never crowds
+static const int TEXT26_ABOUT_UP_W = 121;    // "999d 23h" (longest uptime form)
+static const int TEXT14_ABOUT_HINT_W = 120;  // "OK / MENU close"
 
 // --- Layout assertions -------------------------------------------------------
 // There is no host test for this file (lvgl is lib_ignore'd on the native env),
@@ -472,10 +653,19 @@ static_assert(PITCH_VALUE_Y + FONT48_H <= BAND_PITCH_BOTTOM, "pitch value overfl
 static_assert(MODE_GLYPH_Y > BAND_STATUS_BOTTOM, "mode glyph overlaps band 1");
 static_assert(MODE_GLYPH_Y + GLYPH_H <= BAND_PITCH_BOTTOM, "mode glyph overflows band 2");
 static_assert(MODE_GLYPH_X + GLYPH_W <= SCREEN_W, "mode glyph off the right edge");
-// Band 3 -- the knob overhangs the track by TICKER_KNOB_PAD at top and bottom.
-static_assert(TICKER_Y - TICKER_KNOB_PAD > BAND_PITCH_BOTTOM, "ticker knob overlaps band 2");
-static_assert(TICKER_Y + TICKER_H + TICKER_KNOB_PAD <= BAND_TICKER_BOTTOM, "ticker knob overflows band 3");
-static_assert(TICKER_X + TICKER_W <= SCREEN_W, "ticker off the right edge");
+// Band 3 -- the pip row. Pips are bottom-aligned on PIP_BASE_Y and only their
+// heights differ, so the vertical checks are on the TALLEST pip; the height
+// ORDER is asserted because it is the entire visual encoding (current >
+// neighbour > other) and a careless edit that flattened it would leave the
+// row rendering but saying nothing.
+static_assert(PIP_BASE_Y - PIP_H_CURRENT > BAND_PITCH_BOTTOM, "tallest pip overlaps band 2");
+static_assert(PIP_BASE_Y < BAND_TICKER_BOTTOM, "pip baseline on or past the band rule");
+static_assert(PIP_H_OTHER < PIP_H_NEIGHBOUR && PIP_H_NEIGHBOUR < PIP_H_CURRENT,
+              "pip height hierarchy flattened - current/neighbour/other no longer distinguishable");
+static_assert(PIP_ROW_X + PIP_ROW_W <= SCREEN_W, "pip row off the right edge");
+// The reflow spreads pips across (PIP_ROW_W - PIP_W); that is only a scale if
+// it is positive even for the longest list at the smallest spacing.
+static_assert(PIP_W < PIP_ROW_W, "pip wider than its row");
 // Band 4
 static_assert(TRAVEL_MARK_Y > BAND_TICKER_BOTTOM, "travel markers overlap band 3");
 static_assert(TRAVEL_MARK_Y + TRAVEL_MARK_H <= TRAVEL_VALUE_Y, "travel markers collide with the readout");
@@ -495,8 +685,8 @@ static_assert(TRAVEL_RIGHT_X + TRAVEL_RIGHT_W <= SCREEN_W, "right stop label off
 // must hug the word), so the right-edge check is against the measured ink of
 // the longest word plus the chip's own padding, not against a box width.
 static_assert(STATE_CHIP_Y > BAND_TRAVEL_BOTTOM, "state chip overlaps band 4");
-static_assert(STATE_CHIP_Y + FONT36_H <= SCREEN_H, "state chip off the bottom");
-static_assert(STATE_CHIP_X + (2 * STATE_CHIP_PAD_H) + TEXT36_STATE_W <= SCREEN_W,
+static_assert(STATE_CHIP_Y + FONT26_H <= SCREEN_H, "state chip off the bottom");
+static_assert(STATE_CHIP_X + (2 * STATE_CHIP_PAD_H) + TEXT26_STATE_W <= SCREEN_W,
               "widest state chip off the right edge");
 
 // --- Selector overlay assertions ---------------------------------------------
@@ -506,7 +696,10 @@ static_assert(STATE_CHIP_X + (2 * STATE_CHIP_PAD_H) + TEXT36_STATE_W <= SCREEN_W
 // either bar would hide machine state (RPM, or the CUTTING/HALTED word) behind
 // a settings widget, which section 4 explicitly does not allow.
 static_assert(OVERLAY_Y > BAND_STATUS_BOTTOM, "overlay covers the status bar");
-static_assert(OVERLAY_Y + OVERLAY_H <= BAND_TRAVEL_BOTTOM, "overlay covers the state bar");
+// EQUALITY, not <=: the panel's bottom edge must land exactly on the band-4/5
+// rule. Short leaves half-clipped travel glyphs poking out under the panel
+// (looked like a rendering fault); long covers the state bar.
+static_assert(OVERLAY_Y + OVERLAY_H == BAND_TRAVEL_BOTTOM, "overlay bottom edge is off the band-4/5 rule");
 static_assert(OVERLAY_X + OVERLAY_W <= SCREEN_W, "overlay off the right edge");
 static_assert(OVERLAY_X > 0, "overlay has no left margin");
 // Shared rows. Everything below is in CONTENT coordinates, so the bound is the
@@ -595,6 +788,97 @@ static_assert(TEXT14_MENU_WORD_W <= OVERLAY_MENU_TILE_W - (2 * OVERLAY_MENU_NAME
               "widest menu word wider than a tile's inner box");
 static_assert((2 * FONT14_H) <= OVERLAY_MENU_TILE_H - (2 * OVERLAY_MENU_NAME_PAD),
               "a two-line menu name overflows its tile");
+// DRO DATUM picker.
+// The centring is a RELATIONSHIP, not a number: if anyone edits the tile
+// width or the gap without re-deriving x0, this is what fails.
+static_assert(OVERLAY_DATUM_X0 ==
+              (OVERLAY_CONTENT_W - ((2 * OVERLAY_DATUM_TILE_W) + OVERLAY_DATUM_GAP)) / 2,
+              "datum tiles are no longer centred in the panel");
+static_assert(OVERLAY_DATUM_X0 + (2 * OVERLAY_DATUM_TILE_W) + OVERLAY_DATUM_GAP <= OVERLAY_CONTENT_W,
+              "datum tiles off the right of the panel");
+static_assert(OVERLAY_DATUM_TILE_Y >= OVERLAY_BODY_TOP, "datum tiles overlap the title");
+static_assert(OVERLAY_DATUM_TILE_Y + OVERLAY_DATUM_TILE_H <= OVERLAY_BODY_BOTTOM,
+              "datum tiles overflow the body");
+static_assert(TEXT14_DATUM_NAME_W <= OVERLAY_DATUM_TILE_W, "\"RIGHT\" wider than a datum tile");
+// Everything inside the tile is TILE-relative and the tile clips its children,
+// so an out-of-bounds child disappears silently -- these are what catch that.
+static_assert(OVERLAY_DATUM_LABEL_Y + FONT14_H <= OVERLAY_DATUM_POST_Y,
+              "datum name collides with the zero-post");
+static_assert(OVERLAY_DATUM_POST_Y <= OVERLAY_DATUM_BAR_Y &&
+              OVERLAY_DATUM_BAR_Y + OVERLAY_DATUM_BAR_H <= OVERLAY_DATUM_POST_Y + OVERLAY_DATUM_POST_H,
+              "datum zero-post no longer overhangs the mini bar");
+static_assert(OVERLAY_DATUM_POST_Y + OVERLAY_DATUM_POST_H <= OVERLAY_DATUM_TILE_H,
+              "datum zero-post clipped by its tile");
+static_assert(OVERLAY_DATUM_POST_X_LEFT >= 0 &&
+              OVERLAY_DATUM_POST_X_RIGHT + OVERLAY_DATUM_POST_W <= OVERLAY_DATUM_TILE_W,
+              "datum zero-post clipped at a tile edge");
+static_assert(OVERLAY_DATUM_BAR_X + OVERLAY_DATUM_BAR_W <= OVERLAY_DATUM_TILE_W,
+              "datum mini bar clipped by its tile");
+
+// --- Diagnostics screen assertions -------------------------------------------
+// Row order, top to bottom, each row's box against the next -- a full screen
+// with no band rules to inherit, so the whole vertical chain is stated.
+static_assert(DIAG_TITLE_Y + FONT14_H <= DIAG_ERR_LABEL_Y, "diag title overlaps the error label");
+static_assert(DIAG_ERR_LABEL_Y + FONT14_H <= DIAG_ERR_VALUE_Y, "diag error label overlaps its value");
+static_assert(DIAG_ERR_VALUE_Y + FONT48_H <= DIAG_TICK_Y, "diag error value overlaps the bar");
+static_assert(DIAG_TICK_Y + DIAG_TICK_H <= DIAG_RULE_Y, "diag bar overlaps the rule");
+static_assert(DIAG_RULE_Y < DIAG_RATE_LABEL_Y, "diag rule below the rate labels");
+static_assert(DIAG_RATE_LABEL_Y + FONT14_H <= DIAG_RATE_VALUE_Y, "diag rate label overlaps its value");
+static_assert(DIAG_RATE_VALUE_Y + FONT26_H <= DIAG_RATE_UNIT_Y, "diag rate value overlaps its unit");
+static_assert(DIAG_RATE_UNIT_Y + FONT14_H <= DIAG_BOTTOM_Y - DIAG_SYNC_PAD_V,
+              "diag rate units collide with the sync chip");
+static_assert(DIAG_BOTTOM_Y + FONT14_H + DIAG_SYNC_PAD_V <= SCREEN_H, "diag sync chip off the bottom");
+// The centre-zero bar. The tick must actually BE at zero deflection -- stated
+// as the derivation so an edited x fails here rather than lying on screen --
+// and the marker/track/tick nest exactly as the travel bar's marks do.
+static_assert(DIAG_TICK_X == DIAG_BAR_X + ((DIAG_BAR_W - DIAG_TICK_W) / 2),
+              "diag zero tick is not at the centre of the bar");
+static_assert(DIAG_TICK_Y <= DIAG_BAR_MARK_Y && DIAG_BAR_MARK_Y <= DIAG_BAR_TRACK_Y &&
+              DIAG_BAR_TRACK_Y + DIAG_BAR_TRACK_H <= DIAG_BAR_MARK_Y + DIAG_BAR_MARK_H &&
+              DIAG_BAR_MARK_Y + DIAG_BAR_MARK_H <= DIAG_TICK_Y + DIAG_TICK_H,
+              "diag bar tick/marker/track no longer nest");
+static_assert(DIAG_BAR_MARK_W < DIAG_BAR_W, "diag marker wider than its bar");
+static_assert(DIAG_BAR_X + DIAG_BAR_W <= SCREEN_W, "diag bar off the right edge");
+// Horizontal ink. The error value is right-aligned in a fixed box; its unit
+// hangs at a fixed x past it; the raw-pulses slot shares the title row.
+static_assert(TEXT48_DIAG_ERR_W <= DIAG_ERR_VALUE_W, "clamped diag error wider than its box");
+static_assert(DIAG_ERR_VALUE_X + DIAG_ERR_VALUE_W <= DIAG_ERR_UNIT_X, "diag error value runs into its unit");
+static_assert(DIAG_ERR_UNIT_X + TEXT26_DIAG_MM_W <= SCREEN_W, "diag error unit off the right edge");
+static_assert(DIAG_ERR_UNIT_Y - DIAG_ERR_VALUE_Y == FONT48_ASCENT - FONT26_ASCENT,
+              "diag error unit off the value's baseline");
+static_assert(DIAG_TITLE_X + TEXT14_DIAG_LABEL_W <= DIAG_ERR_PULSES_X,
+              "diag title row ink runs into the pulses slot");
+static_assert(TEXT14_DIAG_PULSES_W <= DIAG_ERR_PULSES_W, "clamped pulses wider than their box");
+static_assert(DIAG_ERR_PULSES_X + DIAG_ERR_PULSES_W <= SCREEN_W, "diag pulses box off the right edge");
+// The three columns: boxes must not collide AND the worst measured ink must
+// fit a column, or a negative rate silently overprints its neighbour.
+static_assert(DIAG_COL_X0 + DIAG_COL_W <= DIAG_COL_X1 && DIAG_COL_X1 + DIAG_COL_W <= DIAG_COL_X2,
+              "diag rate columns collide");
+static_assert(DIAG_COL_X2 + DIAG_COL_W <= SCREEN_W, "diag third column off the right edge");
+static_assert(TEXT26_DIAG_RATE_W <= DIAG_COL_W, "worst rate value wider than its column");
+static_assert(TEXT14_DIAG_COL_LABEL_W <= DIAG_COL_W, "\"CARRIAGE\" wider than its column");
+// Bottom row: the chip's padded box must clear the hint's box.
+static_assert(DIAG_SYNC_CHIP_X + TEXT14_DIAG_SYNC_STATE_W + DIAG_SYNC_PAD_H <= DIAG_HINT_X,
+              "\"NOT SYNCED\" chip runs into the exit hint");
+static_assert(TEXT14_DIAG_HINT_W <= DIAG_HINT_W, "diag exit hint wider than its box");
+static_assert(DIAG_HINT_X + DIAG_HINT_W <= SCREEN_W, "diag hint box off the right edge");
+
+// --- About screen assertions --------------------------------------------------
+static_assert(ABOUT_TITLE_Y + FONT14_H <= ABOUT_IP_LABEL_Y, "about title overlaps the IP label");
+static_assert(ABOUT_IP_LABEL_Y + FONT14_H <= ABOUT_IP_Y, "about IP label overlaps the address");
+static_assert(ABOUT_IP_Y + FONT36_H <= ABOUT_ROW2_LABEL_Y, "about IP overlaps the second row");
+static_assert(ABOUT_ROW2_LABEL_Y + FONT14_H <= ABOUT_ROW2_VALUE_Y, "about row-2 labels overlap their values");
+static_assert(ABOUT_ROW2_VALUE_Y + FONT26_H <= ABOUT_HINT_Y, "about row 2 overlaps the exit hint");
+static_assert(ABOUT_HINT_Y + FONT14_H <= SCREEN_H, "about hint off the bottom");
+// The IP is the widest thing on the screen and is NOT boxed (it must never
+// clip -- a truncated IP is worse than none), so the check is measured ink
+// against the screen edge for the widest address that exists.
+static_assert(ABOUT_IP_X + TEXT36_ABOUT_IP_W <= SCREEN_W, "\"255.255.255.255\" off the right edge");
+static_assert(ABOUT_FW_X + ABOUT_FW_W <= ABOUT_UP_X, "about version box runs into the uptime box");
+static_assert(ABOUT_UP_X + ABOUT_UP_W <= SCREEN_W, "about uptime box off the right edge");
+static_assert(TEXT26_ABOUT_FW_W <= ABOUT_FW_W, "\"v99.99.999\" wider than the version box");
+static_assert(TEXT26_ABOUT_UP_W <= ABOUT_UP_W, "\"999d 23h\" wider than the uptime box");
+static_assert(TEXT14_ABOUT_HINT_W <= ABOUT_HINT_W, "about exit hint wider than its box");
 
 // Radii. LV_DRAW_SW_CIRCLE_CACHE_SIZE is 4, so keep the number of DISTINCT
 // radii small (docs/ux-redesign.md section 8 "Renderer constraints"): this
@@ -847,7 +1131,14 @@ static bool carriageFraction(Leadscrew* leadscrew, bool leftSet, bool rightSet,
 // than promising a keypress that ButtonPad::activateMenuTile() will discard.
 enum OverlayHint {
   OH_NONE, OH_PITCH, OH_SPEED, OH_MODE, OH_STOPS, OH_STOPS_LOCKED,
-  OH_MENU, OH_MENU_MOVING, OH_MENU_FEED
+  OH_MENU, OH_MENU_MOVING, OH_MENU_FEED,
+  // The DRO datum picker. LOCKED mirrors OH_STOPS_LOCKED and is computed from
+  // the SAME motion predicate: UiState refuses DroDatumLeft/Right while the
+  // carriage is under power (uistate.cpp, UiFocus::DroDatum), so the row must
+  // say that rather than advertise dead arrows. OK still dismisses, so the
+  // right half keeps "OK done" (the default arm below), exactly as
+  // OH_STOPS_LOCKED does.
+  OH_DATUM, OH_DATUM_LOCKED
 };
 // LV_SYMBOL_* are the FontAwesome codepoints carried by every built-in
 // Montserrat face (the same ones drawStateBar() uses), so no extra font is
@@ -865,6 +1156,9 @@ static const char* overlayHintText(OverlayHint hint) {
   // is still the widest string this row can hold: 156 and 145 respectively.
   case OH_MENU_MOVING:  return "stop the carriage first";
   case OH_MENU_FEED:    return "needs thread mode";
+  case OH_DATUM:        return OVERLAY_ARROWS " pick";
+  // Now the widest string this row can hold: 171px, the TEXT14_HINT_W bound.
+  case OH_DATUM_LOCKED: return "moving - datum locked";
   case OH_NONE:
   default:              return "";
   }
@@ -939,6 +1233,11 @@ Display::Display(Spindle* spindle, Leadscrew* leadscrew, const UiState* ui) {
   // until then, and a stray read would be a wild pointer rather than a crash).
   this->disp = nullptr;
   this->draw_buf = nullptr;
+  // Host-injected About-screen network state; the device path reads WiFi
+  // directly and never looks at these, but they are members and Display is
+  // `new`ed, so they must not start as heap garbage.
+  this->m_aboutIp = IPAddress();
+  this->m_aboutConnected = false;
   resetObjectTree();
 }
 
@@ -963,6 +1262,8 @@ Display::Display() {
                                                 // draws the travel band anyway.
   this->disp = nullptr;             // see the other constructor.
   this->draw_buf = nullptr;
+  this->m_aboutIp = IPAddress();    // see the other constructor.
+  this->m_aboutConnected = false;
   resetObjectTree();
 }
 
@@ -983,7 +1284,9 @@ void Display::resetObjectTree() {
   pitchLabel = nullptr;
   pitchUnitLabel = nullptr;
   feedSymbolObj = nullptr;
-  pitchSlider = nullptr;
+  for (int i = 0; i < PIP_MAX; i++) {
+    pitchPips[i] = nullptr;
+  }
   travelTrack = nullptr;
   travelLeftMark = nullptr;
   travelRightMark = nullptr;
@@ -1024,6 +1327,24 @@ void Display::resetObjectTree() {
     overlayMenuTile[i] = nullptr;
     overlayMenuTileLabel[i] = nullptr;
   }
+  overlayDatumGroup = nullptr;
+  for (int i = 0; i < 2; i++) {
+    overlayDatumTile[i] = nullptr;
+    overlayDatumTileLabel[i] = nullptr;
+    overlayDatumBar[i] = nullptr;
+    overlayDatumZero[i] = nullptr;
+  }
+  diagPanel = nullptr;
+  diagErrValue = nullptr;
+  diagErrPulses = nullptr;
+  diagErrMarker = nullptr;
+  diagSpindleValue = nullptr;
+  diagCarriageValue = nullptr;
+  diagExpectValue = nullptr;
+  diagSyncChip = nullptr;
+  aboutPanel = nullptr;
+  aboutIpValue = nullptr;
+  aboutUptimeValue = nullptr;
   updateSlider = nullptr;
   updateLabel = nullptr;
 
@@ -1060,6 +1381,15 @@ void Display::resetObjectTree() {
   // the hidden flag, so they must describe the tree as built (see the header).
   m_lastMenuPrevShown = true;
   m_lastMenuNextShown = true;
+  // -1 = "not laid out / not styled yet" so the first drawPitch() after a
+  // rebuild both reflows and restyles the freshly-built (all-ghost) pip row.
+  m_lastPipCount = -1;
+  m_lastPipIndex = -1;
+  m_lastDatumTile = -1;
+  m_lastDiagErrX = -1;
+  m_lastDiagErrPegged = false;  // init() builds the marker textPrimary
+  m_lastDiagSyncState = -1;
+  m_lastAboutConnected = -1;
   // NOTE m_palette and m_droDatum are deliberately NOT reset here. Both are
   // RUNTIME settings owned by setTheme()/setDroDatum(), and init() calls this
   // on every rebuild -- including the rebuild setTheme() itself requests, which
@@ -1355,28 +1685,29 @@ void Display::init() {
   lv_obj_set_style_image_recolor(feedSymbolObj, m_palette->textDim, 0);
   lv_obj_set_style_image_recolor_opa(feedSymbolObj, LV_OPA_COVER, 0);
 
-  // --- band 3: pitch ticker -------------------------------------------------
-  // The existing slider, restyled and repositioned: it already tracks the
-  // position within the current pitch list. The INDICATOR is painted the same
-  // colour as the track so it reads as a marker on a scale (a ticker) rather
-  // than a fill level -- the knob is the "you are here".
-  pitchSlider = lv_slider_create(lv_screen_active());
-  lv_obj_set_size(pitchSlider, TICKER_W, TICKER_H);
-  lv_obj_set_pos(pitchSlider, TICKER_X, TICKER_Y);
-  lv_obj_set_style_pad_all(pitchSlider, 0, 0);
-  // bg_opa COVER on BOTH parts, explicitly: the slider theme leaves the main
-  // part translucent while the indicator is opaque, so without these two the
-  // "same colour" below renders as two different colours and the ticker reads
-  // as the fill bar it must not be.
-  lv_obj_set_style_bg_color(pitchSlider, m_palette->colourDisabled, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(pitchSlider, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(pitchSlider, m_palette->colourDisabled, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(pitchSlider, LV_OPA_COVER, LV_PART_INDICATOR);
-  lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(pitchSlider, m_palette->textPrimary, LV_PART_KNOB);
-  lv_obj_set_style_radius(pitchSlider, RADIUS_TRACK, LV_PART_KNOB);
-  lv_obj_set_style_pad_all(pitchSlider, TICKER_KNOB_PAD, LV_PART_KNOB);
+  // --- band 3: the pitch pip row --------------------------------------------
+  // One rect per possible list entry, all built here as short "other" ticks on
+  // the common baseline; drawPitch() positions the first `count` across the
+  // row (the reflow, on a count change only) and promotes the current pip and
+  // its neighbours (the restyle, on an index change only). NOT a slider: the
+  // list is discrete, and a continuous track read as a twin of the travel bar
+  // directly below. Radius 0 -- these are ruler ticks, like the stop marks.
+  {
+    // The five tables the row can show must all fit the pips built here --
+    // checked against the REAL arrays, so growing a table without growing
+    // PIP_MAX fails the build instead of silently hiding the new entries.
+    static_assert((int)ARRAY_SIZE(threadPitchMetric) <= PIP_MAX, "pitch table longer than the pip row");
+    static_assert((int)ARRAY_SIZE(feedPitchMetric) <= PIP_MAX, "pitch table longer than the pip row");
+    static_assert((int)ARRAY_SIZE(threadPitchImperial) <= PIP_MAX, "pitch table longer than the pip row");
+    static_assert((int)ARRAY_SIZE(feedPitchImperial) <= PIP_MAX, "pitch table longer than the pip row");
+    static_assert((int)ARRAY_SIZE(jogSpeeds) <= PIP_MAX, "jog table longer than the pip row");
+  }
+  for (int i = 0; i < PIP_MAX; i++) {
+    pitchPips[i] = createRect(lv_screen_active(), PIP_ROW_X,
+                              PIP_BASE_Y - PIP_H_OTHER, PIP_W, PIP_H_OTHER,
+                              m_palette->colourDisabled, 0);
+    lv_obj_add_flag(pitchPips[i], LV_OBJ_FLAG_HIDDEN);
+  }
 
   // --- band 4: carriage travel ---------------------------------------------
   travelTrack = createRect(lv_screen_active(), TRAVEL_TRACK_X, TRAVEL_TRACK_Y,
@@ -1420,14 +1751,16 @@ void Display::init() {
                               m_palette->textDim, TRAVEL_POS_UNIT_X, TRAVEL_LABEL_Y);
 
   // --- band 5: state chip ---------------------------------------------------
-  // One auto-width Montserrat-36 label carrying a state-coloured chip fill;
+  // One auto-width Montserrat-26 label carrying a state-coloured chip fill;
   // drawStateBar() pushes the word and the fill colour. A filled chip, not a
   // coloured word, because the state colours as TEXT fail contrast on the
   // light palette's white ground (colourRun is 2.2:1) while chipInk on the
   // fill clears 3.9:1 on the dimmest state (IDLE / colourDisabled) and 5.3:1+
   // on the rest, in both palettes. (The soft-key hint row that shared this
-  // band is gone: the physical caps are labelled, so it repeated the keypad.)
-  stateLabel = createLabel(lv_screen_active(), &lv_font_montserrat_36,
+  // band is gone: the physical caps are labelled, so it repeated the keypad.
+  // 26, not the 36 it briefly was: the owner judged 36 slightly too big, and
+  // the freed height became the air between bands 3 and 4.)
+  stateLabel = createLabel(lv_screen_active(), &lv_font_montserrat_26,
                            m_palette->chipInk, STATE_CHIP_X, STATE_CHIP_Y);
   lv_obj_set_style_pad_hor(stateLabel, STATE_CHIP_PAD_H, 0);
   lv_obj_set_style_radius(stateLabel, RADIUS_TRACK, 0);
@@ -1610,6 +1943,174 @@ void Display::init() {
     lv_obj_set_style_text_align(overlayMenuTileLabel[i], LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(overlayMenuTileLabel[i], LV_ALIGN_CENTER, 0, 0);
   }
+
+  // Group E: DRO DATUM -- two tiles on the MODE grammar, centred. Everything
+  // inside a tile (name, mini bar, zero-post) is a CHILD of it, so the
+  // selection restyle in drawOverlayDatum() recolours the whole tile as one
+  // unit and the tile clips any wayward child. Both tiles are built in the
+  // quiet-well style; the first drawOverlayDatum() paints the selection
+  // (m_lastDatumTile is -1 after resetObjectTree()).
+  overlayDatumGroup = createOverlayGroup(overlayPanel);
+  for (int i = 0; i < 2; i++) {
+    const int tileX =
+      OVERLAY_DATUM_X0 + (i * (OVERLAY_DATUM_TILE_W + OVERLAY_DATUM_GAP));
+    overlayDatumTile[i] = createRect(overlayDatumGroup, tileX,
+                                     OVERLAY_DATUM_TILE_Y,
+                                     OVERLAY_DATUM_TILE_W,
+                                     OVERLAY_DATUM_TILE_H,
+                                     m_palette->background, RADIUS_TRACK);
+    lv_obj_set_style_border_width(overlayDatumTile[i], 1, 0);
+    lv_obj_set_style_border_color(overlayDatumTile[i],
+                                  m_palette->colourDisabled, 0);
+    overlayDatumTileLabel[i] = createLabel(overlayDatumTile[i],
+                                           &lv_font_montserrat_14,
+                                           m_palette->textDim, 0,
+                                           OVERLAY_DATUM_LABEL_Y);
+    fixLabelBox(overlayDatumTileLabel[i], OVERLAY_DATUM_TILE_W,
+                LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(overlayDatumTileLabel[i], i == 0 ? "LEFT" : "RIGHT");
+    // The miniature travel bar, with the zero-post at THIS tile's end of
+    // travel: left end on the LEFT tile, right end on the RIGHT tile.
+    overlayDatumBar[i] = createRect(overlayDatumTile[i], OVERLAY_DATUM_BAR_X,
+                                    OVERLAY_DATUM_BAR_Y, OVERLAY_DATUM_BAR_W,
+                                    OVERLAY_DATUM_BAR_H,
+                                    m_palette->colourDisabled, 0);
+    overlayDatumZero[i] = createRect(
+      overlayDatumTile[i],
+      i == 0 ? OVERLAY_DATUM_POST_X_LEFT : OVERLAY_DATUM_POST_X_RIGHT,
+      OVERLAY_DATUM_POST_Y, OVERLAY_DATUM_POST_W, OVERLAY_DATUM_POST_H,
+      m_palette->textPrimary, 0);
+  }
+
+  // --- The Diagnostics screen (UiFocus::Diagnostics) ------------------------
+  // A full-screen opaque panel, built like everything else -- once, hidden --
+  // and only shown/hidden plus value-pushed at runtime. Created AFTER the
+  // overlay panel so it sits above it in the sibling z-order (the read-only
+  // screens replace the whole dashboard, overlays included). Static labels
+  // (titles, units, the exit hint) are locals: set once, never touched again.
+  diagPanel = createRect(lv_screen_active(), 0, 0, SCREEN_W, SCREEN_H,
+                         m_palette->background, 0);
+  lv_obj_add_flag(diagPanel, LV_OBJ_FLAG_HIDDEN);
+  {
+    lv_obj_t* t = createLabel(diagPanel, &lv_font_montserrat_14,
+                              m_palette->textDim, DIAG_TITLE_X, DIAG_TITLE_Y);
+    lv_label_set_text(t, "DIAGNOSTICS");
+    lv_obj_t* el = createLabel(diagPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, DIAG_TITLE_X,
+                               DIAG_ERR_LABEL_Y);
+    lv_label_set_text(el, "POSITION ERROR");
+    lv_obj_t* eu = createLabel(diagPanel, &lv_font_montserrat_26,
+                               m_palette->textDim, DIAG_ERR_UNIT_X,
+                               DIAG_ERR_UNIT_Y);
+    lv_label_set_text(eu, "mm");
+    const int colX[3] = { DIAG_COL_X0, DIAG_COL_X1, DIAG_COL_X2 };
+    const char* colLabel[3] = { "SPINDLE", "CARRIAGE", "EXPECT" };
+    const char* colUnit[3] = { "RPM", "mm/s", "mm/s" };
+    for (int i = 0; i < 3; i++) {
+      lv_obj_t* l = createLabel(diagPanel, &lv_font_montserrat_14,
+                                m_palette->textDim, colX[i],
+                                DIAG_RATE_LABEL_Y);
+      lv_label_set_text(l, colLabel[i]);
+      lv_obj_t* u = createLabel(diagPanel, &lv_font_montserrat_14,
+                                m_palette->textDim, colX[i], DIAG_RATE_UNIT_Y);
+      lv_label_set_text(u, colUnit[i]);
+    }
+    lv_obj_t* sl = createLabel(diagPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, DIAG_SYNC_LABEL_X,
+                               DIAG_BOTTOM_Y);
+    lv_label_set_text(sl, "SYNC");
+    // Exit hint: the three keys that leave the screen, nothing more. The
+    // arrows are inert here (uistate.cpp) and deliberately unmentioned.
+    lv_obj_t* h = createLabel(diagPanel, &lv_font_montserrat_14,
+                              m_palette->textDim, DIAG_HINT_X, DIAG_BOTTOM_Y);
+    fixLabelBox(h, DIAG_HINT_W, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(h, "OK / MENU / HALT");
+    createRect(diagPanel, 0, DIAG_RULE_Y, SCREEN_W, 1,
+               m_palette->colourDisabled, 0);
+    // The centre-zero bar: track, the fixed zero tick, then the marker on top.
+    createRect(diagPanel, DIAG_BAR_X, DIAG_BAR_TRACK_Y, DIAG_BAR_W,
+               DIAG_BAR_TRACK_H, m_palette->colourDisabled, RADIUS_TRACK);
+    createRect(diagPanel, DIAG_TICK_X, DIAG_TICK_Y, DIAG_TICK_W, DIAG_TICK_H,
+               m_palette->textDim, 0);
+  }
+  diagErrMarker = createRect(diagPanel, DIAG_TICK_X - ((DIAG_BAR_MARK_W - DIAG_TICK_W) / 2),
+                             DIAG_BAR_MARK_Y, DIAG_BAR_MARK_W, DIAG_BAR_MARK_H,
+                             m_palette->textPrimary, RADIUS_TRACK);
+  diagErrValue = createLabel(diagPanel, &lv_font_montserrat_48,
+                             m_palette->textPrimary, DIAG_ERR_VALUE_X,
+                             DIAG_ERR_VALUE_Y);
+  fixLabelBox(diagErrValue, DIAG_ERR_VALUE_W, LV_TEXT_ALIGN_RIGHT);
+  // On the POSITION ERROR label's row, not the title row: the raw pulse count
+  // is that value's alternate unit and should read as part of the same block.
+  diagErrPulses = createLabel(diagPanel, &lv_font_montserrat_14,
+                              m_palette->textDim, DIAG_ERR_PULSES_X,
+                              DIAG_ERR_LABEL_Y);
+  fixLabelBox(diagErrPulses, DIAG_ERR_PULSES_W, LV_TEXT_ALIGN_RIGHT);
+  {
+    const int colX[3] = { DIAG_COL_X0, DIAG_COL_X1, DIAG_COL_X2 };
+    lv_obj_t** vals[3] = { &diagSpindleValue, &diagCarriageValue,
+                           &diagExpectValue };
+    for (int i = 0; i < 3; i++) {
+      *vals[i] = createLabel(diagPanel, &lv_font_montserrat_26,
+                             m_palette->textPrimary, colX[i],
+                             DIAG_RATE_VALUE_Y);
+      fixLabelBox(*vals[i], DIAG_COL_W, LV_TEXT_ALIGN_LEFT);
+    }
+  }
+  // The sync chip, on the status bar's chip grammar: colourRun fill + chipInk
+  // when SYNCED, no fill + textDim otherwise. Fill colour set once here; the
+  // draw toggles opacity and ink only, like the status bar's SYNC chip.
+  diagSyncChip = createLabel(diagPanel, &lv_font_montserrat_14,
+                             m_palette->textDim,
+                             DIAG_SYNC_CHIP_X - DIAG_SYNC_PAD_H,
+                             DIAG_BOTTOM_Y - DIAG_SYNC_PAD_V);
+  lv_obj_set_style_pad_hor(diagSyncChip, DIAG_SYNC_PAD_H, 0);
+  lv_obj_set_style_pad_ver(diagSyncChip, DIAG_SYNC_PAD_V, 0);
+  lv_obj_set_style_radius(diagSyncChip, RADIUS_TRACK, 0);
+  lv_obj_set_style_bg_color(diagSyncChip, m_palette->colourRun, 0);
+  lv_obj_set_style_bg_opa(diagSyncChip, LV_OPA_TRANSP, 0);
+
+  // --- The About screen (UiFocus::About) ------------------------------------
+  // Quiet and plain: three labelled values, the IP at 36 as the hero, and an
+  // exit hint. Version is compile-time text, set once here and never cached.
+  aboutPanel = createRect(lv_screen_active(), 0, 0, SCREEN_W, SCREEN_H,
+                          m_palette->background, 0);
+  lv_obj_add_flag(aboutPanel, LV_OBJ_FLAG_HIDDEN);
+  {
+    lv_obj_t* t = createLabel(aboutPanel, &lv_font_montserrat_14,
+                              m_palette->textDim, ABOUT_TITLE_X, ABOUT_TITLE_Y);
+    lv_label_set_text(t, "ABOUT");
+    lv_obj_t* il = createLabel(aboutPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, ABOUT_IP_X,
+                               ABOUT_IP_LABEL_Y);
+    lv_label_set_text(il, "IP ADDRESS");
+    lv_obj_t* fl = createLabel(aboutPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, ABOUT_FW_X,
+                               ABOUT_ROW2_LABEL_Y);
+    lv_label_set_text(fl, "FIRMWARE");
+    lv_obj_t* fv = createLabel(aboutPanel, &lv_font_montserrat_26,
+                               m_palette->textPrimary, ABOUT_FW_X,
+                               ABOUT_ROW2_VALUE_Y);
+    fixLabelBox(fv, ABOUT_FW_W, LV_TEXT_ALIGN_LEFT);
+    lv_label_set_text(fv, FIRMWARE_VERSION);
+    lv_obj_t* ul = createLabel(aboutPanel, &lv_font_montserrat_14,
+                               m_palette->textDim, ABOUT_UP_X,
+                               ABOUT_ROW2_LABEL_Y);
+    lv_label_set_text(ul, "UPTIME");
+    lv_obj_t* h = createLabel(aboutPanel, &lv_font_montserrat_14,
+                              m_palette->textDim, ABOUT_HINT_X, ABOUT_HINT_Y);
+    fixLabelBox(h, ABOUT_HINT_W, LV_TEXT_ALIGN_RIGHT);
+    lv_label_set_text(h, "OK / MENU close");
+  }
+  // Auto-width on purpose, unlike every other variable readout: an IP must
+  // never CLIP (a truncated address is worse than none), and the layout
+  // asserts bound the widest possible address against the screen edge instead.
+  aboutIpValue = createLabel(aboutPanel, &lv_font_montserrat_36,
+                             m_palette->textPrimary, ABOUT_IP_X, ABOUT_IP_Y);
+  aboutUptimeValue = createLabel(aboutPanel, &lv_font_montserrat_26,
+                                 m_palette->textPrimary, ABOUT_UP_X,
+                                 ABOUT_ROW2_VALUE_Y);
+  fixLabelBox(aboutUptimeValue, ABOUT_UP_W, LV_TEXT_ALIGN_LEFT);
 }
 
 void showWifi(const char* ssid, const char* password, IPAddress ip) {
@@ -1805,11 +2306,58 @@ void Display::drawPitch() {
                     PITCH_UNIT_GAP, PITCH_UNIT_BASELINE_FIX);
   }
 
-  // lv_bar_set_value/range compare before acting, so these are free when
-  // nothing has changed. Range is 0..count-1 against a 0-based index.
-  lv_slider_set_min_value(pitchSlider, 0);
-  lv_slider_set_max_value(pitchSlider, table.count > 0 ? table.count - 1 : 0);
-  lv_slider_set_value(pitchSlider, tickerIndex, LV_ANIM_OFF);
+  // --- band 3: the pip row --------------------------------------------------
+  // Count clamped to what init() built; the static_asserts there make the
+  // clamp unreachable for the real tables, so this only guards a corrupt
+  // count. Two gates, both essential at 10 Hz:
+  //   * count change -> REFLOW: spread `count` pips evenly across the row
+  //     (positions depend on count) and hide the surplus. Rare -- only a
+  //     mode/unit change alters the list length (20 for the four pitch
+  //     tables, 6 for jogSpeeds).
+  //   * index change -> RESTYLE: promote current + neighbours, demote the
+  //     rest. The reflow forces it by resetting the index cache, because it
+  //     has just re-homed (and re-shortened) every pip.
+  const int pipCount = table.count > PIP_MAX ? PIP_MAX : table.count;
+  if (pipCount != m_lastPipCount) {
+    m_lastPipCount = pipCount;
+    m_lastPipIndex = -2;  // -2, not -1: -1 must stay a valid "no selection"
+                          // (index 0's neighbour set differs from none at all)
+    const int span = PIP_ROW_W - PIP_W;
+    for (int i = 0; i < PIP_MAX; i++) {
+      if (i < pipCount) {
+        const int x = pipCount > 1
+          ? PIP_ROW_X + ((i * span) / (pipCount - 1))
+          : PIP_ROW_X + (span / 2);
+        lv_obj_set_pos(pitchPips[i], x, PIP_BASE_Y - PIP_H_OTHER);
+        lv_obj_remove_flag(pitchPips[i], LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_add_flag(pitchPips[i], LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+  }
+  if (tickerIndex != m_lastPipIndex) {
+    m_lastPipIndex = tickerIndex;
+    for (int i = 0; i < pipCount; i++) {
+      // Height + colour carry the whole encoding: tall accent = current,
+      // mid textDim = its neighbours, short colourDisabled = the rest. Sizes
+      // are set with the position so every pip keeps the common baseline.
+      int h;
+      lv_color_t colour;
+      if (i == tickerIndex) {
+        h = PIP_H_CURRENT;
+        colour = m_palette->accent;
+      } else if (i == tickerIndex - 1 || i == tickerIndex + 1) {
+        h = PIP_H_NEIGHBOUR;
+        colour = m_palette->textDim;
+      } else {
+        h = PIP_H_OTHER;
+        colour = m_palette->colourDisabled;
+      }
+      lv_obj_set_size(pitchPips[i], PIP_W, h);
+      lv_obj_set_y(pitchPips[i], PIP_BASE_Y - h);
+      lv_obj_set_style_bg_color(pitchPips[i], colour, 0);
+    }
+  }
 }
 
 // Band 4 -- the carriage travel bar, a small DRO.
@@ -2050,6 +2598,10 @@ void Display::drawOverlay() {
       : MTB_NONE;
 
   lv_obj_t* group = nullptr;
+  // The two read-only screens (Diagnostics / About) are NOT overlay groups:
+  // they live on their own full-screen panels, above everything. Exactly one
+  // of `group` / `screen` can be non-null per focus.
+  lv_obj_t* screen = nullptr;
   const char* title = "";
   OverlayHint hint = OH_NONE;
   switch (focus) {
@@ -2073,6 +2625,17 @@ void Display::drawOverlay() {
     title = "STOPS";
     hint = stopsLocked ? OH_STOPS_LOCKED : OH_STOPS;
     break;
+  case UiFocus::DroDatum:
+    // Same locked treatment (and the SAME predicate) as STOPS: UiState refuses
+    // the datum arrows while the carriage is under power, so the row must
+    // report the refusal, not offer dead arrows. The tile that OPENS this
+    // widget is refused under power too (menuTileBlock), but motion can start
+    // underneath an already-open picker -- a run finishing its deceleration,
+    // the web UI -- which is exactly when this hint earns its keep.
+    group = overlayDatumGroup;
+    title = "DRO DATUM";
+    hint = stopsLocked ? OH_DATUM_LOCKED : OH_DATUM;
+    break;
   case UiFocus::Menu:
     // UiState keeps menuOpen() and Menu focus in lockstep, so focus alone is
     // the condition - the same single source the other four branches use.
@@ -2081,6 +2644,12 @@ void Display::drawOverlay() {
     hint = (menuBlock == MTB_MOTION)      ? OH_MENU_MOVING
            : (menuBlock == MTB_FEED_MODE) ? OH_MENU_FEED
                                           : OH_MENU;
+    break;
+  case UiFocus::Diagnostics:
+    screen = diagPanel;
+    break;
+  case UiFocus::About:
+    screen = aboutPanel;
     break;
   case UiFocus::Jog:
   default:
@@ -2096,13 +2665,30 @@ void Display::drawOverlay() {
     lv_obj_add_flag(overlayModeGroup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(overlayStopsGroup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(overlayMenuGroup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(overlayDatumGroup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(diagPanel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(aboutPanel, LV_OBJ_FLAG_HIDDEN);
     if (group != nullptr) {
       lv_label_set_text(overlayTitle, title);
       lv_obj_remove_flag(group, LV_OBJ_FLAG_HIDDEN);
       lv_obj_remove_flag(overlayPanel, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(overlayPanel, LV_OBJ_FLAG_HIDDEN);
+      if (screen != nullptr) {
+        lv_obj_remove_flag(screen, LV_OBJ_FLAG_HIDDEN);
+      }
     }
+  }
+
+  // The read-only screens carry their own titles and hints, so the overlay's
+  // shared hint machinery below is not theirs; push their values and be done.
+  if (screen == diagPanel && screen != nullptr) {
+    drawDiagnostics();
+    return;
+  }
+  if (screen == aboutPanel && screen != nullptr) {
+    drawAbout();
+    return;
   }
 
   if (group == nullptr) {
@@ -2122,7 +2708,7 @@ void Display::drawOverlay() {
     // is ~10:1 in both palettes. The fill colour is set once in init(); only
     // the opacity and ink toggle here.
     const bool blocked = (hint == OH_STOPS_LOCKED || hint == OH_MENU_MOVING ||
-                          hint == OH_MENU_FEED);
+                          hint == OH_MENU_FEED || hint == OH_DATUM_LOCKED);
     lv_obj_set_style_bg_opa(overlayHintLeft,
                             blocked ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(overlayHintLeft,
@@ -2143,6 +2729,9 @@ void Display::drawOverlay() {
   case UiFocus::Mode:
     drawOverlayMode();
     break;
+  case UiFocus::DroDatum:
+    drawOverlayDatum();
+    break;
   case UiFocus::Menu:
     drawOverlayMenu(stopsLocked, threadMode);
     break;
@@ -2151,6 +2740,192 @@ void Display::drawOverlay() {
     drawOverlayStops();
     break;
   }
+}
+
+// DRO DATUM. Two tiles, the PERSISTED end filled with the focus accent --
+// m_droDatum is the single source of truth (UiState holds no pending copy; the
+// arrows apply live through ButtonPad -> setDroDatum(), which is also what
+// makes rendering the persisted value automatically render the selection).
+// Same restyle grammar as the MODE tiles, extended to the mini bar and
+// zero-post each tile carries: they are children of the tile, and on the
+// accent fill they swap to chipInk for the same contrast reason every other
+// chip does (a textPrimary post on the accent is invisible in the light
+// palette).
+void Display::drawOverlayDatum() {
+  const int tile = (m_droDatum == DroDatumPreference::Right) ? 1 : 0;
+  if (tile == m_lastDatumTile) {
+    return;
+  }
+  m_lastDatumTile = tile;
+  for (int i = 0; i < 2; i++) {
+    const bool selected = (i == tile);
+    lv_obj_set_style_bg_color(overlayDatumTile[i],
+                              selected ? m_palette->accent
+                                       : m_palette->background, 0);
+    lv_obj_set_style_border_color(overlayDatumTile[i],
+                                  selected ? m_palette->accent
+                                           : m_palette->colourDisabled, 0);
+    lv_obj_set_style_text_color(overlayDatumTileLabel[i],
+                                selected ? m_palette->chipInk
+                                         : m_palette->textDim, 0);
+    lv_obj_set_style_bg_color(overlayDatumBar[i],
+                              selected ? m_palette->chipInk
+                                       : m_palette->colourDisabled, 0);
+    lv_obj_set_style_bg_color(overlayDatumZero[i],
+                              selected ? m_palette->chipInk
+                                       : m_palette->textPrimary, 0);
+  }
+}
+
+// Diagnostics (UiFocus::Diagnostics). Values only -- the panel and its static
+// furniture were built in init(). Everything pushed here is gated on a cache:
+// the strings through setLabelText()'s slots, the marker through its x/pegged
+// pair, the sync chip through its state int.
+void Display::drawDiagnostics() {
+  const float stepsPerMm = m_leadscrew->getConfig()->leadscrewStepsPerMm();
+  const float safeStepsPerMm = (stepsPerMm > 0.0f) ? stepsPerMm : 1.0f;
+  const float errPulses = m_leadscrew->getPositionError();
+  float errMM = errPulses / safeStepsPerMm;
+
+  char buf[TEXT_SLOT_LEN];
+  // Clamp BEFORE formatting: past +-999.99 mm the magnitude is meaningless
+  // (something is catastrophically wrong) and an unclamped value would
+  // overflow the 48's measured box. The bar pegs (and turns colourFault) long
+  // before this clamp is reachable, so nothing is hidden by it.
+  if (errMM > 999.99f) {
+    errMM = 999.99f;
+  } else if (errMM < -999.99f) {
+    errMM = -999.99f;
+  }
+  snprintf(buf, sizeof(buf), "%+.2f", (double)errMM);
+  setLabelText(diagErrValue, TS_DIAG_ERR, buf);
+
+  int p = (int)errPulses;
+  if (p > 99999) {
+    p = 99999;
+  } else if (p < -99999) {
+    p = -99999;
+  }
+  snprintf(buf, sizeof(buf), "%+d p", p);
+  setLabelText(diagErrPulses, TS_DIAG_ERR_P, buf);
+
+  // The centre-zero bar: deflection is error / full-scale, clamped to the
+  // ends. Pegged = off scale, and the marker says so in colourFault -- the one
+  // judgement this screen makes, and it is "beyond this instrument's range",
+  // not "your thread is ruined".
+  float frac = errMM / DIAG_BAR_FULL_SCALE_MM;
+  bool pegged = false;
+  if (frac > 1.0f) {
+    frac = 1.0f;
+    pegged = true;
+  } else if (frac < -1.0f) {
+    frac = -1.0f;
+    pegged = true;
+  }
+  const int half = (DIAG_BAR_W - DIAG_BAR_MARK_W) / 2;
+  const int markerX = DIAG_BAR_X + half + (int)(frac * (float)half);
+  if (markerX != m_lastDiagErrX) {
+    m_lastDiagErrX = markerX;
+    lv_obj_set_pos(diagErrMarker, markerX, DIAG_BAR_MARK_Y);
+  }
+  if (pegged != m_lastDiagErrPegged) {
+    m_lastDiagErrPegged = pegged;
+    lv_obj_set_style_bg_color(diagErrMarker,
+                              pegged ? m_palette->colourFault
+                                     : m_palette->textPrimary, 0);
+  }
+
+  // The three rates. SPINDLE is the signed RPM (same source and cast as the
+  // status bar). CARRIAGE is the measured leadscrew rate with its sign taken
+  // from the commanded direction. EXPECT is what the carriage SHOULD do at
+  // this spindle speed and pitch -- |RPM|/60 x |mm/rev| -- and reads "--"
+  // unless the axis is engaged, because at rest a live expectation would
+  // present the (legitimately) stationary carriage as a fault.
+  const int rrpm = (int)m_spindle->getEstimatedVelocityInRPM();
+  snprintf(buf, sizeof(buf), "%d", rrpm);
+  setLabelText(diagSpindleValue, TS_DIAG_RPM, buf);
+
+  const float rate = m_leadscrew->getEstimatedVelocityInMillimetersPerSecond();
+  const float signedRate =
+    (m_leadscrew->getCurrentDirection() == LeadscrewDirection::LEFT) ? -rate
+                                                                     : rate;
+  snprintf(buf, sizeof(buf), "%.2f", (double)signedRate);
+  setLabelText(diagCarriageValue, TS_DIAG_CARRIAGE, buf);
+
+  if (m_globalState->getMotionMode() == MM_ENABLED) {
+    // getCurrentFeedPitch() is mm/rev in EVERY mode (the display caution in
+    // currentPitchTable() is about UNIT RENDERING, not about this): exactly
+    // what a rate expectation needs. Magnitude is |RPM|/60 x |mm/rev|; the
+    // SIGN is copied from the same commanded direction CARRIAGE uses, so that
+    // on a healthy cut the two columns read as the same number -- an
+    // unsigned expectation next to a signed measurement would present every
+    // leftward pass as a permanent "mismatch".
+    float expect = (fabsf((float)rrpm) / 60.0f) *
+                   fabsf(m_globalState->getCurrentFeedPitch());
+    if (m_leadscrew->getCurrentDirection() == LeadscrewDirection::LEFT) {
+      expect = -expect;
+    }
+    snprintf(buf, sizeof(buf), "%.2f", (double)expect);
+  } else {
+    snprintf(buf, sizeof(buf), "--");
+  }
+  setLabelText(diagExpectValue, TS_DIAG_EXPECT, buf);
+
+  // The helix sync state, on the status bar's chip grammar. This is what the
+  // machine PUBLISHES about the sync anchor (GlobalThreadSyncState); the
+  // anchor's source (left stop / right stop / manual) is not exposed by
+  // Leadscrew's public API -- see the note at the bottom row's creation.
+  const GlobalThreadSyncState sync = m_globalState->getThreadSyncState();
+  if ((int)sync != m_lastDiagSyncState) {
+    m_lastDiagSyncState = (int)sync;
+    const bool synced = (sync == SS_SYNC);
+    lv_obj_set_style_bg_opa(diagSyncChip,
+                            synced ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(diagSyncChip,
+                                synced ? m_palette->chipInk
+                                       : m_palette->textDim, 0);
+  }
+  setLabelText(diagSyncChip, TS_DIAG_SYNC,
+               sync == SS_SYNC ? "SYNCED" : "NOT SYNCED");
+}
+
+// About (UiFocus::About). The IP is the hero; version was set in init() and
+// never changes; uptime ticks once a second at most (the cache absorbs the
+// other nine redraws).
+void Display::drawAbout() {
+  bool connected;
+  char ip[TEXT_SLOT_LEN];
+#if PIO_UNIT_TESTING
+  connected = m_aboutConnected;
+  snprintf(ip, sizeof(ip), "%s", m_aboutIp.toString().c_str());
+#else
+  connected = (WiFi.status() == WL_CONNECTED);
+  snprintf(ip, sizeof(ip), "%s", WiFi.localIP().toString().c_str());
+#endif
+  if (!connected) {
+    snprintf(ip, sizeof(ip), "not connected");
+  }
+  setLabelText(aboutIpValue, TS_ABOUT_IP, ip);
+  const int connInt = connected ? 1 : 0;
+  if (connInt != m_lastAboutConnected) {
+    m_lastAboutConnected = connInt;
+    lv_obj_set_style_text_color(aboutIpValue,
+                                connected ? m_palette->textPrimary
+                                          : m_palette->textDim, 0);
+  }
+
+  char up[TEXT_SLOT_LEN];
+  const unsigned long secs = millis() / 1000UL;
+  if (secs >= 86400UL) {
+    snprintf(up, sizeof(up), "%lud %luh", secs / 86400UL,
+             (secs % 86400UL) / 3600UL);
+  } else if (secs >= 3600UL) {
+    snprintf(up, sizeof(up), "%luh %lum", secs / 3600UL,
+             (secs % 3600UL) / 60UL);
+  } else {
+    snprintf(up, sizeof(up), "%lum %lus", secs / 60UL, secs % 60UL);
+  }
+  setLabelText(aboutUptimeValue, TS_ABOUT_UPTIME, up);
 }
 
 // RATE and JOG SPEED. Same widget, different list: the current entry large in
