@@ -44,6 +44,32 @@ int   LatheConfigDerived::leadscrewAcceleration() {
 int   LatheConfigDerived::leadscrewMaxSpeed() {
     return config->leadscrewMaxSpeed;
 }
+uint8_t LatheConfigDerived::theme() {
+    return config->theme;
+}
+DroDatumPreference LatheConfigDerived::droDatum() {
+    return toDroDatumPreference(config->droDatum);
+}
+
+// See latheconfig.h: DRO_DATUM_LEFT/DRO_DATUM_RIGHT are the only valid stored
+// bytes. Anything else - flash garbage from a pre-CHECKVALUE-bump blob, a
+// short read, bit rot - must fall back to the safe default (Left) rather than
+// being cast into the enum, which would otherwise let an arbitrary byte value
+// masquerade as a DroDatumPreference.
+DroDatumPreference toDroDatumPreference(uint8_t storedValue) {
+    switch (storedValue) {
+        case DRO_DATUM_RIGHT:
+            return DroDatumPreference::Right;
+        case DRO_DATUM_LEFT:
+            return DroDatumPreference::Left;
+        default:
+            return DroDatumPreference::Left;
+    }
+}
+
+uint8_t fromDroDatumPreference(DroDatumPreference pref) {
+    return pref == DroDatumPreference::Right ? DRO_DATUM_RIGHT : DRO_DATUM_LEFT;
+}
 
 // steps per mm of leadscrew travel = (motor steps per leadscrew turn) / (mm per leadscrew turn)
 float LatheConfigDerived::leadscrewStepsPerMm() { return m_leadscrewStepsPerMm; }

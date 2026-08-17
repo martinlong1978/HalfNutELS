@@ -116,6 +116,87 @@ TEST(LatheConfigDerivedNonDefault, PitchAffectsStepsPerMm) {
   EXPECT_FLOAT_EQ(d.leadscrewStepsPerMm(), 800.0f / 5.08f);
 }
 
+// --- ux-redesign: theme / DRO datum persistence (docs/ux-redesign.md
+// section 6 "Saving settings from the device", section 8 "Theme") ----------
+//
+// LatheConfig is memcpy'd raw to/from flash, so the two new fields must
+// survive that: plain uint8_t, sensible defaults, and CHECKVALUE bumped so
+// devices holding a shorter pre-redesign blob re-adopt defaults instead of
+// reading flash garbage into them.
+
+// A default-constructed LatheConfig (no flash read at all - just the C++
+// in-class defaults) must already carry sane values for the new fields, the
+// same way every other field above does.
+TEST(LatheConfigTheme, DefaultConstructedConfigHasDarkThemeAndLeftDatum) {
+  LatheConfig cfg;
+
+  EXPECT_EQ(cfg.theme, THEME_DARK);
+  EXPECT_EQ(cfg.droDatum, DRO_DATUM_LEFT);
+}
+
+// CHECKVALUE must differ from the pre-redesign constant: this is the guard
+// that stops a future field addition from shipping garbage settings to every
+// device already in the field (see the comment on CHECKVALUE in
+// latheconfig.h). Written as a literal, not a re-derivation, so it fails
+// loudly if someone reverts the bump rather than silently comparing itself.
+TEST(LatheConfigCheckValue, DiffersFromPreRedesignConstant) {
+  EXPECT_NE((uint32_t)CHECKVALUE, 0xDFEB0940u);
+}
+
+// --- LatheConfigDerived pass-through accessors, matching the existing style
+TEST(LatheConfigDerivedDefaults, ThemeAndDatumAccessors) {
+  LatheConfig cfg = makeDefaultConfig();
+  LatheConfigDerived d(&cfg);
+
+  EXPECT_EQ(d.theme(), THEME_DARK);
+  EXPECT_EQ(d.droDatum(), DroDatumPreference::Left);
+}
+
+TEST(LatheConfigDerivedNonDefault, ThemeAndDatumAccessorsReflectStoredValues) {
+  LatheConfig cfg = makeDefaultConfig();
+  cfg.theme = THEME_LIGHT;
+  cfg.droDatum = DRO_DATUM_RIGHT;
+  LatheConfigDerived d(&cfg);
+
+  EXPECT_EQ(d.theme(), THEME_LIGHT);
+  EXPECT_EQ(d.droDatum(), DroDatumPreference::Right);
+}
+
+// --- droDatum <-> DroDatumPreference mapping, both directions --------------
+TEST(LatheConfigDroDatumMapping, LeftByteMapsToLeftPreference) {
+  EXPECT_EQ(toDroDatumPreference(DRO_DATUM_LEFT), DroDatumPreference::Left);
+}
+
+TEST(LatheConfigDroDatumMapping, RightByteMapsToRightPreference) {
+  EXPECT_EQ(toDroDatumPreference(DRO_DATUM_RIGHT), DroDatumPreference::Right);
+}
+
+TEST(LatheConfigDroDatumMapping, LeftPreferenceMapsToLeftByte) {
+  EXPECT_EQ(fromDroDatumPreference(DroDatumPreference::Left), (uint8_t)DRO_DATUM_LEFT);
+}
+
+TEST(LatheConfigDroDatumMapping, RightPreferenceMapsToRightByte) {
+  EXPECT_EQ(fromDroDatumPreference(DroDatumPreference::Right), (uint8_t)DRO_DATUM_RIGHT);
+}
+
+TEST(LatheConfigDroDatumMapping, RoundTripsBothWays) {
+  EXPECT_EQ(toDroDatumPreference(fromDroDatumPreference(DroDatumPreference::Left)),
+            DroDatumPreference::Left);
+  EXPECT_EQ(toDroDatumPreference(fromDroDatumPreference(DroDatumPreference::Right)),
+            DroDatumPreference::Right);
+}
+
+// An out-of-range stored byte is exactly what flash garbage looks like (a
+// short-read pre-redesign blob, bit rot, an uninitialised sector). It must
+// fall back to the safe default (Left) rather than being cast blindly into
+// the enum - an arbitrary byte value must never masquerade as a
+// DroDatumPreference. Cover several garbage values, not just one.
+TEST(LatheConfigDroDatumMapping, OutOfRangeByteFallsBackToLeft) {
+  EXPECT_EQ(toDroDatumPreference(2), DroDatumPreference::Left);
+  EXPECT_EQ(toDroDatumPreference(0xFF), DroDatumPreference::Left);
+  EXPECT_EQ(toDroDatumPreference(0x7F), DroDatumPreference::Left);
+}
+
 // PlatformIO does not inject a googletest runner for this env, so provide one.
 int main(int argc, char **argv) {
   ::testing::InitGoogleMock(&argc, argv);
