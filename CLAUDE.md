@@ -81,10 +81,13 @@ OTA pulls from **GitHub Releases** via the stable permalink
 ## Display (lib/display)
 
 - 320×240 landscape ST7789 via LVGL. `drawMode`/`drawPitch`/etc. render from `GlobalState`.
-- **Colour order:** the panel is R↔B swapped and every `COLOUR_*` constant is authored **pre-swapped** to
-  compensate (e.g. `COLOUR_RED = 0x0000FF`). This renders correctly — it is NOT a bug. Author any new colour
-  in the same swapped form, or reuse the `COLOUR_*` constants. (One un-swapped spot: the negative-RPM text
-  uses natural-RGB `0xFF0000`, so it renders blue — harmless, only shows on reverse spindle.)
+- **Colour order:** the panel is R↔B swapped and every colour is authored **pre-swapped** to compensate
+  (e.g. red is `0x0000FF`). This renders correctly — it is NOT a bug. Author any new colour in the same
+  swapped form, or take it from the palette. On the `ux-redesign` branch the `COLOUR_*` defines become a
+  `DisplayPalette` struct with dark and light instances; the swap convention is unchanged.
+  (Corrects an older note here: the negative-RPM text was described as rendering blue from an un-swapped
+  `0xFF0000`. It never rendered at all — the branch tested `abs(rpm) < 0`, which is always false, so it was
+  dead code. Fixed on `ux-redesign`: it now tests the signed value and uses the palette's fault colour.)
 - LVGL QR widget (`LV_USE_QRCODE`) is enabled; the setup screen shows a Wi-Fi-join QR. There is no image
   flip API in this LVGL — the left-hand thread icon is a pre-flipped generated asset
   (`icons/threadSymbolReverse.c`).
