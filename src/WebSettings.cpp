@@ -1,5 +1,6 @@
 #include "WebSettings.h"
 #include "WebServer.h"
+#include <globalstate.h>   // motion-mode guard in saveLatheSettings()
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <cstdlib>
@@ -328,10 +329,28 @@ void setValues() {
 // given a LatheConfig - so it must re-read the WebSettings half of the
 // shared sector itself before erasing, or a theme toggle from the device
 // would silently wipe the saved Wi-Fi SSID/password/OTA URL.
-void saveLatheSettings(LatheConfig* config) {
+bool saveLatheSettings(LatheConfig* config) {
     if (config == nullptr) {
         Serial.println("saveLatheSettings: null config, aborting");
-        return;
+        return false;
+    }
+
+    // A flash erase takes the flash lock and disables the instruction cache on
+    // BOTH cores. Nothing in main.cpp or lib/leadscrew is IRAM_ATTR (only the
+    // keyarray timer ISR is), so the SpindleTask on core 0 freezes for the
+    // whole operation - tens of milliseconds for a 4 KB sector erase - and
+    // step generation stops dead. Mid-cut that loses spindle sync and ruins
+    // the thread.
+    //
+    // setValues(), the only previous writer, was safe because it runs solely
+    // in AP config mode where no motion exists. This one is called from the
+    // running machine's menu, so it has to defend itself. See docs/
+    // ux-redesign.md for the caller-side story.
+    GlobalMotionMode motion = GlobalState::getInstance()->getMotionMode();
+    if (motion != GlobalMotionMode::MM_DISABLED &&
+        motion != GlobalMotionMode::MM_UNSET) {
+        Serial.println("saveLatheSettings: refused, carriage under power");
+        return false;
     }
 
     // Read-modify-write step 1: pull the CURRENT WebSettings out of flash so
@@ -365,6 +384,7 @@ void saveLatheSettings(LatheConfig* config) {
     // leaking it (see the known leak at main.cpp:124-125, which this must
     // not replicate).
     delete webSettings;
+    return true;
 }
 
 void reset() {

@@ -25,10 +25,23 @@ LatheConfig* getLatheSettings();
 // getWebSettings()) and rewriting them alongside it would erase the saved
 // Wi-Fi SSID/password/OTA URL as a side effect of a theme toggle.
 //
-// Not implemented here - and not host-testable, since WebSettings.cpp only
-// builds for the esp32 envs (ESP.flashRead/flashEraseSector/flashWrite have
-// no native stub). Verify on device.
-void saveLatheSettings(LatheConfig* config);
+// Not host-testable, since WebSettings.cpp only builds for the esp32 envs
+// (ESP.flashRead/flashEraseSector/flashWrite have no native stub). Verify on
+// device.
+//
+// REFUSES TO SAVE WHILE THE CARRIAGE IS UNDER POWER, and returns false if it
+// does. A flash erase takes the flash lock and disables the instruction cache
+// on BOTH cores; nothing in main.cpp or lib/leadscrew is IRAM_ATTR, so the
+// SpindleTask stalls for the whole operation - tens of milliseconds for a 4 KB
+// sector erase, and step generation stops dead. That was harmless for the only
+// previous writer (setValues(), which runs solely in AP config mode where
+// motion never runs), but this one is meant to be called from the running
+// machine's menu, where a mid-cut save would lose spindle sync.
+//
+// The guard lives here rather than in the caller because a caller-side rule is
+// one someone eventually forgets, and the failure is silent and expensive.
+// Callers should surface the false return as "stop the machine first".
+bool saveLatheSettings(LatheConfig* config);
 
 void startWebServer() ;
 
