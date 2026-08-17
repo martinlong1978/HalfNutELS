@@ -65,7 +65,7 @@ class ButtonPad {
 
   // Runs the tile UiState::menuIndex() currently names (docs/ux-redesign.md
   // Sec. 6). The index -> tile mapping is NOT defined here: it is the MenuTile
-  // enum in lib/display, shared with the carousel that renders it.
+  // enum in lib/ui/uistate.h, shared with the carousel that renders it.
   void activateMenuTile();
 
   // ENABLE sits outside the focus model (it is machine state, not a focus

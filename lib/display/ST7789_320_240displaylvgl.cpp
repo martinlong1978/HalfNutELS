@@ -2184,9 +2184,9 @@ void Display::drawOverlayStops() {
 //
 // This method RENDERS; it decides nothing. UiState owns the whole interaction -
 // menuIndex(), the saturating clamp, what MENU/HALT/the arrows do - and
-// MenuTile (header) owns what each index means. Reimplementing any of that here
-// is how the screen and the action dispatcher end up disagreeing about which
-// tile is selected.
+// MenuTile (lib/ui/uistate.h) owns what each index means. Reimplementing any of
+// that here is how the screen and the action dispatcher end up disagreeing
+// about which tile is selected.
 //
 // Neighbours are asked for index-1 and index+1 unconditionally: menuTileName()
 // answers "" out of range, so the ends of the list simply show a blank on the

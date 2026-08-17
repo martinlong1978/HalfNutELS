@@ -5,10 +5,11 @@
 
 #include <config.h>
 #include <globalstate.h>
-// The menu tiles: MenuTile (the index -> tile mapping, shared with the carousel
-// that renders it) and menuTileBlock() (the availability rule, likewise shared
-// so the screen and this file cannot disagree). Also brings in Display, for the
-// Theme and DRO datum tiles.
+// MenuTile (the index -> tile mapping, shared with the carousel that renders
+// it) and menuTileBlock() (the availability rule, likewise shared so the
+// screen and this file cannot disagree) live in lib/ui/uistate.h, pulled in
+// via buttonpad.h. display.h is still needed here for Display itself - the
+// Theme and DRO datum tiles call Display::setTheme()/setDroDatum().
 #include <display.h>
 #include "WebSettings.h"
 #include "setupmode.h"
@@ -330,8 +331,8 @@ void ButtonPad::applyIntent(UiIntent intent) {
 // The nine tiles of docs/ux-redesign.md Sec. 6.
 //
 // UiState decided WHEN this runs and WHICH tile is selected; MenuTile (declared
-// in lib/display, next to the carousel that renders it) decides what that index
-// MEANS. This method only executes.
+// in lib/ui/uistate.h, shared with the carousel that renders it) decides what
+// that index MEANS. This method only executes.
 //
 // Nothing here may be slow or blocking beyond what is already unavoidable: it
 // runs on the DisplayTask, which is where every other button action runs, and

@@ -112,4 +112,98 @@ class UiState {
   int m_jogDir;
 };
 
+// --- The menu tiles (docs/ux-redesign.md section 6, "MENU") ----------------
+//
+// This lives beside UiState, not in lib/display, because menuTileBlock() below
+// is safety-relevant motion-gating logic (it decides whether Sync, Software
+// update, Wi-Fi setup, Theme and DRO datum are allowed to fire) and has to be
+// covered by the native host tests (`pio test -e native`), which cannot build
+// anything behind <lvgl.h>. UiState itself still knows nothing about what the
+// tiles ARE - it owns only the interaction (menuOpen/menuIndex/kMenuItemCount,
+// the saturating clamp) - but the tile IDENTITIES and the availability RULE
+// share this header so they can never drift out of step with UiState's count.
+//
+// Two consumers, and they must never disagree about what an index means:
+//   * lib/display/ST7789_320_240displaylvgl.cpp renders the carousel from it
+//     (Display::drawOverlayMenu() / drawOverlay());
+//   * src/buttonpad.cpp dispatches UiIntent::MenuActivate on it
+//     (ButtonPad::activateMenuTile()).
+// A second, private copy of the order on either side is exactly how tile 5
+// ("Software update") ends up firing tile 6 ("Wi-Fi setup", which REBOOTS).
+// The static_assert below is what ties it back to UiState's count - now
+// trivially checkable, since both live in the same header.
+enum MenuTile {
+  MENU_UNITS = 0,
+  MENU_THEME,
+  MENU_DRO_DATUM,
+  MENU_JOG_SPEED,
+  MENU_SYNC,
+  MENU_SOFTWARE_UPDATE,
+  MENU_WIFI_SETUP,
+  MENU_DIAGNOSTICS,
+  MENU_ABOUT,
+  MENU_TILE_COUNT
+};
+static_assert((int)MENU_TILE_COUNT == UiState::kMenuItemCount,
+              "menu tile list and UiState::kMenuItemCount disagree - the "
+              "carousel would render or dispatch a tile the other side has "
+              "never heard of");
+
+// Why the selected tile cannot be activated right now, or MTB_NONE.
+//
+// Same rule, ONE evaluation, both sides: the display dims the tile and puts the
+// reason in the hint row, and ButtonPad refuses the activation. Splitting them
+// is how a menu ends up offering a gesture the machine will silently ignore -
+// the mistake docs/ux-redesign.md section 4 calls out for the STOPS hint.
+enum MenuTileBlock {
+  MTB_NONE,       // the tile is live
+  MTB_MOTION,     // the carriage is under power - stop it first
+  MTB_FEED_MODE,  // Sync means nothing outside a thread mode
+};
+
+// `motionActive` is the SAME predicate UiContext::motionActive carries:
+// motionMode is neither MM_DISABLED nor MM_UNSET (so it covers the engaged
+// feed, the powered run to a stop, the interactive jog AND the deceleration
+// tail). `threadMode` is FM_THREAD or FM_THREAD_REVERSE.
+//
+// Why each tile blocks on motion:
+//   Theme / DRO datum   - both persist through saveLatheSettings(), which
+//                         REFUSES while under power (src/WebSettings.h): a
+//                         flash erase disables the instruction cache on both
+//                         cores and stalls the spindle loop for tens of ms.
+//                         Rendering them live while the write cannot happen
+//                         would be the silent failure that guard exists to
+//                         prevent, so they dim with the rest.
+//   Sync                - setSyncPoint() zeroes the following error and raises
+//                         SS_SYNC, which releases update()'s re-sync gate. Do
+//                         that while the gate is holding the axis and the
+//                         carriage lurches up to a full pitch (measured
+//                         0.32 mm) into the work, and a residual lost-update
+//                         race on m_expectedPosition is reachable only in that
+//                         state. Section 6 words this as "against a stopped
+//                         spindle"; the enforceable form is the AXIS being
+//                         disengaged, since the re-sync gate can only be
+//                         holding while the leadscrew is under power.
+//   Software update     - hands the CPU to a TLS download for a minute.
+//   Wi-Fi setup         - reboots.
+// Units, Jog speed, Diagnostics and About touch neither flash nor motion, so
+// they stay live throughout.
+inline MenuTileBlock menuTileBlock(int tile, bool motionActive,
+                                   bool threadMode) {
+  switch (tile) {
+  case MENU_SYNC:
+    if (motionActive) {
+      return MTB_MOTION;
+    }
+    return threadMode ? MTB_NONE : MTB_FEED_MODE;
+  case MENU_THEME:
+  case MENU_DRO_DATUM:
+  case MENU_SOFTWARE_UPDATE:
+  case MENU_WIFI_SETUP:
+    return motionActive ? MTB_MOTION : MTB_NONE;
+  default:
+    return MTB_NONE;
+  }
+}
+
 #endif  // ELS_UI_UISTATE_H

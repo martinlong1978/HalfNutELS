@@ -38,89 +38,14 @@ LV_IMAGE_DECLARE(jog);
 
 // --- The menu tiles (docs/ux-redesign.md section 6, "MENU") -------------------
 //
-// UiState owns the menu INTERACTION (menuOpen/menuIndex/kMenuItemCount, the
-// saturating clamp); it deliberately knows nothing about what the tiles ARE.
-// That knowledge lives here, in ONE place, because it has exactly two consumers
-// and they must never disagree about what an index means:
-//   * this file renders the carousel from it (Display::drawOverlayMenu());
-//   * src/buttonpad.cpp dispatches UiIntent::MenuActivate on it
-//     (ButtonPad::activateMenuTile()), and includes <display.h> for it.
-// A second, private copy of the order on either side is exactly how tile 5
-// ("Software update") ends up firing tile 6 ("Wi-Fi setup", which REBOOTS).
-// The static_assert below is what ties it back to UiState's count.
-enum MenuTile {
-  MENU_UNITS = 0,
-  MENU_THEME,
-  MENU_DRO_DATUM,
-  MENU_JOG_SPEED,
-  MENU_SYNC,
-  MENU_SOFTWARE_UPDATE,
-  MENU_WIFI_SETUP,
-  MENU_DIAGNOSTICS,
-  MENU_ABOUT,
-  MENU_TILE_COUNT
-};
-static_assert((int)MENU_TILE_COUNT == UiState::kMenuItemCount,
-              "menu tile list and UiState::kMenuItemCount disagree - the "
-              "carousel would render or dispatch a tile the other side has "
-              "never heard of");
-
-// Why the selected tile cannot be activated right now, or MTB_NONE.
-//
-// Same rule, ONE evaluation, both sides: the display dims the tile and puts the
-// reason in the hint row, and ButtonPad refuses the activation. Splitting them
-// is how a menu ends up offering a gesture the machine will silently ignore -
-// the mistake docs/ux-redesign.md section 4 calls out for the STOPS hint.
-enum MenuTileBlock {
-  MTB_NONE,       // the tile is live
-  MTB_MOTION,     // the carriage is under power - stop it first
-  MTB_FEED_MODE,  // Sync means nothing outside a thread mode
-};
-
-// `motionActive` is the SAME predicate UiContext::motionActive carries:
-// motionMode is neither MM_DISABLED nor MM_UNSET (so it covers the engaged
-// feed, the powered run to a stop, the interactive jog AND the deceleration
-// tail). `threadMode` is FM_THREAD or FM_THREAD_REVERSE.
-//
-// Why each tile blocks on motion:
-//   Theme / DRO datum   - both persist through saveLatheSettings(), which
-//                         REFUSES while under power (src/WebSettings.h): a
-//                         flash erase disables the instruction cache on both
-//                         cores and stalls the spindle loop for tens of ms.
-//                         Rendering them live while the write cannot happen
-//                         would be the silent failure that guard exists to
-//                         prevent, so they dim with the rest.
-//   Sync                - setSyncPoint() zeroes the following error and raises
-//                         SS_SYNC, which releases update()'s re-sync gate. Do
-//                         that while the gate is holding the axis and the
-//                         carriage lurches up to a full pitch (measured
-//                         0.32 mm) into the work, and a residual lost-update
-//                         race on m_expectedPosition is reachable only in that
-//                         state. Section 6 words this as "against a stopped
-//                         spindle"; the enforceable form is the AXIS being
-//                         disengaged, since the re-sync gate can only be
-//                         holding while the leadscrew is under power.
-//   Software update     - hands the CPU to a TLS download for a minute.
-//   Wi-Fi setup         - reboots.
-// Units, Jog speed, Diagnostics and About touch neither flash nor motion, so
-// they stay live throughout.
-inline MenuTileBlock menuTileBlock(int tile, bool motionActive,
-                                   bool threadMode) {
-  switch (tile) {
-  case MENU_SYNC:
-    if (motionActive) {
-      return MTB_MOTION;
-    }
-    return threadMode ? MTB_NONE : MTB_FEED_MODE;
-  case MENU_THEME:
-  case MENU_DRO_DATUM:
-  case MENU_SOFTWARE_UPDATE:
-  case MENU_WIFI_SETUP:
-    return motionActive ? MTB_MOTION : MTB_NONE;
-  default:
-    return MTB_NONE;
-  }
-}
+// enum MenuTile, enum MenuTileBlock and menuTileBlock() (the availability rule)
+// moved to lib/ui/uistate.h - pulled in above via <uistate.h>. They live there,
+// not here, because menuTileBlock() is safety-relevant motion-gating logic that
+// must be covered by the native host tests, which cannot build anything behind
+// <lvgl.h>. This file remains one of the rule's two consumers: it renders the
+// carousel from MenuTile/menuTileBlock() (Display::drawOverlayMenu() /
+// drawOverlay()); src/buttonpad.cpp is the other (ButtonPad::activateMenuTile()).
+// See lib/ui/uistate.h for the full doc comment on both.
 
 // Runtime colour palette (dark/light). Full definition + the two compiled-in
 // instances (PALETTE_DARK, PALETTE_LIGHT) live in the .cpp -- only a pointer

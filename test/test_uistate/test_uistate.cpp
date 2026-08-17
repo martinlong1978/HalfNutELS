@@ -1249,6 +1249,127 @@ TEST(UiStateMenu, ArrowsDoNotJogWhileTheMenuIsOpen) {
   EXPECT_EQ(UiFocus::Menu, r.focus());
 }
 
+// ===========================================================================
+// 7. menuTileBlock() - the menu-tile availability rule (spec §6).
+//
+// Moved here from lib/display/ST7789_320_240displaylvgl.h so the rule that
+// gates Sync / Software update / Wi-Fi setup / Theme / DRO datum can be host-
+// tested at all: it used to live behind <lvgl.h>, which the native runner
+// cannot build. Pure function of (tile, motionActive, threadMode); no Rig,
+// no clock, no UiState instance needed.
+// ===========================================================================
+
+TEST(UiStateMenuTileBlock, TileCountMatchesUiState) {
+  // The header-level static_assert already enforces this at compile time; this
+  // is the same check made falsifiable at the unit level, and it is the one
+  // that fails if a tile is appended to MenuTile without kMenuItemCount (or
+  // vice versa) being updated to match.
+  EXPECT_EQ((int)MENU_TILE_COUNT, kMenuItems);
+}
+
+TEST(UiStateMenuTileBlock, EveryTileReturnsADefinedValueAtRestAndUnderPower) {
+  // Falsifiable coverage for "a tile was added to MenuTile without a rule":
+  // walk every index the enum defines, in both a rest and a powered context,
+  // and require the answer to be one of the three known verdicts. A tile that
+  // fell through to some other value (or crashed / UB'd) would fail this.
+  for (int tile = 0; tile < MENU_TILE_COUNT; ++tile) {
+    for (bool motionActive : {false, true}) {
+      for (bool threadMode : {false, true}) {
+        const MenuTileBlock block = menuTileBlock(tile, motionActive, threadMode);
+        EXPECT_TRUE(block == MTB_NONE || block == MTB_MOTION ||
+                    block == MTB_FEED_MODE)
+          << "tile " << tile << " motionActive=" << motionActive
+          << " threadMode=" << threadMode << " returned undefined value "
+          << (int)block;
+      }
+    }
+  }
+}
+
+TEST(UiStateMenuTileBlock, SyncBlockedByMotionRegardlessOfThreadMode) {
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_SYNC, true, /*threadMode=*/false));
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_SYNC, true, /*threadMode=*/true));
+}
+
+TEST(UiStateMenuTileBlock, SyncBlockedByFeedModeWhenAtRest) {
+  // At rest (not under power) but NOT in a thread mode - i.e. plain feed mode.
+  EXPECT_EQ(MTB_FEED_MODE, menuTileBlock(MENU_SYNC, false, /*threadMode=*/false));
+}
+
+TEST(UiStateMenuTileBlock, SyncAllowedAtRestInEitherThreadMode) {
+  // threadMode collapses FM_THREAD (right-hand) and FM_THREAD_REVERSE
+  // (left-hand) to one bool at the call sites (ButtonPad::activateMenuTile(),
+  // Display::drawOverlay()) - menuTileBlock() itself only ever sees that one
+  // bool, so both directions land on this single `true` case. Asserted once
+  // for right-hand thread and once again to record explicitly that left-hand
+  // thread is the SAME call, not a distinct one this function forgot to make.
+  const bool rightHandThread = true;   // FM_THREAD
+  const bool leftHandThread = true;    // FM_THREAD_REVERSE (same bool)
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_SYNC, false, rightHandThread));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_SYNC, false, leftHandThread));
+}
+
+TEST(UiStateMenuTileBlock, SyncPrecedenceUnderPowerAndInFeedModeIsMotion) {
+  // Both conditions apply at once: under power AND not in a thread mode.
+  // The implementation checks motionActive first and returns MTB_MOTION
+  // without ever consulting threadMode - i.e. "stop the carriage" wins over
+  // "needs thread mode" when both are true. Pinning that precedence, not
+  // changing it (task instructions: assert what the implementation does).
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_SYNC, true, /*threadMode=*/false));
+}
+
+TEST(UiStateMenuTileBlock, ThemeBlockedOnlyByMotion) {
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_THEME, true, false));
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_THEME, true, true));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_THEME, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_THEME, false, true));
+}
+
+TEST(UiStateMenuTileBlock, DroDatumBlockedOnlyByMotion) {
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_DRO_DATUM, true, false));
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_DRO_DATUM, true, true));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_DRO_DATUM, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_DRO_DATUM, false, true));
+}
+
+TEST(UiStateMenuTileBlock, SoftwareUpdateBlockedOnlyByMotion) {
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_SOFTWARE_UPDATE, true, false));
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_SOFTWARE_UPDATE, true, true));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_SOFTWARE_UPDATE, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_SOFTWARE_UPDATE, false, true));
+}
+
+TEST(UiStateMenuTileBlock, WifiSetupBlockedOnlyByMotion) {
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_WIFI_SETUP, true, false));
+  EXPECT_EQ(MTB_MOTION, menuTileBlock(MENU_WIFI_SETUP, true, true));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_WIFI_SETUP, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_WIFI_SETUP, false, true));
+}
+
+TEST(UiStateMenuTileBlock, UnitsNeverBlockedByMotionOrFeedMode) {
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_UNITS, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_UNITS, true, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_UNITS, true, true));
+}
+
+TEST(UiStateMenuTileBlock, JogSpeedNeverBlockedByMotionOrFeedMode) {
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_JOG_SPEED, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_JOG_SPEED, true, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_JOG_SPEED, true, true));
+}
+
+TEST(UiStateMenuTileBlock, DiagnosticsNeverBlockedByMotionOrFeedMode) {
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_DIAGNOSTICS, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_DIAGNOSTICS, true, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_DIAGNOSTICS, true, true));
+}
+
+TEST(UiStateMenuTileBlock, AboutNeverBlockedByMotionOrFeedMode) {
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_ABOUT, false, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_ABOUT, true, false));
+  EXPECT_EQ(MTB_NONE, menuTileBlock(MENU_ABOUT, true, true));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
