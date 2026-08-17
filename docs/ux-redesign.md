@@ -28,6 +28,28 @@ act on*. That one change is what buys back the panel.
 | **STOPS** | Set / clear the left / right stop | `STOPS` | `OK`, `HALT`, 4 s idle |
 | **MENU** | Move through menu tiles | `MENU` | `MENU`, `HALT` |
 
+### The rotary encoder
+
+The encoder drives **whatever has focus**, with one deliberate exception:
+
+| Focus | Encoder does |
+|---|---|
+| **Jog** (rest) | **Pitch** — *not* what the arrows do at rest. The encoder fills the gap, so pitch is adjustable without pressing `RATE` first. |
+| Rate | Pitch |
+| Jog speed | Jog speed |
+| Mode | Mode |
+| Menu | Move between tiles |
+| **Stops** | **Inert.** A knob is far easier to nudge than a key, and committing an endstop position must stay a deliberate keypress. |
+
+It routes through `UiState` like every key, so it obeys the same focus rules and the same
+engaged-inhibit. It previously called `next/prevFeedPitch()` directly, bypassing all of it.
+
+### ENABLE takes two presses when a widget is open
+
+Engaging is a commitment to cut, and you should not commit while your attention is still inside
+a picker. So with any widget or the menu open, the first `ENABLE` press **only dismisses it**;
+a second press engages. At rest it engages immediately, as before.
+
 `OK` has three jobs, and they never overlap:
 
 | Gesture | Context | Effect |
@@ -209,17 +231,48 @@ bottom bar is its readout.
 `MENU` again (or `HALT`) closes. A carousel rather than a vertical list because we only have
 left/right keys, and a 320×240 landscape panel suits a row of cards.
 
+**Tiles never edit in place.** `OK` either performs a one-shot action or closes the menu and
+opens the matching overlay — the same overlays the selector keys open. There is no editing
+sub-state: the arrows mean "move between tiles" for as long as the menu is up, full stop. One
+grammar, and nothing new to learn.
+
 | Tile | `OK` does | Notes |
 |---|---|---|
-| **Units** | Toggle mm / inch | Must also `setFeedSelect(-1)` — `setUnitMode()` is a bare assignment (`globalstate.cpp:182`) and does not reset the index |
-| **Theme** | Toggle dark / light | Persisted. Rebuilds the screen via `setDisplayReset()` |
-| **DRO datum** | ◀ ▶ pick Left / Right | Persisted. Re-picking also clears a manual zero |
-| **Jog speed** | ◀ ▶ adjust inline | The same widget `OK` opens at rest; here for discoverability |
-| **Sync** | Set a sync point against a stopped spindle | Disabled in Feed mode. Needs real work — today the anchor is only ever latched as a side effect of setting a stop |
-| **Software update** | Confirm → `setOTA()` | Replaces the half-nut hold |
-| **Setup / Wi-Fi** | Confirm → reboot into AP mode | **Needs new firmware** — see below |
-| **Diagnostics** | Live position error / pulse counts on screen | Replaces the dead serial debug mode |
+| **Units** | Toggle mm / inch | `GlobalState` restores the per-(mode,unit) pitch slot itself — do **not** also reset the index |
+| **Theme** | Toggle dark / light | Persisted. Refused while the carriage is under power |
+| **DRO datum** | Opens the datum overlay | Persisted. Refused while under power |
+| **Jog speed** | Opens the jog-speed overlay | The same widget `OK` opens at rest; here for discoverability |
+| **Sync** | Sets a sync point | Disabled in feed mode **and while the axis is under power** — see §9 item 12 |
+| **Software update** | `setOTA()` | Replaces the half-nut hold. Refused under power |
+| **Setup / Wi-Fi** | Reboots into AP mode | Refused under power. See below |
+| **Diagnostics** | Live position error, spindle vs leadscrew rates, sync anchor state | Replaces the dead serial debug mode, which stays dead |
 | **About** | Firmware version, IP, uptime | Read-only |
+
+### Lathe geometry is web-only
+
+Encoder PPR, stepper PPR, `invertDirection`, the gearbox ratio, leadscrew pitch, jog speed,
+acceleration and max speed are **commissioning values**: set once over Wi-Fi with the lathe
+offline, and changed only there. **The device must never write them.** The menu covers only what
+is worth tweaking mid-session.
+
+This is enforced by the shape of the API, not by discipline: `saveLathePreferences(theme, datum)`
+takes values, so there is no struct a caller could get wrong. Geometry exists only as bytes read
+back from flash inside that function. The predecessor took a `LatheConfig*` and wrote
+`sizeof(LatheConfig)`, so a theme toggle rewrote all nine geometry fields out of an in-RAM
+reconstruction — and a stale copy, a missed field or an unseeded struct would each have silently
+replaced the user's commissioning.
+
+### Auto-return is rejected
+
+Automatically running back to the other stop after a pass **only works with a servo on the
+cross-slide to retract the tool**. Without one the return pass is still cutting and mars the
+thread just made. This is a machining fact, not a UI preference. Do not re-propose it.
+
+### There is no separate "zero on set"
+
+Setting the datum-preferred stop already makes it the datum, which already reads `0.00`. A
+preference for it would be a no-op field — and a `LatheConfig` addition, which costs a
+`CHECKVALUE` bump and wipes every device's Wi-Fi. Considered and dropped.
 
 ### Setup tile needs a reboot flag
 
