@@ -140,9 +140,17 @@ void ButtonPad::applyIntent(UiIntent intent) {
   //   * handleRelease() returns early inside its 10 ms debounce
   //     (src/keyarray.cpp:159), so a very short tap can emit Press with no
   //     matching Release at all.
-  //   * handleTimer() (src/keyarray.cpp:68-75) re-reads the matrix, and if a
-  //     second key is touched during a hold it emits the cancellation against
-  //     button 0 rather than the arrow, so the arrow's Release never arrives.
+  //   * handleTimer() (src/keyarray.cpp:68-75) re-reads the matrix one second
+  //     after the Press. If a second key is touched by then the scan returns a
+  //     different code, so it takes the else branch and clears buttonState to
+  //     {0, BS_NONE} WITHOUT emitting anything. The eventual handleRelease()
+  //     then emits BS_RELEASED against that cleared `button` - i.e. button 0,
+  //     not the arrow - and codeToKey() drops it. The arrow's Release never
+  //     arrives.
+  //     (The same else branch also fires with no second key if the contact is
+  //     open at the one-second mark, which is what makes the first bullet
+  //     terminal: the stale BS_PRESSED that would otherwise have produced a
+  //     late Release is wiped, silently, one second in.)
   // A dead-man jog that never receives its Release cannot stop itself; only
   // HALT / ENABLE / the next arrow gesture will.
   //
@@ -217,8 +225,14 @@ void ButtonPad::applyIntent(UiIntent intent) {
     // (FEED -> THREAD -> THREAD_REVERSE -> FEED, globalstate.cpp:51-75), so
     // stepping forward twice lands on the previous mode. IncFeedMode() also
     // restores that slot's remembered pitch index, and doing it twice is
-    // harmless - the intermediate mode's slot is only read, never written.
-    // Replace with a real DecFeedMode() if the cycle ever stops being 3 long.
+    // harmless - but NOT because the intermediate slot is untouched: it does
+    // get written, since setFeedSelect() always mirrors back into
+    // m_pitchMemory (globalstate.cpp:142-143). It is harmless because that
+    // write-back is idempotent - it stores the value it just read from the
+    // same slot, and every pair (intermediate, destination) either shares one
+    // slot or touches two disjoint ones, so nothing leaks between them.
+    // Replace with a real DecFeedMode() if the cycle ever stops being 3 long,
+    // or if setFeedSelect()'s bounds fallback ever becomes slot-dependent.
     globalState->IncFeedMode();
     globalState->IncFeedMode();
     m_leadscrew->setTargetPitchMM(globalState->getCurrentFeedPitch());

@@ -56,6 +56,17 @@
 // the arrows are the only actuators. ENABLE is machine state and is handled
 // outside the focus model, in ButtonPad directly.
 //
+// Orientation ("H is rows, V is columns") is NOT provable from source - the scan
+// only ever sees two bitmasks, and the boot gesture uses H2/V2, the centre key
+// under either reading. It was confirmed against the physical panel by its
+// owner: the top row reads 9, 17, 33 left to right. That is why the table above
+// runs codes ACROSS each row rather than down each column.
+//
+// If the loom is ever rewired, the nine codes stay correct and distinct but the
+// assignment transposes - the legends would read MODE / left-arrow / HALT down
+// the left-hand column instead. Re-confirm by pressing each key and reading the
+// code before making new caps.
+//
 // Code 18 must stay the centre key: src/main.cpp:144-160 samples
 // ELS_PAD_H2 / ELS_PAD_V2 (i.e. code 18) at boot to enter Wi-Fi setup mode.
 // Putting OK there keeps that gesture as "hold OK at power-on for setup".
