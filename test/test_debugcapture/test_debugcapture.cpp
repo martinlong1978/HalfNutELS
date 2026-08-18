@@ -22,6 +22,9 @@
 #include "config.h"
 #include "globalstate.h"
 
+#include <map>
+#include <vector>
+
 #include "debugcapture.h"
 
 namespace {
@@ -29,22 +32,45 @@ namespace {
 // --- Allocator seam ---------------------------------------------------------
 // Lets the size ladder and the out-of-memory path be driven deterministically;
 // a real malloc never fails at these sizes on the host.
+// Two independent models, because the ladder now answers two questions.
+// g_failFirstN fails the first N calls outright ("this allocation cannot be
+// served"). g_budgetBytes models a FIXED-SIZE heap: a call succeeds only while
+// the outstanding total still fits. The second is what reproduces the failure
+// seen on the device - a trace that fits, followed by an upload that does not.
 size_t g_failFirstN = 0;   // fail this many allocations, then succeed
+size_t g_budgetBytes = 0;  // 0 = unlimited
+size_t g_outstanding = 0;
 size_t g_allocCalls = 0;
 size_t g_freeCalls = 0;
 size_t g_lastAllocBytes = 0;
+std::vector<size_t> g_allocSizes;
+std::map<void*, size_t> g_liveSizes;
 
 void* testAlloc(size_t bytes) {
   g_allocCalls++;
   g_lastAllocBytes = bytes;
+  g_allocSizes.push_back(bytes);
   if (g_allocCalls <= g_failFirstN) {
     return 0;
   }
-  return malloc(bytes);
+  if (g_budgetBytes != 0 && g_outstanding + bytes > g_budgetBytes) {
+    return 0;
+  }
+  void* p = malloc(bytes);
+  if (p != 0) {
+    g_outstanding += bytes;
+    g_liveSizes[p] = bytes;
+  }
+  return p;
 }
 
 void testFree(void* p) {
   g_freeCalls++;
+  std::map<void*, size_t>::iterator it = g_liveSizes.find(p);
+  if (it != g_liveSizes.end()) {
+    g_outstanding -= it->second;
+    g_liveSizes.erase(it);
+  }
   free(p);
 }
 
@@ -52,6 +78,10 @@ class DebugCaptureTest : public ::testing::Test {
  protected:
   void SetUp() override {
     g_failFirstN = 0;
+    g_budgetBytes = 0;
+    g_outstanding = 0;
+    g_allocSizes.clear();
+    g_liveSizes.clear();
     g_allocCalls = 0;
     g_freeCalls = 0;
     g_lastAllocBytes = 0;
@@ -123,8 +153,10 @@ TEST_F(DebugCaptureTest, ArmAllocatesTheFullWindowAndStartsRecording) {
   EXPECT_EQ(kWantSamples, c.capacity());
   EXPECT_EQ(0, c.count());
   EXPECT_NE((DebugData*)0, c.slot());
-  EXPECT_EQ(1u, g_allocCalls);
-  EXPECT_EQ((size_t)kWantSamples * sizeof(DebugData), g_lastAllocBytes);
+  ASSERT_EQ(2u, g_allocCalls) << "the trace, then the upload reserve";
+  EXPECT_EQ((size_t)kWantSamples * sizeof(DebugData), g_allocSizes[0]);
+  EXPECT_EQ(kUploadReserveBytes, g_allocSizes[1]);
+  EXPECT_TRUE(c.hasUploadReserve());
   c.discard();
 }
 
@@ -172,6 +204,83 @@ TEST_F(DebugCaptureTest, EveryAllocationFailingLeavesItOffAndSaysSo) {
   EXPECT_EQ((DebugData*)0, c.slot());
 }
 
+// --- The upload reserve ----------------------------------------------------
+//
+// REGRESSION: the device recorded a 2000-sample trace and could then never
+// send it. Boot heap measured free=226,584 largest=110,580: the 104,000-byte
+// trace fit inside the largest block with ~6.5 KB behind it, the ladder was
+// satisfied, and xTaskCreatePinnedToCore then failed to find a contiguous
+// 20 KB stack. It surfaced only as "send failed", which reads as a network
+// fault. Total free heap was never the constraint - contiguity was.
+
+TEST_F(DebugCaptureTest, LadderDropsARungWhenTheUploadWouldNotFitBehindTheTrace) {
+  // The measured block, exactly. The top rung fits the trace and strands the
+  // upload; a correct ladder must refuse it.
+  g_budgetBytes = 110580;
+  DebugCapture c;
+  ASSERT_TRUE(c.arm(0));
+
+  EXPECT_LT(c.capacity(), kWantSamples)
+      << "the rung that strands the upload must be rejected";
+  EXPECT_TRUE(c.hasUploadReserve())
+      << "a trace that cannot be sent is worthless";
+  EXPECT_LE((size_t)c.capacity() * sizeof(DebugData) + kUploadReserveBytes,
+            g_budgetBytes)
+      << "trace and upload reserve must BOTH fit in the real heap";
+  EXPECT_GE(c.capacity(), kMinSamples) << "still a usable window";
+  c.discard();
+}
+
+TEST_F(DebugCaptureTest, ARejectedRungGivesItsTraceBackBeforeTryingTheNext) {
+  g_budgetBytes = 110580;
+  DebugCapture c;
+  ASSERT_TRUE(c.arm(0));
+  // Whatever the ladder tried and abandoned must not still be held, or the
+  // next rung is measured against a heap the failed attempt is squatting in.
+  EXPECT_EQ((size_t)c.capacity() * sizeof(DebugData) + kUploadReserveBytes,
+            g_outstanding)
+      << "only the accepted trace and its reserve remain outstanding";
+  c.discard();
+  EXPECT_EQ(0u, g_outstanding) << "discard leaves nothing behind";
+}
+
+TEST_F(DebugCaptureTest, ArmFailsRatherThanRecordAnUnsendableTrace) {
+  // Enough for the smallest window but not for the upload behind it. Recording
+  // anyway would produce a trace that can only ever fail to send.
+  g_budgetBytes = (size_t)kMinSamples * sizeof(DebugData) + 1024;
+  DebugCapture c;
+  EXPECT_FALSE(c.arm(0));
+  EXPECT_EQ(DBG_NOMEM, c.state());
+  EXPECT_FALSE(c.recording());
+  EXPECT_EQ(0u, g_outstanding) << "a failed arm must hold nothing";
+}
+
+TEST_F(DebugCaptureTest, ReleasingTheUploadReserveIsIdempotent) {
+  DebugCapture c;
+  ASSERT_TRUE(c.arm(0));
+  c.releaseUploadReserve();
+  EXPECT_FALSE(c.hasUploadReserve());
+  EXPECT_EQ(1u, g_freeCalls);
+  // The retry path after a failed POST reaches here again; it must not
+  // double-free the block it already handed back.
+  c.releaseUploadReserve();
+  EXPECT_EQ(1u, g_freeCalls) << "second call is a no-op";
+  EXPECT_TRUE(c.recording()) << "handing back the reserve does not stop the trace";
+  c.discard();
+}
+
+TEST_F(DebugCaptureTest, TheTraceSurvivesHandingBackTheUploadReserve) {
+  DebugCapture c;
+  ASSERT_TRUE(c.arm(0));
+  writeSample(c, 0, 1, 1.5f);
+  c.releaseUploadReserve();
+  ASSERT_EQ(1, c.count());
+  ASSERT_NE((const DebugData*)0, c.data());
+  EXPECT_FLOAT_EQ(1.5f, c.data()[0].positionError)
+      << "the payload must still be intact when the upload reads it";
+  c.discard();
+}
+
 TEST_F(DebugCaptureTest, ReArmingRestartsRatherThanLeaking) {
   DebugCapture c;
   ASSERT_TRUE(c.arm(0));
@@ -180,8 +289,8 @@ TEST_F(DebugCaptureTest, ReArmingRestartsRatherThanLeaking) {
 
   ASSERT_TRUE(c.arm(5000));
   EXPECT_EQ(0, c.count()) << "a second arm starts a new trace";
-  EXPECT_EQ(2u, g_allocCalls);
-  EXPECT_EQ(1u, g_freeCalls) << "the first buffer must be freed, not leaked";
+  EXPECT_EQ(4u, g_allocCalls) << "trace + reserve, twice";
+  EXPECT_EQ(2u, g_freeCalls) << "the first buffer AND its reserve must be freed";
   c.discard();
 }
 
@@ -192,7 +301,8 @@ TEST_F(DebugCaptureTest, DiscardFreesAndStopsTheHotLoopFirst) {
   EXPECT_FALSE(c.recording());
   EXPECT_EQ((DebugData*)0, c.slot());
   EXPECT_EQ(DBG_OFF, c.state());
-  EXPECT_EQ(1u, g_freeCalls);
+  EXPECT_EQ(2u, g_freeCalls) << "the trace and the upload reserve";
+  EXPECT_FALSE(c.hasUploadReserve());
 }
 
 // ===========================================================================
@@ -425,7 +535,7 @@ TEST_F(DebugCaptureTest, ReleaseHandsBackTheRamButKeepsTheCount) {
   const int captured = c.count();
 
   c.release(DBG_SENT);
-  EXPECT_EQ(1u, g_freeCalls) << "the 100 KB trace must go back to the heap";
+  EXPECT_EQ(2u, g_freeCalls) << "the trace and the upload reserve go back";
   EXPECT_EQ(DBG_SENT, c.state());
   EXPECT_EQ(captured, c.count()) << "the status line still reports the count";
   EXPECT_FALSE(c.readyToSend()) << "a released trace must not be sent twice";

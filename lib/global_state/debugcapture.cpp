@@ -23,6 +23,7 @@ void DebugCapture::setAllocatorForTest(void* (*alloc)(size_t),
 DebugCapture::DebugCapture() {
   m_write = 0;
   m_buffer = 0;
+  m_reserve = 0;
   m_recording = false;
   m_state = DBG_OFF;
   m_count = 0;
@@ -49,12 +50,26 @@ bool DebugCapture::arm(uint32_t startMicros) {
   static const int ladder[] = {kWantSamples, 1600, 1000, kMinSamples};
   DebugData* buffer = 0;
   int capacity = 0;
+  // Each rung must satisfy BOTH allocations: the trace, and the reserve the
+  // upload will need afterwards. Taking a rung that fits the trace but leaves
+  // no contiguous room for the upload task is the failure kUploadReserveBytes
+  // documents - the trace is worthless if it can never be sent. Ordering
+  // matters: the trace is claimed first so the reserve cannot take the block
+  // the trace would have used and push it down a rung unnecessarily.
+  void* reserve = 0;
   for (size_t i = 0; i < sizeof(ladder) / sizeof(ladder[0]); i++) {
     buffer = (DebugData*)s_alloc((size_t)ladder[i] * sizeof(DebugData));
-    if (buffer != 0) {
+    if (buffer == 0) {
+      continue;
+    }
+    reserve = s_alloc(kUploadReserveBytes);
+    if (reserve != 0) {
       capacity = ladder[i];
       break;
     }
+    // Trace fits, upload would not. Give it back and try a shorter window.
+    s_free(buffer);
+    buffer = 0;
   }
   if (buffer == 0) {
     m_state = DBG_NOMEM;
@@ -62,6 +77,7 @@ bool DebugCapture::arm(uint32_t startMicros) {
   }
 
   m_buffer = buffer;
+  m_reserve = reserve;
   m_capacity = capacity;
   m_count = 0;
   m_startMicros = startMicros;
@@ -97,9 +113,21 @@ void DebugCapture::discard() {
     s_free(m_buffer);
     m_buffer = 0;
   }
+  releaseUploadReserve();
   m_capacity = 0;
   m_count = 0;
   m_state = DBG_OFF;
+}
+
+// Hands the upload its memory back. Deliberately NOT part of release()/
+// discard() ordering games: it touches nothing the hot loop reads, so it needs
+// no m_recording dance. Idempotent, because a failed upload keeps its trace and
+// the retry path reaches here a second time.
+void DebugCapture::releaseUploadReserve() {
+  if (m_reserve != 0) {
+    s_free(m_reserve);
+    m_reserve = 0;
+  }
 }
 
 void DebugCapture::release(DebugCaptureState endState) {
@@ -110,6 +138,7 @@ void DebugCapture::release(DebugCaptureState endState) {
     s_free(m_buffer);
     m_buffer = 0;
   }
+  releaseUploadReserve();
   // m_count and m_capacity are deliberately KEPT: they are what the status
   // line reports ("SENT 2400"). readyToSend() tests m_buffer, so a released
   // capture can never be uploaded a second time.

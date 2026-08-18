@@ -74,12 +74,22 @@ def safe(text, fallback):
     return cleaned[:32] or fallback
 
 
+# Mirrors kStallGapMicros in lib/global_state/debugcapture.h.
+STALL_GAP_US = 2000
+
+
 def summarise(body):
-    """(rows, seconds, reversals) from the CSV body, for the console line."""
+    """(rows, seconds, reversals, stalls, max_gap) for the console line.
+
+    The stall figures are the headline: they are what says, before anyone opens
+    the file, whether this capture caught the hot loop being starved.
+    """
     lines = body.decode("utf-8", "replace").splitlines()
     rows = [ln for ln in lines[1:] if ln.strip()]
     seconds = 0.0
     reversals = 0
+    stalls = 0
+    max_gap = 0
     previous_direction = None
     first_time = None
     last_time = None
@@ -98,9 +108,19 @@ def summarise(body):
         if previous_direction is not None and direction != previous_direction:
             reversals += 1
         previous_direction = direction
+        # loopGapUs is column 12, appended after the original eleven - absent in
+        # captures taken before it existed, which is why this is guarded.
+        if len(fields) >= 12:
+            try:
+                gap = int(fields[11])
+            except ValueError:
+                continue
+            max_gap = max(max_gap, gap)
+            if gap >= STALL_GAP_US:
+                stalls += 1
     if first_time is not None and last_time is not None:
         seconds = (last_time - first_time) / 1e6
-    return len(rows), seconds, reversals
+    return len(rows), seconds, reversals, stalls, max_gap
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -144,10 +164,12 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "wb") as handle:
             handle.write(body)
 
-        rows, seconds, reversals = summarise(body)
+        rows, seconds, reversals, stalls, max_gap = summarise(body)
         print(
-            "%s  %s  %d rows  %.1f s  %d direction reversals  fw %s  (%d bytes)"
-            % (stamp, name, rows, seconds, reversals, version, len(body)),
+            "%s  %s  %d rows  %.1f s  %d reversals  %d stalls (max gap %d us)"
+            "  fw %s  (%d bytes)"
+            % (stamp, name, rows, seconds, reversals, stalls, max_gap, version,
+               len(body)),
             flush=True,
         )
         self._reply(200, "stored %s (%d rows)" % (name, rows))

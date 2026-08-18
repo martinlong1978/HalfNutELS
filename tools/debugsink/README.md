@@ -12,10 +12,11 @@ python3 debugsink.py --port 8088 --dir /srv/els-captures
 ```
 
 Python 3.7+, standard library only — nothing to install. It prints one line per
-capture:
+capture, with the stall figures up front so you know before opening the file
+whether it caught the hot loop being starved:
 
 ```
-20260818-201500  capture-20260818-201500-A1B2C3D4.csv  2400 rows  59.8 s  17 direction reversals  fw v0.2.1  (198431 bytes)
+20260818-201500  capture-20260818-201500-A1B2C3D4.csv  2000 rows  49.8 s  17 reversals  10 stalls (max gap 8400 us)  fw v0.2.1  (154002 bytes)
 ```
 
 Leave it running (`tmux`, `screen`, or a systemd unit — a sample one is at the
@@ -53,8 +54,8 @@ Diagnostics screen still shows it filling; it simply has nowhere to go.
    it allocates ~105 KB, and a trace armed after the cut starts would not
    contain the cut.
 2. `MENU` → **Debug capture** → `OK`. The menu closes onto the Diagnostics
-   screen, whose title row now reads `REC 0/2400`.
-3. Make the cut. The buffer spans about 60 seconds.
+   screen, whose title row now reads `REC 0/2000`.
+3. Make the cut. The buffer spans about 50 seconds.
    *The Diagnostics screen closes itself the moment the carriage moves* — that
    is the panel's motion lockout ("all of the operator's attention should be on
    the tool, not the screen"), and it applies here like everywhere else. The
@@ -63,7 +64,7 @@ Diagnostics screen still shows it filling; it simply has nowhere to go.
 4. When it fills, the capture stops itself. The title reads `FULL: STOP TO SEND`.
 5. **Stop the carriage.** As soon as the axis is genuinely at rest (motion
    disabled *and* the deceleration ramp finished) the device connects to Wi-Fi
-   on its own and sends: `SENDING TRACE`, then `SENT 2400`.
+   on its own and sends: `SENDING TRACE`, then `SENT 2000`.
 6. If it says `SEND FAILED` the trace is still in RAM — stop the carriage again
    any time after 30 seconds and it retries. Pressing `OK` on the tile at that
    point throws the trace away instead.
@@ -89,6 +90,27 @@ It prints, in this order:
 * the **largest error excursions** — contiguous runs above a threshold, worst
   first, each with its start time, duration, peak error, position, direction and
   planner speed;
+* the **starvation correlation** — the section the capture exists for. For each
+  large excursion it prints the four samples leading up to the peak, the peak
+  itself and the two after, with `loopGapUs` and `spindleDelta` beside
+  `posError`, so the causal order is *visible* rather than inferred:
+
+  ```
+  EXCURSION 1  peak posError 1200.0 at t=3.0000 s
+        t(s)     gap(us)    delta     posError        pos   dir
+      2.9750          16        1         -0.9       4641     1
+      3.0000        8400       52       1200.0       4680     1  <-- peak
+      3.0010          20        1        800.0       5080     1
+    verdict: loop gap 8400 us (350x the median) at or just before the peak,
+             with a spindle delta of 52 alongside it
+             -> consistent with SpindleTask starvation
+  ```
+
+  A gap spike followed by a delta spike followed by an error spike is
+  starvation of `SpindleTask` and nothing else. An error spike with a flat gap
+  and a flat delta means the fault is in the motion maths, and the script says
+  so — naming the re-sync gate as the suspect. It ends with an overall verdict
+  (all / none / mixed) across the excursions examined;
 * every **direction reversal**, with how far the carriage travelled before the
   next one, in pulses *and in degrees of leadscrew rotation* (the units the
   symptom was reported in — pass `--steps-per-rev` if the machine is not the
@@ -110,7 +132,7 @@ Useful flags: `--top N` (how many rows per table), `--error-threshold PULSES`
 `text/csv`, one header line then one row per sample:
 
 ```
-time,posError,posErrorRaw,pulseToTarget,pos,expectedPos,speed,direction,targetSpeed,speedDiff,timeToTarget
+time,posError,posErrorRaw,pulseToTarget,pos,expectedPos,speed,direction,targetSpeed,speedDiff,timeToTarget,loopGapUs,spindleDelta
 ```
 
 * `time` — **microseconds since the capture was armed**, not raw `micros()`.
@@ -119,6 +141,20 @@ time,posError,posErrorRaw,pulseToTarget,pos,expectedPos,speed,direction,targetSp
 * `posError` = `posErrorRaw` + `pulseToTarget`, all in pulses.
 * `speed` / `targetSpeed` — planner and target, in pulses per second.
 * `direction` — commanded direction: `-1` left, `+1` right, `0` unknown.
+* `loopGapUs` — microseconds between hot-loop iterations, and `spindleDelta` —
+  what `consumePosition()` returned. **Both are peak-held between samples**: each
+  row reports the worst its window saw, not an instantaneous reading, so a 2 ms
+  stall cannot fall between two rows and vanish. The device also *forces* a
+  sample when the gap reaches 2 ms or the delta reaches 8 counts, so an event
+  gets its own timestamped row within a millisecond.
+
+The last two columns are appended, so a capture taken before they existed still
+parses; the analysis script accepts both widths and says plainly when a trace is
+too old to test the starvation hypothesis.
+
+These two replace the old `ELS_STALL_TELEMETRY` serial print, which has been
+removed from `src/main.cpp`. It measured the right thing and reported it to a
+terminal nobody can watch at the lathe.
 
 Sent chunked (`Transfer-Encoding: chunked`) with these headers, which the sink
 uses for the filename and the summary line: `X-ELS-Device` (MAC),

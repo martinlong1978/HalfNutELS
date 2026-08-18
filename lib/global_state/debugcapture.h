@@ -195,6 +195,30 @@ static const int kSpindleDeltaTrigger = 8;
 static const int kWantSamples = 2000;   // 50 s at the periodic rate
 static const int kMinSamples = 500;     // 12.5 s - the smallest useful window
 
+// --- Upload reserve --------------------------------------------------------
+//
+// MEASURED on the device (v0.2.2 + UI redesign, at boot):
+//   free = 226,584 bytes, largest contiguous block = 110,580.
+//
+// Total free heap is not the constraint - CONTIGUITY is. A 2000-sample trace
+// is 104,000 bytes and fits inside that 110 KB block with ~6.5 KB to spare,
+// so the ladder above accepted it happily; the upload task then asked for a
+// contiguous 20 KB stack, found no block that size anywhere, and
+// xTaskCreatePinnedToCore failed. On the bench that surfaced only as
+// "send failed" on the Diagnostics tile, which is why it read as a network
+// fault for a whole session.
+//
+// So arm() reserves the upload's memory up front and HOLDS it, handing it
+// back only when the upload actually starts. That converts the ladder's
+// question from "does the trace fit?" - which was never the one that
+// mattered - into "does the trace fit AND can the upload still run?".
+//
+// Sized for a 20 KB task stack plus the WiFi stack's own allocations when the
+// radio is brought up from cold (STA association is tens of KB). An http://
+// sink needs no TLS session or CA bundle, which is the other reason to prefer
+// one (tools/debugsink/README.md).
+static const size_t kUploadReserveBytes = 56u * 1024u;
+
 class DebugCapture {
  public:
   DebugCapture();
@@ -345,6 +369,15 @@ class DebugCapture {
   int count() const { return m_count; }
   int capacity() const { return m_capacity; }
 
+  // Hands back the memory arm() set aside for the upload, immediately before
+  // the upload task is created. Idempotent: a second call is a no-op, so a
+  // retry after a failed POST does not double-free.
+  void releaseUploadReserve();
+
+  // Whether the reserve is still held. Tests assert the ladder actually took
+  // it, rather than inferring it from a capacity that could match by luck.
+  bool hasUploadReserve() const { return m_reserve != 0; }
+
   // The captured trace, for the uploader. Null when nothing is held.
   const DebugData* data() const { return m_buffer; }
 
@@ -363,6 +396,7 @@ class DebugCapture {
  private:
   DebugData* volatile m_write;   // cursor; valid only while m_recording
   DebugData* m_buffer;           // base of the allocation, or null
+  void* m_reserve;               // upload's memory, held until it starts
   volatile bool m_recording;
   volatile int m_state;          // DebugCaptureState, as an aligned int
   volatile int m_count;

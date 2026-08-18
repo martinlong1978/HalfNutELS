@@ -31,6 +31,11 @@ volatile bool g_uploadRunning = false;
 const uint32_t kRetryCooldownMs = 30000;
 uint32_t g_nextAttemptMs = 0;
 
+// What the SpindleTask is dropped to for the duration of an upload. Low
+// enough to be out of the way of the WiFi driver (23) and the flash IPC task
+// (24) on core 0; still a real priority, so the loop keeps running.
+const UBaseType_t kUploadSpindlePriority = 2;
+
 const uint32_t kWifiTimeoutMs = 20000;
 const uint32_t kSocketTimeoutMs = 15000;
 
@@ -180,29 +185,30 @@ void uploadTask(void* arg) {
   GlobalState* gs = GlobalState::getInstance();
   DebugCapture& dbg = gs->debug();
   bool sent = false;
+  bool lowered = false;
+  UBaseType_t spindlePriority = 0;
 
-  // SUSPEND THE SPINDLE TASK FOR THE DURATION.
+  // ORDERING RULE FOR THIS WHOLE FUNCTION: NO FLASH ACCESS WHILE THE SPINDLE
+  // TASK IS SUSPENDED.
   //
-  // Not a flag tested inside the motion loop - the whole point of this feature
-  // set is that nothing is added to that loop while it is not capturing, and a
-  // "should I yield?" test there would be exactly that. Suspension costs the
-  // hot path nothing at all, and it is the only way the WiFi driver (core 0,
-  // priority 23) gets any CPU: the SpindleTask runs a non-blocking loop at
-  // priority 24 on the same core and would starve it outright.
+  // A flash operation has to disable the flash cache on BOTH cores, which
+  // means stopping the other core and waiting for it to acknowledge. Doing
+  // that with the SpindleTask suspended deadlocked the device outright: the
+  // upload task sat inside getWebSettings()'s ESP.flashRead forever, the
+  // carriage was dead because the spindle task never came back, and nothing
+  // recovered it - disableLoopWDT() plus the two esp_task_wdt_delete() calls
+  // in main.cpp mean no watchdog is watching. Entirely silent: the screen just
+  // said SENDING TRACE, permanently. Only a numbered trace through this
+  // function found it, because "send failed" is what the operator saw and the
+  // failure is not in sending.
   //
-  // Safe precisely because of the at-rest gate that got us here: no step is
-  // due, and the planner's speed is zero. What is NOT safe is resuming into a
-  // stale spindle delta - the encoder keeps counting while we are suspended,
-  // so an axis left engaged would come back to a following error of thousands
-  // of pulses and bolt for it. Hence the forced MM_DISABLED before the resume
-  // below, which makes the first update() after resume pin m_expectedPosition
-  // to the current position and discard the accumulated count.
-  if (spindleTaskHandle != nullptr) {
-    vTaskSuspend(spindleTaskHandle);
-  }
-
+  // So the settings are read FIRST, at full speed, before anything is
+  // suspended - nothing about reading them needs the motion loop stopped.
+  Serial.println("capture: [0] upload task entered");
   WebSettings* webSettings = getWebSettings();
+  Serial.println("capture: [1] settings read");
   HttpUrlParts url;
+  bool haveUrl = false;
 
   if (webSettings->debugUrl[0] == '\0') {
     // Nowhere to send. Recording still worked, so this is a configuration
@@ -212,31 +218,80 @@ void uploadTask(void* arg) {
   } else if (!parseHttpUrl(webSettings->debugUrl, url)) {
     Serial.printf("capture: unusable debug URL \"%s\"\n", webSettings->debugUrl);
   } else {
+    haveUrl = true;
+  }
+
+  if (haveUrl) {
+    // YIELD CORE 0 BY LOWERING THE SPINDLE TASK, NOT BY SUSPENDING IT.
+    //
+    // Two constraints that look circular until you pick the right lever:
+    //  - WiFi cannot associate unless core 0 is available. The SpindleTask
+    //    runs a non-blocking loop at priority 24 and the WiFi driver tasks sit
+    //    at 23 on the same core, so they never get a cycle.
+    //  - Flash operations (and WiFi bring-up performs several, in NVS) need
+    //    core 0 to ACKNOWLEDGE a cache-disable request. A suspended task
+    //    cannot, and the whole device deadlocks silently - see the ordering
+    //    note above, which is what that cost us.
+    //
+    // Dropping the priority satisfies both: core 0 is free for the driver
+    // tasks and for the flash IPC, while the spindle task still EXISTS and
+    // still runs, so nothing that needs it to respond is left waiting. It also
+    // removes the suspend/resume hazards entirely - there is no window in
+    // which the loop is frozen mid-iteration.
+    //
+    // MM_DISABLED goes first, deliberately. The loop keeps running at low
+    // priority, so the axis must be told not to chase the spindle before it is
+    // slowed down: the encoder keeps counting throughout, and update() pins
+    // m_expectedPosition to the current position while disabled rather than
+    // accumulating a following error it would later bolt to close.
+    gs->setMotionMode(GlobalMotionMode::MM_DISABLED);
+    gs->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
+    if (spindleTaskHandle != nullptr) {
+      spindlePriority = uxTaskPriorityGet(spindleTaskHandle);
+      vTaskPrioritySet(spindleTaskHandle, kUploadSpindlePriority);
+      lowered = true;
+    }
+    Serial.println("capture: [2] spindle yielded, waiting for WiFi");
+
+    // Now the radio, with core 0 free for it. esp_wifi_init reads calibration
+    // and configuration out of NVS, and persistent mode WRITES the credentials
+    // back on every begin() - all flash operations, which is precisely why the
+    // step above lowers the spindle task rather than suspending it. Under a
+    // suspend these would have deadlocked exactly as the settings read did;
+    // ahead of it they would simply have starved, which is what they did.
+    //
+    // persistent(false) is not just about that: these credentials came from our
+    // own settings blob a few lines above, so re-persisting them to NVS on
+    // every capture upload is a flash write that buys nothing.
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
     WiFi.begin(webSettings->ssid, webSettings->password);
+    Serial.println("capture: [3] WiFi.begin returned, associating");
     const uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED &&
            (millis() - start) < kWifiTimeoutMs) {
       vTaskDelay(250 / portTICK_PERIOD_MS);
     }
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("capture: WiFi connect timed out");
+      Serial.printf("capture: WiFi connect timed out (wl_status=%d)\n",
+                    (int)WiFi.status());
     } else {
       Serial.printf("capture: sending %d samples to %s:%d%s\n", dbg.count(),
                     url.host, url.port, url.path);
       sent = postTrace(url, dbg.data(), dbg.count());
     }
+
+    // Put the radio away again: it shares core 0 with the motion loop, and
+    // there is no reason for it to stay associated once the trace is gone.
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
   }
 
-  // Put the radio away again: it shares core 0 with the motion loop, and there
-  // is no reason for it to stay associated once the trace is gone.
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
   delete webSettings;
 
   if (sent) {
-    // Hands the ~100 KB back but keeps the count, so the screen can still say
-    // "SENT 2400". readyToSend() goes false with the buffer, so this cannot be
+    // Hands the RAM back but keeps the count, so the screen can still say
+    // "SENT 1000". readyToSend() goes false with the buffer, so this cannot be
     // uploaded twice.
     dbg.release(DBG_SENT);
     Serial.println("capture: sent");
@@ -247,15 +302,13 @@ void uploadTask(void* arg) {
     Serial.println("capture: send FAILED, trace kept for retry");
   }
 
-  // Disengage before resuming - see the suspension note above. The operator
-  // has to press ENABLE again, which is the honest outcome: the machine has
-  // been out of sync with the spindle for the whole upload.
-  gs->setMotionMode(GlobalMotionMode::MM_DISABLED);
-  gs->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
-  if (spindleTaskHandle != nullptr) {
-    vTaskResume(spindleTaskHandle);
+  // Give the motion loop its priority back. MM_DISABLED was already set on the
+  // way in and is deliberately NOT undone: the machine has been out of sync
+  // with the spindle for the whole upload, so the operator pressing ENABLE
+  // again is the honest outcome.
+  if (lowered) {
+    vTaskPrioritySet(spindleTaskHandle, spindlePriority);
   }
-
   g_nextAttemptMs = millis() + kRetryCooldownMs;
   g_uploadRunning = false;
   vTaskDelete(nullptr);
@@ -295,6 +348,19 @@ void debugCapturePoll(Leadscrew* leadscrew) {
   // start a second upload.
   dbg.setState(DBG_SENDING);
   g_uploadRunning = true;
+
+  // Heap at the moment of truth. The trace is resident by now, and this is the
+  // budget the whole upload - task stack, WiFi, sockets - has to fit inside.
+  // Printed unconditionally: "could not start upload task" with no number
+  // attached is exactly why this failure survived a bench session undiagnosed.
+  Serial.printf("capture: heap free=%u largest=%u, trace=%u bytes\n",
+                (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                (unsigned)(dbg.count() * sizeof(DebugData)));
+
+  // Hand back the block arm() set aside for exactly this moment. Until now it
+  // has been held precisely so that nothing else could take it, and so that a
+  // trace is never recorded that cannot afterwards be sent.
+  dbg.releaseUploadReserve();
 
   // Its own task, on core 1, with a 20 KB stack: an https:// sink puts a TLS
   // session and the CA bundle on it, which is what makes the OTA task 24 KB.

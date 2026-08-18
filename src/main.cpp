@@ -212,6 +212,12 @@ void setup() {
     Serial.printf("SSID %s\n", webSettings->ssid);
     Serial.printf("password %s\n", webSettings->password);
     Serial.printf("url %s\n", webSettings->url);
+    Serial.printf("debugUrl %s\n", webSettings->debugUrl);
+    // Boot heap, against which the debug capture trace and the upload
+    // (task stack + WiFi) both have to fit. The sizing note in
+    // debugcapture.h assumes a number; this prints the real one.
+    Serial.printf("heap at boot free=%u largest=%u\n",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
 
     LatheConfigDerived* derivedConfig = new LatheConfigDerived(config);
