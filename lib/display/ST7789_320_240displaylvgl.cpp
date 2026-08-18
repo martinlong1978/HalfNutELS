@@ -3438,10 +3438,14 @@ void Display::drawOverlayStops(int confirmPermille) {
 // that here is how the screen and the action dispatcher end up disagreeing
 // about which tile is selected.
 //
-// Neighbours are asked for index-1 and index+1 unconditionally: menuTileName()
-// answers "" out of range, so the ends of the list simply show a blank on the
-// outside, which matches the clamp (the carousel does not wrap) and matches how
-// the RATE ticker renders its own ends.
+// Neighbours are the WRAPPED index-1 and index+1, so the ring reads as a ring:
+// left of the first tile is the last one, and it is right there on screen
+// before you press. That is the point of the wrap - you can see where the
+// short way round leads.
+static_assert(UiState::kMenuItemCount >= 3,
+              "the three-across carousel wraps; with fewer than three tiles a "
+              "wrapped neighbour would be the selected tile itself");
+
 void Display::drawOverlayMenu(bool motionActive, bool threadMode) {
   if (m_ui == nullptr) {
     return;  // no ButtonPad -> no menu; the Wi-Fi setup path never gets here.
@@ -3453,16 +3457,26 @@ void Display::drawOverlayMenu(bool motionActive, bool threadMode) {
   snprintf(buf, sizeof(buf), "%d / %d", index + 1, UiState::kMenuItemCount);
   setLabelText(overlayMenuPos, TS_OV_MENU_POS, buf);
 
-  setLabelText(overlayMenuTileLabel[0], TS_OV_MENU_PREV, menuTileName(index - 1));
-  setLabelText(overlayMenuTileLabel[1], TS_OV_MENU_NAME, menuTileName(index));
-  setLabelText(overlayMenuTileLabel[2], TS_OV_MENU_NEXT, menuTileName(index + 1));
+  // Wrapped, matching UiState's arrow and encoder branches exactly. The
+  // + kMenuItemCount before the modulo is what keeps the prev index
+  // non-negative at index 0.
+  const int prevIndex =
+      (index + UiState::kMenuItemCount - 1) % UiState::kMenuItemCount;
+  const int nextIndex = (index + 1) % UiState::kMenuItemCount;
 
-  // At the two ends of the (non-wrapping) ring there IS no neighbour, and an
-  // empty bordered tile would read as a broken widget -- hide the whole tile
-  // instead (its label is a child, so it goes with it). This matches the
-  // saturating clamp in UiState: no tile, nowhere to go that way.
-  const bool prevShown = (index - 1) >= 0;
-  const bool nextShown = (index + 1) < UiState::kMenuItemCount;
+  setLabelText(overlayMenuTileLabel[0], TS_OV_MENU_PREV, menuTileName(prevIndex));
+  setLabelText(overlayMenuTileLabel[1], TS_OV_MENU_NAME, menuTileName(index));
+  setLabelText(overlayMenuTileLabel[2], TS_OV_MENU_NEXT, menuTileName(nextIndex));
+
+  // BOTH neighbours are always present now: the ring wraps, so there is never
+  // a direction with nothing beyond it. The hide/show plumbing is kept rather
+  // than deleted because the tiles start life hidden or shown according to
+  // whatever the previous draw left behind, and this is what reconciles that.
+  //
+  // Three distinct tiles need at least three entries, or the carousel would
+  // show the same tile twice - see the static_assert below.
+  const bool prevShown = true;
+  const bool nextShown = true;
   if (prevShown != m_lastMenuPrevShown) {
     m_lastMenuPrevShown = prevShown;
     if (prevShown) {

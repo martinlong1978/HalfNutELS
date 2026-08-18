@@ -1358,33 +1358,57 @@ TEST(UiStateMenu, ArrowsMoveThroughTheTiles) {
   EXPECT_EQ(UiFocus::Menu, r.focus());
 }
 
-TEST(UiStateMenu, IndexClampsAtTheStart) {
-  // Clamping contract: the index saturates, it does NOT wrap, and a blocked
-  // move reports UiIntent::None so the display has no reason to redraw.
+TEST(UiStateMenu, IndexWrapsAtTheStart) {
+  // WRAPPING, not saturating. Owner's reason: "there's nothing worse than
+  // cycling through to something you know is at the end". Six tiles on a
+  // full-width carousel means the far end is five presses away the wrong way,
+  // and one press the right way.
   Rig r;
   r.click(UiKey::Menu);
   ASSERT_EQ(0, r.ui().menuIndex());
-  EXPECT_EQ(UiIntent::None, r.click(UiKey::Left));
-  EXPECT_EQ(0, r.ui().menuIndex());
+  EXPECT_EQ(UiIntent::MenuPrev, r.click(UiKey::Left));
+  EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex()) << "left from the first tile lands on the last";
   EXPECT_EQ(UiFocus::Menu, r.focus());
   EXPECT_TRUE(r.ui().menuOpen());
+  // And straight back, so the wrap is symmetric rather than a one-way jump.
+  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right));
+  EXPECT_EQ(0, r.ui().menuIndex());
 }
 
-TEST(UiStateMenu, IndexClampsAtTheEnd) {
+TEST(UiStateMenu, IndexWrapsAtTheEnd) {
   Rig r;
   r.click(UiKey::Menu);
   for (int i = 1; i < kMenuItems; ++i) {
     EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right)) << "step " << i;
     EXPECT_EQ(i, r.ui().menuIndex());
   }
-  EXPECT_EQ(UiIntent::None, r.click(UiKey::Right));
-  EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex());
-  // Extra pushes must not run away.
+  EXPECT_EQ(UiIntent::MenuNext, r.click(UiKey::Right));
+  EXPECT_EQ(0, r.ui().menuIndex()) << "right from the last tile lands on the first";
+  // Keeps going round rather than sticking or running off the end.
   r.click(UiKey::Right);
-  r.click(UiKey::Right);
-  EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex());
+  EXPECT_EQ(1, r.ui().menuIndex());
   EXPECT_EQ(UiIntent::MenuPrev, r.click(UiKey::Left));
-  EXPECT_EQ(kMenuItems - 2, r.ui().menuIndex());
+  EXPECT_EQ(0, r.ui().menuIndex());
+}
+
+TEST(UiStateMenu, AFullLapReturnsToWhereItStarted) {
+  // The index must stay inside [0, kMenuItems) for every step of a lap in
+  // both directions - the carousel renders straight from it, so an index one
+  // past either end would read or dispatch a tile that does not exist.
+  Rig r;
+  r.click(UiKey::Menu);
+  for (int i = 0; i < kMenuItems; ++i) {
+    r.click(UiKey::Right);
+    EXPECT_GE(r.ui().menuIndex(), 0) << "step " << i;
+    EXPECT_LT(r.ui().menuIndex(), kMenuItems) << "step " << i;
+  }
+  EXPECT_EQ(0, r.ui().menuIndex()) << "a full lap returns to the start";
+  for (int i = 0; i < kMenuItems; ++i) {
+    r.click(UiKey::Left);
+    EXPECT_GE(r.ui().menuIndex(), 0) << "step " << i;
+    EXPECT_LT(r.ui().menuIndex(), kMenuItems) << "step " << i;
+  }
+  EXPECT_EQ(0, r.ui().menuIndex()) << "and the same the other way";
 }
 
 // UPDATED (was OkActivatesTheCurrentTileAndLeavesTheMenuOpen). The old contract
@@ -1706,19 +1730,23 @@ TEST(UiStateEncoder, InTheMenuMovesBetweenTiles) {
   EXPECT_TRUE(r.ui().menuOpen());
 }
 
-TEST(UiStateEncoder, InTheMenuSaturatesAtBothEnds) {
-  // Same saturating behaviour as the arrows - the carousel does not wrap.
+TEST(UiStateEncoder, InTheMenuWrapsAtBothEnds) {
+  // The knob wraps exactly as the arrows do. A knob that stops dead at the
+  // end of a carousel feels broken in a way a button does not.
   Rig r;
   r.click(UiKey::Menu);
-  EXPECT_EQ(UiIntent::None, turn(r, false));
+  EXPECT_EQ(UiIntent::MenuPrev, turn(r, false));
+  EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex());
+
+  EXPECT_EQ(UiIntent::MenuNext, turn(r, true));
   EXPECT_EQ(0, r.ui().menuIndex());
 
   for (int i = 0; i < kMenuItems - 1; i++) {
     EXPECT_EQ(UiIntent::MenuNext, turn(r, true)) << "step " << i;
   }
   EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex());
-  EXPECT_EQ(UiIntent::None, turn(r, true));
-  EXPECT_EQ(kMenuItems - 1, r.ui().menuIndex());
+  EXPECT_EQ(UiIntent::MenuNext, turn(r, true));
+  EXPECT_EQ(0, r.ui().menuIndex());
 }
 
 // ---------------------------------------------------------------------------
@@ -3201,16 +3229,19 @@ TEST(UiStateReadOnlyScreens, DoNotTimeOut) {
   }
 }
 
-TEST(UiStateReadOnlyScreens, EnableDismissesThemWithoutEngaging) {
+TEST(UiStateReadOnlyScreens, EnableDismissesAboutWithoutEngaging) {
   // Same rule as a widget: engaging is a commitment to cut, and it must not
   // happen while a full screen is hiding the rest screen and the state chip.
-  for (UiFocus f : kReadOnlyScreens) {
-    Rig r;
-    r.enterFocus(f);
-    EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable)) << f;
-    EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
-    EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable)) << f;
-  }
+  //
+  // NARROWED from both read-only screens to About alone. The owner overturned
+  // it for Diagnostics - that screen is meant to be watched WHILE cutting, so
+  // requiring a dismiss before engaging would make it impossible to have up
+  // for the run it instruments. See UiStateDiagnosticsSurvivesMotion.
+  Rig r;
+  r.enterFocus(UiFocus::About);
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Enable));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable));
 }
 
 TEST(UiStateReadOnlyScreens, OkHoldDoesNotZeroTheDro) {
@@ -3583,10 +3614,11 @@ TEST(UiStateMotionLockout, AnInertKeyStillReconcilesACompletedRun) {
 TEST(UiStateCloseOnMotion, EveryOpenFocusClosesToJogWhenMotionStarts) {
   // Every focus that is not already Jog, including the carousel and the two
   // read-only screens that are otherwise exempt from every automatic dismissal.
-  const UiFocus opened[] = {UiFocus::JogSpeed,    UiFocus::Rate,
-                            UiFocus::Mode,        UiFocus::Stops,
-                            UiFocus::Menu,        UiFocus::DroDatum,
-                            UiFocus::Diagnostics, UiFocus::About};
+  // Diagnostics is DELIBERATELY absent - see UiStateDiagnosticsSurvivesMotion.
+  const UiFocus opened[] = {UiFocus::JogSpeed, UiFocus::Rate,
+                            UiFocus::Mode,     UiFocus::Stops,
+                            UiFocus::Menu,     UiFocus::DroDatum,
+                            UiFocus::About};
   for (UiFocus f : opened) {
     for (const UiContext& c : kUnderPower) {
       Rig r;
@@ -3596,6 +3628,98 @@ TEST(UiStateCloseOnMotion, EveryOpenFocusClosesToJogWhenMotionStarts) {
       EXPECT_EQ(UiFocus::Jog, r.focus()) << f;
       EXPECT_FALSE(r.ui().menuOpen()) << f;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTICS SURVIVES MOTION (owner ruling).
+//
+//   "the diagnostic screen should survive Enable and Jog, rather than
+//    dismissing like the others. It could be genuinely useful to have that on
+//    screen when debugging. Ok should clear it."
+//
+// It is the one screen whose whole value is being watched WHILE the machine
+// runs - following error and pulse counts are all zero at rest. About is not
+// included: it is a static version page with no reason to be up under power.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateDiagnosticsSurvivesMotion, TickLeavesItOpenUnderPower) {
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    r.enterFocus(UiFocus::Diagnostics);
+    ASSERT_EQ(UiFocus::Diagnostics, r.focus());
+    EXPECT_FALSE(r.tick(c)) << "no transition, so nothing to redraw";
+    EXPECT_EQ(UiFocus::Diagnostics, r.focus()) << "must stay up while moving";
+    // And it keeps surviving, tick after tick.
+    EXPECT_FALSE(r.tick(c));
+    EXPECT_EQ(UiFocus::Diagnostics, r.focus());
+  }
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, EnableEngagesInsteadOfDismissing) {
+  // Every other focus makes ENABLE a dismiss. Here it must do its real job,
+  // or the operator cannot start the very motion they are watching.
+  Rig r;
+  r.enterFocus(UiFocus::Diagnostics);
+  EXPECT_EQ(UiIntent::ToggleEngage, r.click(UiKey::Enable));
+  EXPECT_EQ(UiFocus::Diagnostics, r.focus()) << "and it stays on screen";
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, AboutIsUnchanged) {
+  // The ruling is about Diagnostics only.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    r.enterFocus(UiFocus::About);
+    EXPECT_TRUE(r.tick(c)) << "About still closes on motion";
+    EXPECT_EQ(UiFocus::Jog, r.focus());
+  }
+  Rig r2;
+  r2.enterFocus(UiFocus::About);
+  EXPECT_EQ(UiIntent::None, r2.click(UiKey::Enable)) << "About still dismisses";
+  EXPECT_EQ(UiFocus::Jog, r2.focus());
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, OkClearsItAtRest) {
+  Rig r;
+  r.enterFocus(UiFocus::Diagnostics);
+  r.click(UiKey::Ok);
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, OkClearsItUNDERPOWERToo) {
+  // The motion lockout makes the whole panel inert except HALT and ENABLE.
+  // OK must be exempt HERE, or "OK clears it" is false in exactly the state
+  // the screen is designed to be used in. Closing a read-only screen cannot
+  // start, stop or alter motion - it is the safest key on the panel.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    r.enterFocus(UiFocus::Diagnostics);
+    r.click(UiKey::Ok, c);
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << "OK must still clear it while moving";
+  }
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, TheLockoutIsOtherwiseUntouched) {
+  // Exempting OK on this one screen must not re-open the panel generally.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    r.enterFocus(UiFocus::Diagnostics);
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu, c));
+    EXPECT_EQ(UiFocus::Diagnostics, r.focus()) << "MENU stays inert under power";
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Mode, c));
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Rate, c));
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Stops, c));
+    EXPECT_EQ(UiFocus::Diagnostics, r.focus());
+  }
+}
+
+TEST(UiStateDiagnosticsSurvivesMotion, OkIsStillInertOnOtherFocusesUnderPower) {
+  // The exemption is keyed on the focus, not on the key.
+  for (const UiContext& c : kUnderPower) {
+    Rig r;
+    ASSERT_EQ(UiFocus::Jog, r.focus());
+    EXPECT_EQ(UiIntent::None, r.click(UiKey::Ok, c));
+    EXPECT_EQ(UiFocus::Jog, r.focus()) << "OK must not open JogSpeed under power";
   }
 }
 

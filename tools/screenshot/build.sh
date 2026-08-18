@@ -67,6 +67,10 @@ mapfile -t LV_SRCS < <(find "$LVGL/src" -name '*.c' | sort)
 PROJ_SRCS=(
   "$ROOT/lib/config/latheconfig.cpp"
   "$ROOT/lib/global_state/globalstate.cpp"
+  # GlobalState holds a DebugCapture by value and the Diagnostics screen
+  # formats its status, so the renderer needs the real implementation - it is
+  # pure C++ with no Arduino dependency, same as everything else here.
+  "$ROOT/lib/global_state/debugcapture.cpp"
   "$ROOT/lib/spindle/TestSpindle.cpp"
   "$ROOT/lib/leadscrew/leadscrew.cpp"
   "$ROOT/lib/ui/uistate.cpp"

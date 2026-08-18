@@ -48,6 +48,26 @@ inline bool isScreenFocus(UiFocus f) {
   return f == UiFocus::Diagnostics || f == UiFocus::About;
 }
 
+// THE ONE FOCUS THAT DELIBERATELY SURVIVES MOTION (owner ruling):
+//
+//   "the diagnostic screen should survive Enable and Jog, rather than
+//    dismissing like the others. It could be genuinely useful to have that on
+//    screen when debugging. Ok should clear it."
+//
+// Every other focus is dismissed the moment the carriage moves, on the
+// principle that the operator's attention belongs on the tool. Diagnostics is
+// the exception because its content is only meaningful WHILE the machine runs:
+// following error, pulse counts and the sync anchor all read zero at rest, so a
+// screen that closes on motion can never show the thing it exists to show.
+//
+// About is NOT included. It is a static version/credits page with no live
+// content and no reason to be up under power, so it keeps the ordinary rule.
+//
+// Consequences, all three keyed off this one predicate: tick() leaves it alone,
+// ENABLE engages instead of dismissing, and OK is exempted from the motion
+// lockout so it can still be closed.
+inline bool survivesMotion(UiFocus f) { return f == UiFocus::Diagnostics; }
+
 // One detent of the rotary encoder, either way.
 inline bool isEncoder(UiKey k) {
   return k == UiKey::EncoderCw || k == UiKey::EncoderCcw;
@@ -272,7 +292,12 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     if (ev != UiKeyEvent::Click) {
       return UiIntent::None;
     }
-    if (m_menuOpen || isWidgetFocus(m_focus) || isScreenFocus(m_focus)) {
+    // survivesMotion() is the exception: on Diagnostics, ENABLE does its real
+    // job. Requiring a dismiss first would mean the screen could never be on
+    // display for the engagement it is there to instrument - you would have to
+    // close it to start the machine, which is precisely backwards.
+    if ((m_menuOpen || isWidgetFocus(m_focus) || isScreenFocus(m_focus)) &&
+        !survivesMotion(m_focus)) {
       // isScreenFocus too: Diagnostics and About are full screens that hide the
       // rest screen entirely, so the reason the dismiss exists - do not commit
       // to cutting while the operator's attention is somewhere else and the
@@ -336,6 +361,19 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     // cannot take focus under power, so nothing here may leave a marker
     // standing that a later Click would read as "my own press opened this".
     m_stopsOpenedByPress = false;
+
+    // OK closes the Diagnostics screen, under power as at rest. The lockout
+    // exists so the panel cannot be operated while metal moves; closing a
+    // read-only screen operates nothing - it cannot start, stop or alter
+    // motion, and it returns the operator to the main readout, which is the
+    // direction the lockout wants them going anyway. Without this exemption
+    // "OK clears it" would be false in exactly the state the screen is for.
+    //
+    // Click only, like every other OK branch, so one tap cannot act twice.
+    if (key == UiKey::Ok && ev == UiKeyEvent::Click && survivesMotion(m_focus)) {
+      m_focus = UiFocus::Jog;
+      return UiIntent::None;
+    }
 
     if (key == UiKey::Left || key == UiKey::Right) {
       // The run cancel (§7). Deliberately NOT conditioned on m_focus, unlike
@@ -414,20 +452,13 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     const bool ccw = (key == UiKey::EncoderCcw);
 
     if (m_menuOpen) {
-      // Saturating, exactly like the arrows in the menu branch below - the
-      // carousel does not wrap, and a blocked move returns None so the caller
-      // can still treat any non-None result as "redraw".
+      // WRAPPING, exactly like the arrows in the menu branch below. Every move
+      // succeeds, so every move is a redraw.
       if (ccw) {
-        if (m_menuIndex <= 0) {
-          return UiIntent::None;
-        }
-        --m_menuIndex;
+        m_menuIndex = (m_menuIndex + kMenuItemCount - 1) % kMenuItemCount;
         return UiIntent::MenuPrev;
       }
-      if (m_menuIndex >= kMenuItemCount - 1) {
-        return UiIntent::None;
-      }
-      ++m_menuIndex;
+      m_menuIndex = (m_menuIndex + 1) % kMenuItemCount;
       return UiIntent::MenuNext;
     }
 
@@ -541,20 +572,21 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       m_focus = menuTileDestination(m_menuIndex);
       return UiIntent::MenuActivate;
     }
+    // WRAPPING, not saturating: "there is nothing worse than cycling through
+    // to something you know is at the end". With six tiles the far end is five
+    // presses away the wrong way and one press the right way.
+    //
+    // The +kMenuItemCount before the modulo is what keeps this correct at
+    // index 0 - C++ % on a negative left operand yields a negative result, and
+    // a negative index would render and dispatch off the front of the tile
+    // table. Every move now succeeds, so every move is a redraw and neither
+    // arm can return None.
     if (key == UiKey::Left) {
-      // Saturating, not wrapping. A blocked move returns None so the caller can
-      // treat any non-None result as "redraw".
-      if (m_menuIndex <= 0) {
-        return UiIntent::None;
-      }
-      --m_menuIndex;
+      m_menuIndex = (m_menuIndex + kMenuItemCount - 1) % kMenuItemCount;
       return UiIntent::MenuPrev;
     }
     if (key == UiKey::Right) {
-      if (m_menuIndex >= kMenuItemCount - 1) {
-        return UiIntent::None;
-      }
-      ++m_menuIndex;
+      m_menuIndex = (m_menuIndex + 1) % kMenuItemCount;
       return UiIntent::MenuNext;
     }
     return UiIntent::None;  // MODE / RATE / STOPS ignored while the menu is up
@@ -1042,6 +1074,12 @@ bool UiState::tick(const UiContext& ctx, unsigned long nowMs) {
     // later tap would read it as "my own press opened this" and decline to
     // close a widget that a dropped Press had never opened.
     m_stopsOpenedByPress = false;
+    // The Diagnostics exemption. Deliberately BELOW the two clears above: the
+    // confirm bar and the toggle marker belong to gestures that are refused
+    // under power regardless of what is on screen, so they go either way.
+    if (survivesMotion(m_focus) && !m_menuOpen) {
+      return false;  // stays up, and nothing changed, so nothing to redraw
+    }
     if (!m_menuOpen && m_focus == UiFocus::Jog) {
       return false;  // already at rest state - no transition, no redraw
     }
