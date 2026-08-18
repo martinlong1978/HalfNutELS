@@ -126,9 +126,11 @@ void ButtonPad::handle() {
   // (Press/Click/Release), so one-per-pass would stretch every tap over 300 ms
   // and let a burst of presses queue up behind it. Draining changes neither the
   // events nor their order - the ring buffer is FIFO - it just stops the poll
-  // rate from spacing them out. Bounded by the buffer size (10) so a key held
-  // against a chattering contact can never spin this loop.
-  for (int i = 0; i < 10; i++) {
+  // rate from spacing them out. Bounded by KeyArray::kRingSize so a key held
+  // against a chattering contact can never spin this loop - and bounded by the
+  // ACTUAL capacity, so a full ring drains in one pass rather than leaving the
+  // remainder to wait another 100 ms.
+  for (int i = 0; i < KeyArray::kRingSize; i++) {
     ButtonInfo press = m_pad->consumeButton();
     if (press.buttonState == BS_NONE) {
       break;

@@ -12,18 +12,26 @@
 // The Leadscrew is no longer needed either - setTargetPitchMM() went the same
 // way as the GlobalState calls - but the parameter is kept so main.cpp's
 // construction is untouched.
+
+// KeyScanner reports events in its own enum so lib/keyscan stays free of the
+// Arduino headers this file needs. The two must agree, and nothing at runtime
+// would notice if they stopped.
+static_assert((int)KS_NONE == (int)BS_NONE, "keyscan/ButtonState drift");
+static_assert((int)KS_PRESSED == (int)BS_PRESSED, "keyscan/ButtonState drift");
+static_assert((int)KS_CLICKED == (int)BS_CLICKED, "keyscan/ButtonState drift");
+static_assert((int)KS_HELD == (int)BS_HELD, "keyscan/ButtonState drift");
+static_assert((int)KS_RELEASED == (int)BS_RELEASED, "keyscan/ButtonState drift");
+
 KeyArray::KeyArray(Leadscrew* leadscrew) {
     (void)leadscrew;
-    // KeyArray is heap-allocated (main.cpp `new KeyArray`), so members are NOT
-    // zero-initialised the way the previous static instance was. keycodeMillis in
-    // particular must start at 0 - otherwise garbage makes handle()'s
-    // `time < keycodeMillis + 10` debounce permanently true and every button
-    // press is swallowed.
-    keycodeMillis = 0;
-    buttonState.button = 0;
-    buttonState.buttonState = BS_NONE;
+    // EVERY member. KeyArray is heap-allocated (main.cpp `new KeyArray`), so
+    // members are NOT zero-initialised the way the previous static instance
+    // was. This is the class where that bit historically: an uninitialised
+    // keycodeMillis made the old debounce permanently true and swallowed every
+    // button press. m_scanner initialises itself (keyscan.cpp).
     readindex = 0;
     writeindex = 0;
+    m_ringDrops = 0;
 #ifdef ELS_UI_ENCODER
     ESP32Encoder::useInternalWeakPullResistors = puType::none;
     m_encoder.attachSingleEdge(ELS_UI_ENCODER_A, ELS_UI_ENCODER_B);
@@ -33,71 +41,82 @@ KeyArray::KeyArray(Leadscrew* leadscrew) {
 #endif
 }
 
-void KeyArray::setupKeys(bool press) {
-
-    // Set pad H pins as input
+// Put the matrix into its resting configuration: columns driven high, rows read
+// through a pull-down. getCodeFromArray() leaves it this way on every path, so
+// each scan starts from a known state instead of inheriting whatever the last
+// one left behind.
+//
+// NOTE what is absent: attachInterrupt(). Nothing is armed for an edge any
+// more, which is what makes a stranded arming state impossible rather than
+// merely unlikely (docs/keypad-audit.md §1).
+void KeyArray::setupKeys() {
     pinMode(ELS_PAD_H1, INPUT_PULLDOWN);
     pinMode(ELS_PAD_H2, INPUT_PULLDOWN);
     pinMode(ELS_PAD_H3, INPUT_PULLDOWN);
 
-    // Set pad V pins as out, high
     pinMode(ELS_PAD_V1, OUTPUT);
     pinMode(ELS_PAD_V2, OUTPUT);
     pinMode(ELS_PAD_V3, OUTPUT);
     digitalWrite(ELS_PAD_V1, 1);
     digitalWrite(ELS_PAD_V2, 1);
     digitalWrite(ELS_PAD_V3, 1);
+}
 
-    if (press) {
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H1), buttonInterrupt, RISING);
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H2), buttonInterrupt, RISING);
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H3), buttonInterrupt, RISING);
-    } else {
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H1), buttonInterruptRelease, FALLING);
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H2), buttonInterruptRelease, FALLING);
-        attachInterrupt(digitalPinToInterrupt(ELS_PAD_H3), buttonInterruptRelease, FALLING);
+// The scan task. Its own task rather than a slot in the DisplayTask because the
+// display runs at 100 ms and a 100 ms sampling period would make the debounce
+// meaningless and every press feel late.
+//
+// Core 0, with the display and the network stacks - core 1 belongs to the
+// spindle loop alone (main.cpp). Priority 2: above the DisplayTask so a long
+// LVGL repaint cannot stretch the sampling interval, far below the WiFi driver
+// at 23. It sleeps between samples, so it costs a few GPIO reads per 2 ms.
+static void KeyScanTask(void* parameter) {
+    (void)parameter;
+    for (;;) {
+        keyArray->poll();
+        vTaskDelay(KeyArray::kKeyScanPeriodMs / portTICK_PERIOD_MS);
     }
-
 }
 
 void KeyArray::initPad() {
-
-    Timer0_Cfg = timerBegin(0, 80, true);
-    timerAttachInterrupt(Timer0_Cfg, &timerInterrupt, true);
-    timerAlarmWrite(Timer0_Cfg, 1000000, true);
-    timerStop(Timer0_Cfg);
-    timerAlarmEnable(Timer0_Cfg);
-    setupKeys(true);
-}
-
-void KeyArray::handleTimer() {
-    timerStop(Timer0_Cfg);
-    //DEBUG_F("Held");
-    int code = getCodeFromArray();
-    if (buttonState.buttonState == ButtonState::BS_PRESSED && buttonState.button == code) {
-        buttonState.buttonState = ButtonState::BS_HELD;
-        emitButton();
-    } else {
-        // if the same button isnt' still pressed, then cancel the whole thing. 
-        buttonState.buttonState = ButtonState::BS_NONE;
-        buttonState.button = 0;
-    }
+    setupKeys();
+    // 3 KB is ample: poll() has no recursion, no printf and one small array of
+    // events on the stack.
+    xTaskCreatePinnedToCore(KeyScanTask, "KeyScan", 3072, nullptr, 2, nullptr, 0);
 }
 
 ButtonInfo KeyArray::consumeButton() {
     if (readindex == writeindex)
         return { 0, ButtonState::BS_NONE };
     ButtonInfo ret = ringBuffer[readindex];
-    readindex = (readindex + 1) % 10;
+    readindex = (readindex + 1) % kRingSize;
     return ret;
 }
 
-void KeyArray::emitButton() {
-    ringBuffer[writeindex].button = buttonState.button;
-    ringBuffer[writeindex].buttonState = buttonState.buttonState;
-    writeindex = (writeindex + 1) % 10;
+void KeyArray::emitButton(int code, int state) {
+    const int next = (writeindex + 1) % kRingSize;
+    if (next == readindex) {
+        // FULL, and reported as such. The old buffer had no such test: a
+        // writeindex that wrapped onto readindex made the ring read as EMPTY,
+        // so an overflow did not drop the newest event - it silently dropped
+        // every event in the buffer. Here the queued gestures survive and the
+        // loss is counted; ringDrops() should never leave zero.
+        m_ringDrops++;
+        return;
+    }
+    ringBuffer[writeindex].button = code;
+    ringBuffer[writeindex].buttonState = state;
+    writeindex = next;
 }
 
+void KeyArray::poll() {
+    KeyScanOut out[kKeyScanMaxEvents];
+    const int n = m_scanner.update(getCodeFromArray(), millis(), out,
+                                   kKeyScanMaxEvents);
+    for (int i = 0; i < n; i++) {
+        emitButton(out[i].code, out[i].event);
+    }
+}
 
 int KeyArray::consumeEncoderDelta() {
 #ifdef ELS_UI_ENCODER
@@ -124,9 +143,26 @@ int KeyArray::consumeEncoderDelta() {
 #endif
 }
 
+// One complete matrix read, in task context.
+//
+// Two phases: drive the columns and read the rows to find WHICH row is active,
+// then drive that row alone and read the columns to find which column. The
+// combination is the key code (see the table in lib/config/board.h).
+//
+// Both phases end by restoring the resting configuration, so the next call is
+// independent of this one. The short settle delays are new: switching a pin
+// from OUTPUT to INPUT_PULLDOWN leaves the line to discharge through the
+// pull-down, and reading before it has settled is a misread. The old code did
+// this inside an ISR where a delay was unthinkable; in a task it costs nothing
+// worth counting.
 int KeyArray::getCodeFromArray() {
-    int a = digitalRead(ELS_PAD_H1) | (digitalRead(ELS_PAD_H2) << 1) | (digitalRead(ELS_PAD_H3) << 2);
-    // Now, flip the input to V and set H high
+    // Phase 1: columns driven high (the resting state), read the rows.
+    const int a = digitalRead(ELS_PAD_H1) | (digitalRead(ELS_PAD_H2) << 1) |
+                  (digitalRead(ELS_PAD_H3) << 2);
+
+    // Phase 2: flip. Rows become outputs, and only the row that read high is
+    // driven, so the column read below cannot be confused by a second key in a
+    // different row.
     pinMode(ELS_PAD_V1, INPUT_PULLDOWN);
     pinMode(ELS_PAD_V2, INPUT_PULLDOWN);
     pinMode(ELS_PAD_V3, INPUT_PULLDOWN);
@@ -136,54 +172,20 @@ int KeyArray::getCodeFromArray() {
     digitalWrite(ELS_PAD_H1, a == 1 ? 1 : 0);
     digitalWrite(ELS_PAD_H2, a == 2 ? 1 : 0);
     digitalWrite(ELS_PAD_H3, a == 4 ? 1 : 0);
-    // Now read the V states
-    int b = digitalRead(ELS_PAD_V1) | (digitalRead(ELS_PAD_V2) << 1) | (digitalRead(ELS_PAD_V3) << 2);
-    int code = (a == 0 || b == 0) ? 0 : a | b << 3;
-    setupKeys(code == 0);
+    delayMicroseconds(5);
+
+    const int b = digitalRead(ELS_PAD_V1) | (digitalRead(ELS_PAD_V2) << 1) |
+                  (digitalRead(ELS_PAD_V3) << 2);
+
+    // Anything that is not exactly one row and one column reads as "nothing".
+    // Two keys at once land here (a or b has two bits set, so neither matches
+    // the single-bit tests above and the driven row is none of them), which is
+    // the honest answer for a matrix that cannot resolve them - and KeyScanner
+    // treats it as a release rather than a phantom key.
+    const int code = (a == 0 || b == 0) ? 0 : a | b << 3;
+
+    setupKeys();
+    delayMicroseconds(5);
     return code;
-
-}
-
-void KeyArray::handle() {
-    unsigned long time = millis();
-    if (time < keycodeMillis + 10)return; // debounce
-    // First read the H states
-    int code = getCodeFromArray();
-    buttonState.button = code;
-    buttonState.buttonState = BS_PRESSED;
-    keycodeMillis = time;
-    emitButton();
-    timerRestart(Timer0_Cfg);
-    timerStart(Timer0_Cfg);
-}
-
-void KeyArray::handleRelease() {
-    unsigned long time = millis();
-    if (time < keycodeMillis + 10)return; // debounce
-    setupKeys(true);
-    // Release
-    timerStop(Timer0_Cfg);
-    keycodeMillis = time;
-    if (buttonState.buttonState == BS_PRESSED) {
-        buttonState.buttonState = BS_CLICKED;
-        emitButton();
-    }
-    buttonState.buttonState = BS_RELEASED;
-    emitButton();
-}
-
-
-void buttonInterrupt() {
-    keyArray->handle();
-}
-
-void buttonInterruptRelease() {
-    keyArray->handleRelease();
-}
-
-
-void IRAM_ATTR timerInterrupt() {
-    keyArray->handleTimer();
 }
 #endif
-
