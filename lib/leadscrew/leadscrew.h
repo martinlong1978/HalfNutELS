@@ -105,11 +105,20 @@ public:
   #ifdef ELS_USE_RMT
   void setRMT(rmt_obj_t *rmtObj){
     this->rmtObj = rmtObj;
-    rmt_data->duration0 = 8;
-    rmt_data->level0 = 1;
-    rmt_data->duration1 = 8;
-    rmt_data->level1 = 0;
-  
+    // EVERY element, not just [0]. `rmt_data->x = y` is `rmt_data[0].x = y`,
+    // and this array is a member of a heap-allocated Leadscrew (`new` in
+    // main.cpp), so 1..23 were uninitialised heap - the hazard CLAUDE.md
+    // records. Combined with sendPulse() passing sizeof() where an ITEM COUNT
+    // is wanted, the RMT peripheral was told to transmit 96 items of mostly
+    // garbage durations, blocking the spindle loop for milliseconds at a time.
+    // Whether it hurt depended on whatever heap happened to follow the array,
+    // which is why it came and went across rebuilds.
+    for (size_t i = 0; i < sizeof(rmt_data) / sizeof(rmt_data[0]); i++) {
+      rmt_data[i].duration0 = 8;
+      rmt_data[i].level0 = 1;
+      rmt_data[i].duration1 = 8;
+      rmt_data[i].level1 = 0;
+    }
   }
   #endif
 

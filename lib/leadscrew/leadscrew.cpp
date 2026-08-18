@@ -261,7 +261,15 @@ void Leadscrew::setCurrentPosition(int position) {
 bool Leadscrew::sendPulse() {
 
 #ifdef ELS_USE_RMT
-  rmtWrite(rmtObj, rmt_data, sizeof(rmt_data));
+  // ONE item: a step is one high/low pair. The third argument of rmtWrite is
+  // an ITEM COUNT (it reaches rmt_write_items() unchanged), NOT a byte count -
+  // sizeof(rmt_data) is 96, so this used to transmit 96 items and read 72 of
+  // them from beyond the end of the array. 96 also exceeds the channel's
+  // RMT_MEM_64 block (main.cpp), so rmt_write_items had to BLOCK waiting for
+  // the hardware to drain durations that were uninitialised heap. Measured on
+  // the lathe: the spindle loop fell from 78 kHz to 58 Hz while jogging, and
+  // recovered the instant motion stopped.
+  rmtWrite(rmtObj, rmt_data, 1);
   return true;
 #else
   uint8_t pinState = m_io->readStepPin();
