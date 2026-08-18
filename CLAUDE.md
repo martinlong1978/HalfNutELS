@@ -11,7 +11,7 @@ PlatformIO CLI. If `pio` isn't on `PATH`, use the venv binary: `~/.platformio/pe
 - **Host unit tests (do this for every logic change):** `pio test -e native` — googletest/gmock, default
   env. Suites live in `test/test_*/`; host stubs (a virtual-clock `Arduino.h`, empty `ESP32Encoder`) are in
   `test/stubs/`; `scripts/exclude_espspindle_native.py` keeps `TestSpindle.cpp` the only `Spindle::` def on
-  host. As of this writing the suite is ~54 cases and should stay green.
+  host. As of this writing the suite is 455 cases and should stay green.
 - **Build / flash the device:** `pio run -e esp32dev_usb -t upload`. The USB serial port is set in
   `platformio.ini` (`esp32dev_usb` `upload_port`). `pio run -e esp32dev_usb` (no `-t upload`) is a
   compile-check — do this after any change to device code.
@@ -21,10 +21,28 @@ PlatformIO CLI. If `pio` isn't on `PATH`, use the venv binary: `~/.platformio/pe
 
 ## Architecture & the realtime constraint (read before touching motion code)
 
-Two FreeRTOS tasks, pinned to different cores (see `src/main.cpp`):
-- **SpindleTask** (core 0, high priority, small 4 KB stack): the hot loop. Each iteration runs
+**Core 1 belongs to the spindle loop alone.** Everything else — display, keypad scan, OTA, the
+capture uploader — is on core 0, where the SDK already puts WiFi, lwIP and the timer service.
+Measured: the hot loop went from ~77,800 Hz to ~115,900 Hz when it stopped sharing (Aug 2026).
+
+- **SpindleTask** (core 1, priority 24, small 4 KB stack): the hot loop. Each iteration runs
   `timerCallback()` → `spindle->update()` + `leadscrew->update()` (or `commsManager.loop()` during OTA).
-- **DisplayTask** (core 1): buttons (`keyPad->handle()`) + LVGL `display->update()`.
+- **DisplayTask** (core 0, priority 1): buttons (`keyPad->handle()`) + LVGL `display->update()`.
+- **KeyScan** (core 0, priority 2): the 2 ms keypad matrix poll (`src/keyarray.cpp`).
+
+**THE SPINDLE TASK MUST BE CREATED LAST.** `setup()` runs on the Arduino `loopTask`, which is itself
+pinned to core 1 at priority 1. Creating the priority-24 spindle task on core 1 preempts it there and
+then — permanently, because that loop never blocks — so *every statement after the creation call never
+executes*. Created first, it silently ate the `DisplayTask` creation two lines below and the whole
+watchdog setup; the symptom was "the display never initialises" and it caused an earlier attempt at
+this core split to be reverted (`d7a9a7b` → `f66472d`). Anything that must happen at startup goes
+ABOVE that call.
+
+**Flash writes need the other core to answer.** A flash operation stops the opposite core and waits
+for it to acknowledge a cache-disable. That core is now core 1, which never blocks — so code that
+writes flash while the spindle runs must LOWER the spindle task's priority, never suspend it
+(`src/DebugSink.cpp`). Suspending it deadlocks the device silently: `disableLoopWDT()` plus the two
+`esp_task_wdt_delete()` calls mean nothing is watching.
 
 **Keep `Leadscrew::update()` and the spindle path fast and inline.** No new virtual dispatch, heap
 allocation, locks, or non-inlinable calls in that path. A lot of code there is inline on purpose. Derived
@@ -114,6 +132,43 @@ screen can pass all thirty of them while being unreadable.
 - PNGs are written R↔B **un**-swapped, i.e. as the panel displays them, so what you see is what the
   operator sees. Do not "correct" a colour that looks right in the PNG.
 
+## Input: the keypad is POLLED (lib/keyscan + src/keyarray.cpp)
+
+No interrupts. A 2 ms task scans the matrix and hands the raw code to `KeyScanner`, which debounces
+by integration (a reading must persist 8 ms) and produces the gesture events `UiState` is built on:
+`Press → Click → Release`, or `Press → Hold → Release` with **no Click after a Hold**. Pure C++,
+host-tested (`test/test_keyscan`).
+
+Do NOT reintroduce edge interrupts. The previous scheme armed RISING for a press and FALLING for a
+release, re-armed as a side effect of each scan, behind a 10 ms lockout shared between the two — so a
+release inside that window returned early *before* the re-arming line and left the pad waiting for an
+edge that could never come. The keypad went dead until the 1 s hold timer rescanned. It also called
+`pinMode()` and `attachInterrupt()` from inside the ISR, from flash, with no `IRAM_ATTR`. Full
+post-mortem in `docs/keypad-audit.md`.
+
+`bounceRejects()` / `ringDrops()` exist so the debounce threshold can be judged from the machine
+rather than assumed. Both should stay at zero in normal use.
+
+## Motion gotchas that cost a whole evening (Aug 2026)
+
+- **`rmtWrite`'s third argument is an ITEM COUNT, not a byte count.** `sizeof(rmt_data)` made it 96,
+  which both read 72 items past the end of a 24-element array AND exceeded the channel's `RMT_MEM_64`
+  block, so `rmt_write_items` blocked while the hardware drained uninitialised heap. The spindle loop
+  fell from 78 kHz to **58 Hz** while jogging. Only element `[0]` had ever been initialised, so what
+  got transmitted was whatever heap followed the array — which **reshuffles on every rebuild**. That
+  is why the same commit measured fast on one build and slow on the next.
+- **An intermittent fault cannot be bisected on single trials.** The above sent a bisect across four
+  commits chasing noise and produced three confident, wrong conclusions. What settled it was putting a
+  counter on the loop and reading the number. Prefer measuring to reading diffs.
+- **`ESP32Encoder` returns spurious ±32k deltas.** It runs the PCNT counter to `±INT16` and
+  accumulates the wrap in a limit ISR; a `getAndClearCount()` racing that ISR returns a value at the
+  16-bit boundary. Captured mid-cut: `+32765` then `−32766` in consecutive samples, which
+  `Leadscrew::update()` multiplied by the ratio and saturated `posError` to −2³¹. **This was the
+  original "180° forward jump while threading".** `Spindle::update()` now drops deltas beyond half the
+  16-bit range. The existing spindle-angle modulo could not help: `setCurrentPosition()` takes its
+  delta from the raw pre-modulo value, so the angle is corrected while the poisoned delta goes
+  straight into `m_unconsumedPosition`.
+
 ## Gotchas
 
 - PlatformIO / the IDE occasionally rewrite `.vscode/extensions.json` (and sometimes source files) with
@@ -127,7 +182,7 @@ screen can pass all thirty of them while being unreadable.
 
 ## Known open items (optional)
 
-- Migrate the real lathe to GitHub OTA (it's seeded at the old home URL for a one-time pull).
+- ~~Migrate the real lathe to GitHub OTA~~ — done; the lathe pulls from GitHub Releases.
 - ~~Negative-RPM colour line (renders blue)~~ — fixed on `ux-redesign` and confirmed red in
   `tools/screenshot/out/rest-reverse-spindle.png`.
 
