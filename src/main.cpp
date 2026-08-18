@@ -48,18 +48,29 @@ bool apClientConnected = false;
 // This can't be a flash-backed flag: WebSettings and LatheConfig share one 4 KB
 // sector that is erased as a unit (see WebSettings.cpp), so a boot-flag write there
 // would risk the stored Wi-Fi credentials and burn a flash erase/write cycle on
-// every normal boot. RTC slow memory is the right lifetime instead: RTC_DATA_ATTR
-// variables survive ESP.restart() (so a menu-triggered reboot can carry the
-// request across) but are cleared by a true power cycle, which is exactly the
-// "one-shot, this session only" behaviour we want. It also costs no flash wear.
-// Do NOT change this to a flash write.
+// every normal boot. RTC slow memory is the right lifetime instead, and it costs
+// no flash wear. Do NOT change this to a flash write.
 //
-// RTC memory is not guaranteed to be zeroed on a cold boot, so a plain 0/false
-// flag could false-trigger on garbage. Use a distinctive magic value instead of
-// 0 or 0xFFFFFFFF (the two values most likely to show up as uninitialised RTC
-// garbage) and compare against it explicitly.
+// IT MUST BE RTC_NOINIT_ATTR, NOT RTC_DATA_ATTR. The framework's own comments in
+// esp_attr.h draw the distinction, and it is exactly the one that matters here:
+//
+//   RTC_DATA_ATTR   "will keep its value during a deep sleep / wake cycle"
+//   RTC_NOINIT_ATTR "will keep its value AFTER RESTART or during a deep sleep"
+//
+// .rtc.data is re-initialised from the image on a software restart, so with
+// RTC_DATA_ATTR this flag was zeroed by the startup code before setup() could
+// read it: requestSetupOnNextBoot() rebooted the device and it came up normally
+// every time. Holding OK at power-on still worked, because that path reads the
+// keypad and never looks at this flag - which is what made the bug look like a
+// menu problem rather than a storage one.
+//
+// .rtc_noinit is not initialised on a COLD boot either, so the flag holds
+// whatever the RTC memory happened to contain. That is why the value compared
+// against is a distinctive magic rather than a plain 0/1 - 0 and 0xFFFFFFFF are
+// the two patterns most likely to appear as uninitialised RTC garbage and would
+// false-trigger a setup boot. Keep the magic; it is load-bearing under NOINIT.
 #define BOOT_TO_SETUP_MAGIC 0xE15B0071u
-RTC_DATA_ATTR uint32_t bootToSetup;
+RTC_NOINIT_ATTR uint32_t bootToSetup;
 
 void requestSetupOnNextBoot() {
   bootToSetup = BOOT_TO_SETUP_MAGIC;
