@@ -127,7 +127,8 @@ UiState::UiState()
       m_runPhase(RunPhase::None),
       m_jogDir(0),
       m_stopsConfirming(false),
-      m_stopsPressMs(0) {}
+      m_stopsPressMs(0),
+      m_stopsOpenedByPress(false) {}
 
 UiFocus UiState::focus() const { return m_focus; }
 
@@ -149,6 +150,13 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   // ever. Above HALT deliberately, since HALT returns early.
   if (key != UiKey::Stops) {
     m_stopsConfirming = false;
+    // ...and with it the "this press opened the widget" marker, for the same
+    // self-healing reason: it describes a STOPS press that is physically down,
+    // and an event on any other key means that press is over (or its Release
+    // was dropped). This is also what keeps the marker fresh across HALT and
+    // the ENABLE dismiss - both force focus to Jog and both return through
+    // here, so neither needs a clear of its own.
+    m_stopsOpenedByPress = false;
   }
 
   // -------------------------------------------------------------------------
@@ -324,6 +332,10 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     // must not stay pinned on screen. The top of handleKey() already does this
     // for every OTHER key; this covers STOPS' own events, which it exempts.
     m_stopsConfirming = false;
+    // Same exemption, same fix, for the selector-toggle marker: a STOPS press
+    // cannot take focus under power, so nothing here may leave a marker
+    // standing that a later Click would read as "my own press opened this".
+    m_stopsOpenedByPress = false;
 
     if (key == UiKey::Left || key == UiKey::Right) {
       // The run cancel (§7). Deliberately NOT conditioned on m_focus, unlike
@@ -549,15 +561,32 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
-  // Selector keys: a Click moves focus to that widget and nothing else. A
-  // repeat of the same selector is a no-op that merely restarts the idle timer
-  // (§1 lists the leave conditions as OK / HALT / idle - not the key itself).
+  // Selector keys: a Click moves focus to that widget - and a second press of
+  // the SAME selector closes it again, back to Jog.
+  //
+  // OWNER RULING, and a change from the first cut: "menu opens the menu,
+  // pressing a second time closes it. The same logic should apply to rate, mode
+  // and stops." This used to be a no-op that merely restarted the idle timer,
+  // on the reading that §1 lists a widget's leave conditions as OK / HALT /
+  // idle and not the key itself. That reading made MENU the odd one out of four
+  // otherwise identical keys: every other selector could only be un-pressed by
+  // waiting four seconds or reaching for a different key. One rule for all four
+  // is the smaller thing to remember, and it costs nothing - the key that opened
+  // a picker is the most obvious one to shut it.
+  //
+  // Pressing a DIFFERENT selector still switches focus straight across (Mode ->
+  // Rate in one press, not Mode -> Jog -> Rate). Only the selector matching the
+  // current focus closes.
+  //
+  // Click only, as before: Press and Release must stay inert or a single tap
+  // would open and close in one gesture.
   // -------------------------------------------------------------------------
   if (key == UiKey::Mode || key == UiKey::Rate) {
     if (ev != UiKeyEvent::Click) {
       return UiIntent::None;
     }
-    m_focus = (key == UiKey::Mode) ? UiFocus::Mode : UiFocus::Rate;
+    const UiFocus target = (key == UiKey::Mode) ? UiFocus::Mode : UiFocus::Rate;
+    m_focus = (m_focus == target) ? UiFocus::Jog : target;
     return UiIntent::None;
   }
 
@@ -609,6 +638,13 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       // event while the carousel is open, so a STOPS press cannot steal focus
       // from the menu (§6: the menu leaves on MENU or HALT only), and cannot
       // arm the bar from there either.
+      //
+      // Record whether THIS press is the one that opened the widget, before the
+      // assignment makes that unknowable. The Click below reads it and declines
+      // to toggle the widget shut when it is set - see the member's note in
+      // uistate.h. False here means the widget was already open, i.e. this is
+      // the second press of the selector, i.e. the Click may close it.
+      m_stopsOpenedByPress = (m_focus != UiFocus::Stops);
       m_focus = UiFocus::Stops;
 
       // Arm the confirm bar - but ONLY if this hold could actually succeed, so
@@ -651,14 +687,46 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       // Let go before the hold fired: cancel, cleanly and with no intent. This
       // is the escape hatch the confirm bar exists to offer.
       m_stopsConfirming = false;
+      // The press is over, so the marker it set has nothing left to describe.
+      // This is what makes the NEXT tap a closing one.
+      m_stopsOpenedByPress = false;
       return UiIntent::None;
     }
 
-    // Click: the ordinary selector behaviour, now a no-op in all but name - the
-    // Press of the same tap already took focus. Kept as the belt to that
-    // braces: KeyArray can drop events, and a Click that arrives without its
-    // Press must still open the widget. (The Release that follows has already
-    // cleared m_stopsConfirming above, in event order.)
+    // Click: the selector toggle, and STOPS' share of the owner's ruling.
+    //
+    // THE ORDERING IS THE WHOLE DESIGN HERE, so it is worth stating in full.
+    // STOPS takes focus on the Press (above), which is what makes press-and-hold
+    // from the rest screen work. That leaves two gestures whose Click arrives
+    // with the widget already open, and they need OPPOSITE answers:
+    //
+    //   Jog -> tap STOPS      Press opens, then Click. Must STAY open, or the
+    //                         widget would flash and vanish inside one tap and
+    //                         the selector could never be entered at all.
+    //   Stops -> tap STOPS    Press changes nothing, then Click. Must CLOSE -
+    //                         this is the ruling.
+    //
+    // m_stopsOpenedByPress is what tells them apart: it is exactly "the press
+    // currently down is the one that opened this widget".
+    //
+    // And the reason the close hangs off the Click rather than the Press: a long
+    // press emits Press -> Hold -> Release with NO Click (src/keyarray.cpp:
+    // 144-170), so closing here is invisible to the hold gesture. Holding STOPS
+    // with the widget already open still fills the bar and still fires
+    // ClearBothStops - which closing on the Press would have destroyed.
+    //
+    // The `m_focus == Stops` half also keeps the dropped-Press path working:
+    // KeyArray can lose events, and a Click that arrives from another focus
+    // without its Press must still OPEN the widget rather than close it.
+    if (m_focus == UiFocus::Stops && !m_stopsOpenedByPress) {
+      m_focus = UiFocus::Jog;
+      // The bar is drawn over the widget, so it cannot outlive it. The Press of
+      // this very tap armed it (both stops set, at rest is enough); leaving it
+      // set would paint a filling confirm bar over the rest screen for the
+      // millisecond until the Release.
+      m_stopsConfirming = false;
+      return UiIntent::None;
+    }
     m_focus = UiFocus::Stops;
     return UiIntent::None;
   }
@@ -969,6 +1037,11 @@ bool UiState::tick(const UiContext& ctx, unsigned long nowMs) {
     // The confirm bar goes with the widget it is drawn over; the gesture behind
     // it is refused under power anyway.
     m_stopsConfirming = false;
+    // And the selector-toggle marker, which describes a widget this is about to
+    // close. Left standing it would outlive its widget, and the Click of a
+    // later tap would read it as "my own press opened this" and decline to
+    // close a widget that a dropped Press had never opened.
+    m_stopsOpenedByPress = false;
     if (!m_menuOpen && m_focus == UiFocus::Jog) {
       return false;  // already at rest state - no transition, no redraw
     }

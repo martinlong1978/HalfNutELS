@@ -710,14 +710,93 @@ TEST(UiStateSelectors, AnotherSelectorMovesFocusDirectly) {
   EXPECT_EQ(UiIntent::SetLeftStop, r.click(UiKey::Left, kNoStops));
 }
 
-TEST(UiStateSelectors, RepeatingTheSameSelectorKeepsItsFocus) {
-  // Decision: §1 lists the leave conditions for a widget as OK / HALT / 4 s
-  // idle - the selector key itself is not one of them, so a second press is a
-  // no-op that simply restarts the idle timer. (MENU is the exception, §6.)
+// ---------------------------------------------------------------------------
+// THE SELECTOR TOGGLE (OWNER RULING, and a change from the first cut).
+//
+//   "menu opens the menu. pressing a second time closes it. The same logic
+//    should apply to rate, mode, and stops"
+//
+// This used to be a no-op that merely restarted the idle timer, read off §1's
+// list of leave conditions (OK / HALT / 4 s idle - not the key itself). That
+// made MENU the odd one out of four otherwise identical keys. All four now
+// toggle: a selector pressed while its OWN widget is open returns focus to Jog.
+//
+// Pressing a DIFFERENT selector still crosses straight over - that is the test
+// immediately above, and it is deliberately kept as the other half of this
+// contract, so a state machine that closed to Jog on every selector press would
+// fail there rather than passing both.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateSelectors, ModeClosesItsOwnWidgetOnASecondPress) {
   Rig r;
   r.click(UiKey::Mode);
+  ASSERT_EQ(UiFocus::Mode, r.focus());
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Mode));
-  EXPECT_EQ(UiFocus::Mode, r.focus());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateSelectors, RateClosesItsOwnWidgetOnASecondPress) {
+  Rig r;
+  r.click(UiKey::Rate);
+  ASSERT_EQ(UiFocus::Rate, r.focus());
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Rate));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateSelectors, TheToggleIsAToggleAndNotAOneWayTrip) {
+  // Third press re-opens. Without this the two tests above would pass on a
+  // selector that had simply stopped taking focus after the first use.
+  const UiKey selectors[] = {UiKey::Mode, UiKey::Rate, UiKey::Stops};
+  const UiFocus focuses[] = {UiFocus::Mode, UiFocus::Rate, UiFocus::Stops};
+  for (int i = 0; i < 3; ++i) {
+    Rig r;
+    r.click(selectors[i], kNoStops);
+    ASSERT_EQ(focuses[i], r.focus()) << "open";
+    r.click(selectors[i], kNoStops);
+    ASSERT_EQ(UiFocus::Jog, r.focus()) << "close";
+    r.click(selectors[i], kNoStops);
+    EXPECT_EQ(focuses[i], r.focus()) << "re-open";
+  }
+}
+
+TEST(UiStateSelectors, TheToggleDoesNotReachAcrossToAnotherWidget) {
+  // Only the selector matching the CURRENT focus closes. MODE pressed while
+  // RATE is open switches; it does not close to Jog, and it does not close
+  // RATE's widget and leave nothing open.
+  Rig modeThenRate;
+  modeThenRate.click(UiKey::Mode);
+  modeThenRate.click(UiKey::Rate);
+  EXPECT_EQ(UiFocus::Rate, modeThenRate.focus());
+
+  Rig rateThenMode;
+  rateThenMode.click(UiKey::Rate);
+  rateThenMode.click(UiKey::Mode);
+  EXPECT_EQ(UiFocus::Mode, rateThenMode.focus());
+
+  // ...and the same across the two focuses a selector cannot re-enter: OK's
+  // JogSpeed widget is not MODE's, so MODE opens over it rather than closing.
+  Rig fromJogSpeed;
+  fromJogSpeed.click(UiKey::Ok);
+  ASSERT_EQ(UiFocus::JogSpeed, fromJogSpeed.focus());
+  fromJogSpeed.click(UiKey::Mode);
+  EXPECT_EQ(UiFocus::Mode, fromJogSpeed.focus());
+}
+
+TEST(UiStateSelectors, MenuIsUnchangedByTheSelectorToggle) {
+  // MENU already worked this way (§6) and is the key the ruling generalises
+  // FROM, so it must come through untouched: open, close, re-open at index 0,
+  // and CloseMenu still emitted on the closing press (the selectors emit None
+  // either way - opening a picker was never an intent).
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu));
+  ASSERT_TRUE(r.ui().menuOpen());
+  ASSERT_EQ(UiFocus::Menu, r.focus());
+  EXPECT_EQ(UiIntent::CloseMenu, r.click(UiKey::Menu));
+  EXPECT_FALSE(r.ui().menuOpen());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.click(UiKey::Menu));
+  EXPECT_TRUE(r.ui().menuOpen());
+  EXPECT_EQ(0, r.ui().menuIndex());
 }
 
 TEST(UiStateSelectors, AreInertUnderPower) {
@@ -2111,20 +2190,193 @@ TEST(UiStateClearBoth, AStopsClickThatLostItsPressStillOpensTheWidget) {
   EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
-TEST(UiStateClearBoth, StopsClickStillJustTakesFocus) {
-  // A tap is Press -> Click -> Release. The Press arms the bar, the Click must
-  // still do nothing but move focus, and no clear may be emitted anywhere in
-  // the gesture.
+// ---------------------------------------------------------------------------
+// STOPS AND THE SELECTOR TOGGLE - the four cases, together, because they are
+// only correct as a set.
+//
+// STOPS is the hard one. MODE and RATE take focus on the Click, so "a Click
+// that finds its own focus already current is a second press" is the whole
+// rule. STOPS takes focus on the PRESS (the ruling above), which means the
+// Click of a FIRST tap also finds Stops focus already current - and closing
+// there would make the widget flash and vanish inside one tap.
+//
+// The close therefore hangs off the Click AND is suppressed for the gesture
+// that opened the widget. Two consequences, and each has its own trap:
+//
+//   * Click, not Press. KeyArray emits no Click after a Hold, so a long press
+//     never reaches the closing branch and clear-both survives from BOTH
+//     starting focuses. Close on the Press instead and case 4 below silently
+//     dies - the widget shuts and the Hold lands on Jog focus.
+//   * Suppressed for the opening press. Without that, case 1 dies - the tap
+//     that is meant to open the widget closes it again in the same gesture.
+//
+// So all four are pinned here in one place: break either half and exactly one
+// pair of these fails.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateStopsToggle, CaseOneTapFromJogOpensAndStaysOpen) {
+  // Press -> Click -> Release in the order ButtonPad's drain loop delivers it.
+  // No intent anywhere, no bar left behind, and the widget is UP at the end.
   Rig r;
-  r.click(UiKey::Stops, kBothStops);
-  ASSERT_EQ(UiFocus::Stops, r.focus());
-  EXPECT_EQ(UiIntent::None,
-            r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
-  EXPECT_EQ(UiIntent::None,
-            r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus())
+      << "the Click of the opening tap must not close what its own Press "
+         "opened";
   EXPECT_EQ(UiIntent::None,
             r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
   EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+}
+
+TEST(UiStateStopsToggle, CaseTwoTapFromStopsClosesTheWidget) {
+  // The ruling itself, for STOPS. The widget is already open, so this press did
+  // not open it, so its Click closes.
+  Rig r;
+  r.click(UiKey::Stops, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus()) << "the Press alone must not close it";
+  // The Press of this tap armed the bar (both stops set, at rest), and it is
+  // genuinely filling by the time the Click lands - the drain loop is fast, but
+  // the display polls in between.
+  r.advance(300);
+  ASSERT_EQ(300, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  // Closing must take the bar with it: a confirm bar over the rest screen would
+  // be drawn for a widget that is no longer there.
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateStopsToggle, CaseThreeHoldFromJogOpensFillsAndClearsBoth) {
+  Rig r;
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  ASSERT_EQ(UiFocus::Stops, r.focus()) << "the bar needs its widget on screen";
+  r.advance(UiState::kStopsConfirmMs / 2);
+  EXPECT_EQ(500, r.ui().stopsConfirmPermille(r.now()));
+  r.advance(UiState::kStopsConfirmMs / 2);
+  EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::ClearBothStops,
+            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+}
+
+TEST(UiStateStopsToggle, CaseFourHoldFromStopsStillFillsAndStillClearsBoth) {
+  // THE ONE THE TOGGLE COULD HAVE BROKEN. With the widget already open, a long
+  // press is Press -> Hold -> Release and there is no Click in it, so the
+  // closing branch is never reached and the gesture is untouched. Closing on
+  // the Press instead would shut the widget here and the Hold would fire into
+  // Jog focus with the bar already gone.
+  Rig r;
+  r.click(UiKey::Stops, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  ASSERT_EQ(UiFocus::Stops, r.focus()) << "the widget must still be up";
+  r.advance(UiState::kStopsConfirmMs / 2);
+  EXPECT_EQ(500, r.ui().stopsConfirmPermille(r.now()));
+  r.advance(UiState::kStopsConfirmMs / 2);
+  EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::ClearBothStops,
+            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
+}
+
+TEST(UiStateStopsToggle, AnotherSelectorStillCrossesStraightOver) {
+  // The toggle must not have turned "switch widget" into "close, then open".
+  // Both directions across the STOPS boundary, in one press each.
+  Rig intoStops;
+  intoStops.click(UiKey::Mode);
+  ASSERT_EQ(UiFocus::Mode, intoStops.focus());
+  intoStops.click(UiKey::Stops, kNoStops);
+  EXPECT_EQ(UiFocus::Stops, intoStops.focus());
+
+  Rig outOfStops;
+  outOfStops.click(UiKey::Stops, kNoStops);
+  ASSERT_EQ(UiFocus::Stops, outOfStops.focus());
+  outOfStops.click(UiKey::Rate, kNoStops);
+  EXPECT_EQ(UiFocus::Rate, outOfStops.focus());
+}
+
+TEST(UiStateStopsToggle, TheOpeningPressMarkerDoesNotOutliveItsPress) {
+  // The suppression is scoped to ONE press. A tap opens the widget (marker set
+  // by the Press, cleared by the Release); the very next tap must therefore
+  // close, not be suppressed a second time.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateStopsToggle, TheMarkerIsClearedByAnEventOnAnyOtherKey) {
+  // The self-heal path, and the reason the marker is cleared at the top of
+  // handleKey beside the confirm bar. A STOPS press opens the widget; another
+  // key then intervenes (which on the real panel means the STOPS Release was
+  // dropped - KeyArray's debounce and its one-second rescan can both swallow
+  // one). A Click arriving afterwards must not still be suppressed by a marker
+  // belonging to a press that is long over.
+  //
+  // MENU is used as the interloper because it leaves focus back on Jog, so the
+  // widget is genuinely re-opened by the Click rather than merely still open.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);  // marker set
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  r.click(UiKey::Menu, kBothStops);                    // marker must clear here
+  r.click(UiKey::Menu, kBothStops);                    // ...and back to Jog
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);  // lost its Press
+  ASSERT_EQ(UiFocus::Stops, r.focus()) << "a stray Click still opens";
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  EXPECT_EQ(UiFocus::Jog, r.focus()) << "and the next one closes";
+}
+
+TEST(UiStateStopsToggle, TheMarkerDoesNotSurviveTheMotionLockout) {
+  // A press that opened the widget at rest, whose Release then arrives under
+  // power and is swallowed by the lockout. The marker belongs to that dead
+  // press and must not be left standing, or a later Click - one whose own Press
+  // was dropped - would read it as "my own press opened this" and refuse to
+  // close a widget it never opened.
+  const UiContext moving = ctx(true, true, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);  // at rest: marker set
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  r.key(UiKey::Stops, UiKeyEvent::Release, moving);    // swallowed by the lockout
+  ASSERT_EQ(UiFocus::Stops, r.focus()) << "the lockout moves no focus";
+  // Back at rest, and a Click that lost its Press.
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+TEST(UiStateStopsToggle, TheMarkerDoesNotSurviveCloseOnMotion) {
+  // Same staleness, via tick()'s close-on-motion rather than a key event: the
+  // widget is closed out from under a live press (motion can start with no key
+  // event at all - the web UI, a spindle-driven feed). The marker described
+  // that widget and must go with it.
+  const UiContext moving = ctx(true, true, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);  // marker set
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_TRUE(r.tick(moving));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  // At rest again. A Click that lost its Press re-opens...
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  // ...and the next one must close it, which a stale marker would prevent.
+  r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
+  EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
 // --- The confirm bar itself (rendered by lib/display, not here) -------------

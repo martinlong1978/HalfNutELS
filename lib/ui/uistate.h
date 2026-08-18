@@ -286,6 +286,35 @@ class UiState {
   // that consumes them, by HALT, and by any event on any other key.
   bool m_stopsConfirming;
   unsigned long m_stopsPressMs;
+
+  // SELECTOR TOGGLE, the STOPS half (OWNER RULING: "menu opens the menu,
+  // pressing a second time closes it. The same logic should apply to rate, mode
+  // and stops").
+  //
+  // MODE and RATE need no state for this - they take focus on the Click, so a
+  // Click that finds its own focus already current is unambiguously a SECOND
+  // press and closes. STOPS cannot use that test alone, because it takes focus
+  // on the PRESS (see the long note in uistate.cpp): from Jog a single tap is
+  // Press (which opens the widget) and then Click, and by the time that Click
+  // arrives the focus is already Stops, so the naive rule would close what the
+  // Press of the SAME gesture had just opened.
+  //
+  // So this records "the press that is physically down right now is the one that
+  // opened the widget", and the Click declines to close while it is set. It is
+  // set on every STOPS Press - true when that press moved focus INTO Stops,
+  // false when the widget was already open - and cleared on the Release, so it
+  // describes one press and never outlives it.
+  //
+  // The close deliberately hangs off the CLICK and not the Press, which is what
+  // keeps clear-both alive: KeyArray emits no Click after a Hold
+  // (src/keyarray.cpp:144-170), so press-and-hold on an already-open widget
+  // never reaches the closing branch and still fires ClearBothStops.
+  //
+  // Cleared anywhere focus can be forced out from under a live press, so it can
+  // never go stale: any event on any other key (top of handleKey - which is what
+  // covers HALT and the ENABLE dismiss, both of which return through there), the
+  // motion lockout, and tick()'s close-on-motion.
+  bool m_stopsOpenedByPress;
 };
 
 // --- The menu tiles (docs/ux-redesign.md section 6, "MENU") ----------------
