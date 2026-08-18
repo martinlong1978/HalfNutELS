@@ -15,9 +15,15 @@ enum class LeadscrewStopPosition { LEFT, RIGHT };
  * an anchor point of where the spindle and the leadscrew are both in sync.
  *
  * We reuse the endstop states for this, since they are similar in nature and keep the first one that is set
+ *
+ * MANUAL is the explicit "pick up an existing thread" anchor declared by
+ * Leadscrew::setSyncPoint(). Unlike LEFT/RIGHT it does NOT borrow a stop's
+ * carriage coordinate - it owns its own (manualSyncPosition) - so it is
+ * independent of the stops and survives setStop()/unsetStop() untouched. It is
+ * appended (not inserted) so the existing enumerator values are unchanged.
  */
 
-enum class LeadscrewSpindleSyncPositionState { LEFT, RIGHT, UNSET };
+enum class LeadscrewSpindleSyncPositionState { LEFT, RIGHT, UNSET, MANUAL };
 
 /**
  * Owns the cold (button-event driven) stop-position and spindle-sync state that
@@ -41,6 +47,11 @@ struct LeadscrewStopSync {
   LeadscrewSpindleSyncPositionState syncPositionState;
   int spindleSyncPosition;
 
+  // Carriage coordinate of an explicit (MANUAL) sync anchor. Only meaningful
+  // while syncPositionState == MANUAL; the LEFT/RIGHT anchors take their
+  // carriage coordinate from the stop instead.
+  int manualSyncPosition;
+
   // Leadscrew is heap-allocated in main.cpp; these must not start from stale
   // memory or setStop()'s "sync only when UNSET" guard behaves
   // non-deterministically.
@@ -50,7 +61,8 @@ struct LeadscrewStopSync {
         rightStopState(LeadscrewStopState::UNSET),
         rightStopPosition(INT32_MAX),
         syncPositionState(LeadscrewSpindleSyncPositionState::UNSET),
-        spindleSyncPosition(0) {}
+        spindleSyncPosition(0),
+        manualSyncPosition(0) {}
 
   /**
    * Cold API (button events).
@@ -63,6 +75,15 @@ struct LeadscrewStopSync {
   bool setStop(LeadscrewStopPosition position, int stopPosition,
                int currentLeadscrewPosition, int spindlePosition);
   void unsetStop(LeadscrewStopPosition position, float ratio, int encoderPPR);
+
+  /**
+   * Record an explicit (MANUAL) sync anchor: this carriage position is on the
+   * helix at this spindle angle. Both coordinates are supplied by the caller in
+   * one call, sampled at one instant - see Leadscrew::setSyncPoint(). Overwrites
+   * any previous anchor (stop-derived or manual): the last declaration wins.
+   * Touches no stop. Defined in leadscrew.cpp.
+   */
+  void setSyncPoint(int currentLeadscrewPosition, int spindlePosition);
 
   LeadscrewStopState getState(LeadscrewStopPosition position) const {
     switch (position) {

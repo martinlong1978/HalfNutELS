@@ -1,11 +1,19 @@
 #include <config.h>
 #ifdef ELS_USE_BUTTON_ARRAY
 #include <keyarray.h>
-#include <globalstate.h>
 
+// Deliberately no <globalstate.h> here any more. KeyArray is a pure input
+// device: it reports key events and encoder detents and decides nothing. The
+// encoder used to call GlobalState::next/prevFeedPitch() from
+// updateEncoderPos(), which is how turning the knob inside a widget could step
+// the pitch behind the operator's back; that decision now belongs to
+// lib/ui/uistate.cpp, which is host-tested. Do not reintroduce the include.
 
-
-KeyArray::KeyArray(Leadscrew* leadscrew) : m_leadscrew(leadscrew) {
+// The Leadscrew is no longer needed either - setTargetPitchMM() went the same
+// way as the GlobalState calls - but the parameter is kept so main.cpp's
+// construction is untouched.
+KeyArray::KeyArray(Leadscrew* leadscrew) {
+    (void)leadscrew;
     // KeyArray is heap-allocated (main.cpp `new KeyArray`), so members are NOT
     // zero-initialised the way the previous static instance was. keycodeMillis in
     // particular must start at 0 - otherwise garbage makes handle()'s
@@ -21,7 +29,8 @@ KeyArray::KeyArray(Leadscrew* leadscrew) : m_leadscrew(leadscrew) {
     m_encoder.attachSingleEdge(ELS_UI_ENCODER_A, ELS_UI_ENCODER_B);
     m_encoder.setFilter(1023);
     encoderPos = m_encoder.getCount();
-#endif    
+    m_encoderDetents = 0;
+#endif
 }
 
 void KeyArray::setupKeys(bool press) {
@@ -76,12 +85,6 @@ void KeyArray::handleTimer() {
 }
 
 ButtonInfo KeyArray::consumeButton() {
-#ifdef ELS_UI_ENCODER
-    int64_t val = m_encoder.getCount();
-    if (val != encoderPos) {
-        updateEncoderPos(val - encoderPos);
-    }
-#endif
     if (readindex == writeindex)
         return { 0, ButtonState::BS_NONE };
     ButtonInfo ret = ringBuffer[readindex];
@@ -96,28 +99,28 @@ void KeyArray::emitButton() {
 }
 
 
-void KeyArray::updateEncoderPos(int64_t pos) {
+int KeyArray::consumeEncoderDelta() {
 #ifdef ELS_UI_ENCODER
-
-    GlobalButtonLock lockState = GlobalState::getInstance()->getButtonLock();
-    if (lockState == GlobalButtonLock::LK_LOCKED) {
-        //DEBUG_F("Locked, ingoring rat inc");
-        encoderPos += pos;
-        return;
+    // Sample the hardware here rather than in consumeButton(): the encoder is
+    // not part of the key ring buffer, and ButtonPad drains that buffer in a
+    // loop but asks for detents exactly once per pass.
+    const int64_t val = m_encoder.getCount();
+    if (val != encoderPos) {
+        // The difference is bounded by how far a thumb can turn a knob in one
+        // display period (100 ms), so the int cast cannot lose anything real;
+        // it is clamped only so a garbage count from a glitching encoder cannot
+        // hand ButtonPad an absurd replay length.
+        int64_t delta = val - encoderPos;
+        if (delta > 64) delta = 64;
+        if (delta < -64) delta = -64;
+        m_encoderDetents += (int)delta;
+        encoderPos = val;
     }
-    int64_t p = pos;
-    if (pos > 0) {
-        while (p-- > 0) {
-            GlobalState::getInstance()->nextFeedPitch();
-            m_leadscrew->setTargetPitchMM(GlobalState::getInstance()->getCurrentFeedPitch());
-        }
-    } else {
-        while (p++ < 0) {
-            GlobalState::getInstance()->prevFeedPitch();
-            m_leadscrew->setTargetPitchMM(GlobalState::getInstance()->getCurrentFeedPitch());
-        }
-    }
-    encoderPos += pos;
+    const int out = m_encoderDetents;
+    m_encoderDetents = 0;
+    return out;
+#else
+    return 0;
 #endif
 }
 

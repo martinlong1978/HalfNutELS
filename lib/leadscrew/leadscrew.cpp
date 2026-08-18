@@ -2,6 +2,7 @@
 
 #include <globalstate.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -120,6 +121,52 @@ bool LeadscrewStopSync::setStop(LeadscrewStopPosition position, int stopPosition
   return false;
 }
 
+/**
+ * Explicit "I am in the groove here" anchor (see Leadscrew::setSyncPoint).
+ *
+ * This runs on the DisplayTask (core 1) while the SpindleTask (core 0) may be
+ * inside Leadscrew::update() reading these same fields with no lock. The state
+ * enum is written LAST, behind a compiler barrier (no instructions emitted; it
+ * only stops the compiler sinking the coordinate stores below the state store),
+ * so a reader that sees MANUAL for the FIRST time necessarily sees both
+ * coordinates already in memory.
+ *
+ * WHY A TORN READ IS SAFE ANYWAY - do not re-derive this, and note that the
+ * publication order above is NOT on its own sufficient. There are two windows
+ * in which update() can genuinely observe a mismatched pair:
+ *
+ *   W1  previous anchor was LEFT/RIGHT: between the spindleSyncPosition store
+ *       and the state store, the OLD stop coordinate is paired with the NEW
+ *       spindle phase (spindleSyncPosition is shared with the stop-derived
+ *       anchors).
+ *   W2  previous anchor was already MANUAL (re-syncing, "the last call wins"):
+ *       the state store changes nothing, so it is not a publication point at
+ *       all, and between the two coordinate stores a reader sees the NEW
+ *       carriage coordinate against the OLD phase - an arbitrary helix.
+ *
+ * Neither can do harm, and the reason is not that the transient value happens
+ * to be benign - it is that the ONLY writes the re-sync block performs are
+ *     m_expectedPosition = m_currentPosition - pulsesToTargetSpeed;
+ *     setThreadSyncState(SS_SYNC);
+ * and NEITHER contains any term derived from syncPosition or
+ * spindleSyncPosition. The anchor selects only WHEN the gate fires, never WHAT
+ * it writes. So a torn anchor can at worst make the gate fire (or not fire) in
+ * one nanosecond-wide iteration; it can never write a wrong position. A missed
+ * firing is recovered on the very next iteration, because the gate is level
+ * triggered and the correct pair is published by then.
+ *
+ * That argument, unlike a "publish the state last" argument, covers W2 as well,
+ * which is why giving MANUAL its own private spindle-phase field would NOT be
+ * an improvement: it closes W1 but leaves W2 exactly as it is, at the cost of a
+ * field and a hot-path load.
+ */
+void LeadscrewStopSync::setSyncPoint(int currentLeadscrewPosition, int spindlePosition) {
+  manualSyncPosition = currentLeadscrewPosition;
+  spindleSyncPosition = spindlePosition;
+  std::atomic_signal_fence(std::memory_order_release);
+  syncPositionState = LeadscrewSpindleSyncPositionState::MANUAL;
+}
+
 void Leadscrew::unsetStopPosition(LeadscrewStopPosition position) {
   m_stopSync.unsetStop(position, m_ratio, encoderPPR);
 }
@@ -138,6 +185,62 @@ void Leadscrew::setStopPosition(LeadscrewStopPosition position, int stopPosition
                          m_spindle->getCurrentPosition())) {
     m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_SYNC);
   }
+}
+
+/**
+ * Anchor the thread helix to the CURRENT carriage position and the CURRENT
+ * spindle angle. Cold path: menu action only. Contract in leadscrew.h.
+ *
+ * Both coordinates are sampled here, in one call, precisely so a caller cannot
+ * read them at two different instants and hand in a skewed pair (half a pitch of
+ * error that only shows up in the metal). No stop is created, moved or cleared.
+ *
+ * THE FOLLOWING ERROR MUST BE DISCARDED HERE, and it must be discarded BEFORE
+ * SS_SYNC is published. Raising SS_SYNC is what releases update()'s re-sync
+ * gate, and while that gate holds the axis (syncArmed() && SS_UNSYNC) update()
+ * goes on accumulating spindle motion into m_expectedPosition (line ~258) with
+ * m_currentPosition frozen - so the following error grows without bound, by a
+ * whole pitch per spindle revolution of holding. When the gate fires normally it
+ * throws that accumulation away:
+ *     m_expectedPosition = m_currentPosition - pulsesToTargetSpeed;
+ * Releasing the gate from here without the equivalent discard hands the axis a
+ * large error to close, which it closes at maximum speed. Measured on the host
+ * rig before this line existed: a sync taken part-way through a hold lurched the
+ * carriage 100+ pulses (0.32 mm, a quarter pitch) instantly, straight into the
+ * work. Pinned by SyncPointTest.SyncTakenWhileTheGateIsHoldingDoesNotLurch.
+ *
+ * The discard is a plain `= m_currentPosition` (zero following error) rather
+ * than the gate's `- pulsesToTargetSpeed`: that lead term exists to pre-
+ * accelerate the axis so it is up to speed by the time it REACHES the groove,
+ * whereas the whole content of this declaration is that the tool is in the
+ * groove already.
+ *
+ * Note this cannot be delegated to the gate by leaving the thread UNSYNC and
+ * letting the gate raise SS_SYNC: because of that same lead term the gate is
+ * deliberately NOT satisfied at the anchor point unless the spindle velocity
+ * estimate has decayed to a hard zero, so the axis would stay gated (and the
+ * screen would read unsynced) until nearly a full revolution had passed.
+ *
+ * RESIDUAL RACE, accepted: m_expectedPosition is otherwise written only inside
+ * update(), so this cold-path store from the DisplayTask can be lost if it lands
+ * inside the read-modify-write at line ~258 on the SpindleTask. That window is a
+ * few instructions wide, it is only reachable at all if the user takes a sync
+ * while the axis is ENGAGED and gated (the documented gesture is a stopped
+ * spindle and a disengaged axis, where MM_DISABLED-at-rest is pinning
+ * m_expectedPosition to m_currentPosition every iteration anyway), and losing it
+ * degrades to the old behaviour rather than to anything worse. Closing it for
+ * real needs either an atomic RMW or sync-state edge detection in update(), and
+ * neither belongs on the hot path for a case the UI should not offer: the Sync
+ * menu tile should be enabled only while the axis is disengaged.
+ *
+ * setStopPosition() above raises SS_SYNC with no such discard, and is safe for
+ * the opposite reason - it only latches when the anchor was UNSET, so the gate
+ * was never armed and no error can have accumulated behind it.
+ */
+void Leadscrew::setSyncPoint() {
+  m_stopSync.setSyncPoint(m_currentPosition, m_spindle->getCurrentPosition());
+  m_expectedPosition = m_currentPosition;
+  m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_SYNC);
 }
 
 LeadscrewStopState Leadscrew::getStopPositionState(LeadscrewStopPosition position) {
@@ -306,6 +409,12 @@ void Leadscrew::update() {
     case LeadscrewSpindleSyncPositionState::RIGHT:
       syncPosition = m_stopSync.rightStopPosition;
       break;
+    case LeadscrewSpindleSyncPositionState::MANUAL:
+      // Explicit sync point: the anchor owns its carriage coordinate rather
+      // than borrowing a stop's. Must NOT fall into the UNSET arm below, which
+      // returns m_currentPosition and so has no phase gate at all.
+      syncPosition = m_stopSync.manualSyncPosition;
+      break;
     case LeadscrewSpindleSyncPositionState::UNSET:  // Can we even hit this???
       // position does not matter
       syncPosition = m_currentPosition;
@@ -332,12 +441,61 @@ void Leadscrew::update() {
    * - Our current direction is unknown
    * - The last pulse was sent recently i.e: less than the current pulse delay
    * - the sync position was previously set and we are currently not synced with the spindle
+   *
+   * The first two arms are unchanged (same tests, same order, same cost). The
+   * third - the re-sync gate - is split out below because leaving through it
+   * must not freeze the acceleration planner.
    */
   if (m_currentDirection == LeadscrewDirection::UNKNOWN
-    || (tm - m_lastPulseTimestamp) < m_currentPulseDelay
-    || (m_stopSync.syncArmed()
-      && m_globalState->getThreadSyncState() == SS_UNSYNC
-      && !jogMode)) {
+    || (tm - m_lastPulseTimestamp) < m_currentPulseDelay) {
+    return;
+  }
+
+  /**
+   * The re-sync gate is holding the axis: the helix anchor is armed and we are
+   * out of sync, so no step may be emitted until the spindle brings the phase
+   * back round to the anchor.
+   *
+   * We are past the pulse-interval test above, so a full pulse interval of real
+   * time has elapsed. The axis is NOT moving, so the planner's commanded speed
+   * must run down exactly as it would have on the deceleration ramp - one
+   * decelerationStep() per pulse interval, the identical rule the pulse path
+   * uses (see decelerationStep() in leadscrew.h). We advance
+   * m_lastPulseTimestamp for the same reason the pulse path does: it is what
+   * paces the ramp at one step per interval. No pulse is sent and
+   * m_currentPosition is untouched - we are running the ramp down, not
+   * pretending to move.
+   *
+   * WHY THIS IS NEEDED. The endstop arrest above publishes MM_DISABLED and
+   * SS_UNSYNC together, and m_leadscrewSpeed used to decay ONLY inside
+   * `if (sendPulse())`, which this path skips. With the spindle then stopped
+   * the re-sync search never fires (it needs rotation to bring the phase onto
+   * the anchor), so whatever speed the discrete deceleration ramp had left at
+   * the arrest - measured up to ~310 PPS - stayed there indefinitely. The next
+   * jog then started part-way up the ramp instead of from rest, and
+   * getStoppingDistanceInPulses(), which is quadratic in this value, planned a
+   * stopping distance for motion that was not happening. Pinned by
+   * ArrestedThreadTest.*_SpeedRunsDownToZeroWhenTheSpindleStops.
+   *
+   * Reaching zero here is also what re-arms the MM_DISABLED/MM_DECELLERATE
+   * re-pin near the top of update() (guarded on m_leadscrewSpeed == 0), which
+   * then releases the direction latch and pins m_expectedPosition to
+   * m_currentPosition - so the axis settles properly instead of sitting with a
+   * stale following error.
+   *
+   * The `m_leadscrewSpeed > 0` guard keeps this a strict no-op once at rest:
+   * an axis already stopped behind a held gate (the ordinary "engaged, waiting
+   * for the phase to come round" case) sees exactly the old behaviour,
+   * including leaving m_lastPulseTimestamp stale so the first step after the
+   * gate fires goes out immediately.
+   */
+  if (m_stopSync.syncArmed()
+    && m_globalState->getThreadSyncState() == SS_UNSYNC
+    && !jogMode) {
+    if (m_leadscrewSpeed > 0) {
+      decelerationStep();
+      m_lastPulseTimestamp = tm;
+    }
     return;
   }
 
@@ -401,9 +559,11 @@ void Leadscrew::update() {
 
 
     if (shouldStop) {
-      m_leadscrewSpeed -= m_leadscrewAccel * min(m_currentPulseDelay, initialPulseDelay) / US_PER_SECOND;
-      m_leadscrewSpeed = max(m_leadscrewSpeed, (float)0); // don't let this go below zero 
-      m_currentPulseDelay = m_leadscrewSpeed == 0 ? initialPulseDelay : US_PER_SECOND / m_leadscrewSpeed;
+      // Same single deceleration rule the held-gate path above runs; the
+      // upper clamp it applies to m_currentPulseDelay is the one repeated at
+      // the bottom of this block, so this is behaviour-identical to the three
+      // lines it replaces.
+      decelerationStep();
     } else {
       m_leadscrewSpeed += m_leadscrewAccel * min(m_currentPulseDelay, initialPulseDelay) / US_PER_SECOND;
       m_leadscrewSpeed = min(m_leadscrewSpeed, config->leadscrewMaxSpeedPps());

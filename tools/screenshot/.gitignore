@@ -1,0 +1,7 @@
+# Build products of the host screen renderer. ~470 object files plus the exe;
+# all of it is reproducible from `bash tools/screenshot/render.sh`.
+build/
+
+# The rendered screens are NOT ignored. They are the point of the tool: a
+# committed set is what makes a layout change show up as an image diff in
+# review, which is the only way anyone sees the panel without a bench.

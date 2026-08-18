@@ -15,6 +15,7 @@
 #include "config.h"
 #include "display.h"
 #include "keyarray.h"
+#include "setupmode.h"
 
 //#define FULLMONITOR
 #include <esp_task_wdt.h>
@@ -41,6 +42,40 @@ int cyclecount;
 int finalcyclecount;
 bool configMode = false;
 bool apClientConnected = false;
+
+// Runtime path into config/AP mode (see docs/ux-redesign.md section 6).
+//
+// This can't be a flash-backed flag: WebSettings and LatheConfig share one 4 KB
+// sector that is erased as a unit (see WebSettings.cpp), so a boot-flag write there
+// would risk the stored Wi-Fi credentials and burn a flash erase/write cycle on
+// every normal boot. RTC slow memory is the right lifetime instead, and it costs
+// no flash wear. Do NOT change this to a flash write.
+//
+// IT MUST BE RTC_NOINIT_ATTR, NOT RTC_DATA_ATTR. The framework's own comments in
+// esp_attr.h draw the distinction, and it is exactly the one that matters here:
+//
+//   RTC_DATA_ATTR   "will keep its value during a deep sleep / wake cycle"
+//   RTC_NOINIT_ATTR "will keep its value AFTER RESTART or during a deep sleep"
+//
+// .rtc.data is re-initialised from the image on a software restart, so with
+// RTC_DATA_ATTR this flag was zeroed by the startup code before setup() could
+// read it: requestSetupOnNextBoot() rebooted the device and it came up normally
+// every time. Holding OK at power-on still worked, because that path reads the
+// keypad and never looks at this flag - which is what made the bug look like a
+// menu problem rather than a storage one.
+//
+// .rtc_noinit is not initialised on a COLD boot either, so the flag holds
+// whatever the RTC memory happened to contain. That is why the value compared
+// against is a distinctive magic rather than a plain 0/1 - 0 and 0xFFFFFFFF are
+// the two patterns most likely to appear as uninitialised RTC garbage and would
+// false-trigger a setup boot. Keep the magic; it is load-bearing under NOINIT.
+#define BOOT_TO_SETUP_MAGIC 0xE15B0071u
+RTC_NOINIT_ATTR uint32_t bootToSetup;
+
+void requestSetupOnNextBoot() {
+  bootToSetup = BOOT_TO_SETUP_MAGIC;
+  ESP.restart();
+}
 
 
 // have to handle the leadscrew updates in a timer callback so we can update the
@@ -124,9 +159,16 @@ void setup() {
   WebSettings* webSettings = getWebSettings();
   LatheConfig* config = getLatheSettings();
 
-  bool checks = (webSettings->check == CHECKVALUE) && (config->check == CHECKVALUE); 
+  bool checks = (webSettings->check == CHECKVALUE) && (config->check == CHECKVALUE);
 
-  if (digitalRead(ELS_PAD_H2) == 1 || !checks) {
+  // Capture and clear the RTC-memory setup request immediately, before we
+  // might branch into runWifiSettings() (which never returns to the normal
+  // boot path) — otherwise a menu-triggered reboot into setup would loop
+  // back into setup mode forever on every subsequent boot.
+  bool wantSetup = (bootToSetup == BOOT_TO_SETUP_MAGIC);
+  bootToSetup = 0;
+
+  if (digitalRead(ELS_PAD_H2) == 1 || !checks || wantSetup) {
     display = new Display();
     Serial.println("AP setting mode\n");
     runWifiSettings();
@@ -152,7 +194,13 @@ void setup() {
 
     keyArray = new KeyArray(leadscrew);
     keyPad = new ButtonPad(spindle, leadscrew, keyArray);
-    display = new Display(spindle, leadscrew);
+    // ButtonPad owns the UiState; the display only reads it, to know which
+    // selector overlay to show. Both run on the DisplayTask (displayLoop()
+    // below calls keyPad->handle() then display->update()), so this is a
+    // same-task read and needs no volatile or GlobalState round trip -- but it
+    // does mean ButtonPad MUST be constructed first, as it is here: the
+    // reference is taken now and held for the life of the display.
+    display = new Display(spindle, leadscrew, &keyPad->ui());
 
 
 
@@ -192,18 +240,13 @@ void setup() {
     pinMode(ELS_STEPPER_ENA, OUTPUT);
     digitalWrite(ELS_STEPPER_ENA, 0);
 
-#ifdef ELS_USE_BUTTON_ARRAY
-#else
-    pinMode(ELS_RATE_INCREASE_BUTTON, INPUT_PULLUP);  // rate Inc
-    pinMode(ELS_RATE_DECREASE_BUTTON, INPUT_PULLUP);  // rate Dec
-    pinMode(ELS_MODE_CYCLE_BUTTON, INPUT_PULLUP);     // mode cycle
-    pinMode(ELS_THREAD_SYNC_BUTTON, INPUT_PULLUP);    // thread sync
-    pinMode(ELS_HALF_NUT_BUTTON, INPUT_PULLUP);       // half nut
-    pinMode(ELS_ENABLE_BUTTON, INPUT_PULLUP);         // enable toggle
-    pinMode(ELS_LOCK_BUTTON, INPUT_PULLUP);           // lock toggle
-    pinMode(ELS_JOG_LEFT_BUTTON, INPUT_PULLUP);       // jog left
-    pinMode(ELS_JOG_RIGHT_BUTTON, INPUT_PULLUP);      // jog right
-#endif
+    // The discrete-button #else branch that used to sit here has been deleted.
+    // It configured nine GPIOs from ELS_*_BUTTON names that no longer exist,
+    // and ELS_USE_BUTTON_ARRAY is defined unconditionally in board.h, so it had
+    // not been compiled in a long time. Worse than merely dead: after the Mk2
+    // remap the ELS_*_BUTTON names are MATRIX CODES, not GPIO numbers, so
+    // ELS_ENABLE_BUTTON would still have resolved here and quietly configured
+    // the wrong pin. There is no discrete-button hardware left to support.
 
     // Display Initalisation
 

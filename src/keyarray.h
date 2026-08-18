@@ -20,7 +20,6 @@ typedef struct buttonInfo {
 
 class KeyArray {
 private:
-    Leadscrew* m_leadscrew;
     volatile ButtonInfo buttonState;
     volatile unsigned long keycodeMillis;
     ButtonInfo ringBuffer[10];
@@ -30,11 +29,13 @@ private:
 
     void setupKeys(bool press);
     int getCodeFromArray();
-    void updateEncoderPos(int64_t pos);
     void emitButton();
 #ifdef ELS_UI_ENCODER
     ESP32Encoder m_encoder;
     int64_t encoderPos;
+    // Detents seen since the last consumeEncoderDelta(), signed: + clockwise.
+    // Accumulated here and nowhere else - see consumeEncoderDelta().
+    int m_encoderDetents;
 #endif
 public:
     KeyArray();
@@ -43,6 +44,21 @@ public:
     void handleRelease();
     void handleTimer();
     ButtonInfo consumeButton();
+
+    // Detents accumulated since the last call, then reset to zero. Positive is
+    // clockwise.
+    //
+    // This is the WHOLE of the encoder's effect on the machine. It used to act
+    // directly: updateEncoderPos() called GlobalState::next/prevFeedPitch() and
+    // Leadscrew::setTargetPitchMM() itself, so the knob reached past the focus
+    // model entirely and stepped the pitch even while a widget or the menu was
+    // open. That was masked by the old button lock, which swallowed every
+    // detent; the Mk2 panel unlocks at boot, so it became live from power-on.
+    // KeyArray now touches neither GlobalState nor the Leadscrew - it reports
+    // motion, and ButtonPad feeds it to UiState as UiKey::EncoderCw/Ccw so the
+    // knob goes through exactly the same path as every key.
+    int consumeEncoderDelta();
+
     KeyArray(Leadscrew* leadscrew);
 };
 
