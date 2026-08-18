@@ -1,6 +1,11 @@
 
 #include <axis.h>
 #include <config.h>
+// The motion-trace capture buffer (DebugData, DebugCapture, DebugCaptureState).
+// It used to be two raw pointers and a struct declared here; it is its own
+// class now so the buffer it writes through is actually allocated, and so the
+// decimator and bookkeeping can be host-tested. See debugcapture.h.
+#include "debugcapture.h"
 
 #pragma once
 
@@ -48,20 +53,6 @@ enum GlobalThreadSyncState { SS_UNSET, SS_SYNC, SS_UNSYNC };
  */
 enum GlobalOtaStatus { OTA_IDLE, OTA_CHECKING, OTA_NO_UPDATE, OTA_DOWNLOADING, OTA_FAILED };
 
-typedef struct DebugData {
-  int tm;
-  float positionError;
-  float positionErrorRaw;
-  float pulsesToTargetSpeed;
-  int m_currentPosition;
-  int m_currentDirection;
-  float m_expectedPosition;
-  float m_leadscrewSpeed;
-  float m_targetSpeed;
-  float m_speedDif;
-  float m_timeToTarget;
-} DebugData;
-
 // this is a singleton class - we don't want more than one of these existing at
 // a time!
 class GlobalState {
@@ -84,7 +75,15 @@ private:
   volatile GlobalUnitMode m_unitMode;
   volatile GlobalThreadSyncState m_threadSyncState;
 
-  volatile bool m_debugMode = false;
+  // The motion-trace capture. Not a bool any more: the "is debug on" flag and
+  // the buffer that flag lets the hot loop write through are one object, so
+  // they cannot get out of step (see the constructor note below).
+  //
+  // Held BY VALUE - no pointer, no allocation at construction. The trace
+  // buffer itself is allocated by arm() and freed by discard(); this object is
+  // 40-odd bytes of bookkeeping that exists from boot.
+  DebugCapture m_debug;
+
   volatile bool m_displayReset = false;
 
   volatile int m_feedSelect;
@@ -169,28 +168,43 @@ private:
     // leave m_jogSpeed indexing past the end until the first incJogSpeed()
     // call clamped it. Same value as before for today's 6-entry table.
     m_jogSpeed = (int)ARRAY_SIZE(jogSpeeds) - 1;
-    // The last two members. GlobalState is `new`ed (main.cpp), so these are
-    // heap garbage otherwise - the exact failure mode CLAUDE.md records. They
-    // are only dereferenced under getDebugMode() (leadscrew.cpp), which cannot
-    // currently return true because setDebugMode() is stubbed out, so the
-    // garbage is unreachable *today*; un-stubbing setDebugMode() without this
-    // line would turn the debug toggle into a wild pointer write from the
-    // spindle hot loop.
-    debugBuffer = nullptr;
-    debugInit = nullptr;
+    // m_debug is the last member, and it initialises itself: DebugCapture's
+    // constructor sets every one of its own fields (debugcapture.cpp). It has
+    // to, for the same reason everything above is set explicitly - GlobalState
+    // is `new`ed in main.cpp and the heap is not zeroed - and it matters more
+    // here than anywhere else, because the members concerned are the write
+    // cursor the SpindleTask dereferences.
+    //
+    // The two raw `DebugData*` members that used to live here are gone. They
+    // were nulled by this constructor but NOTHING EVER ALLOCATED THEM: the old
+    // setDebugMode() was an empty body, so turning the debug toggle back on
+    // would have made leadscrew.cpp write through a null cursor from the
+    // spindle hot loop. DebugCapture owns the allocation and the enable flag
+    // together, which is what makes that state unreachable.
   }
 
 public:
-  DebugData* volatile debugBuffer;
-  DebugData* volatile debugInit;
-
 
   // singleton stuff, no cloning and no copying
   GlobalState(GlobalState const&) = delete;
   void operator=(GlobalState const&) = delete;
 
+  // --- Motion-trace capture -------------------------------------------------
+  //
+  // The hot loop's view. Kept as getDebugMode() because that is the name the
+  // two capture sites in Leadscrew::update() have always used, and keeping it
+  // means the guard around them is untouched by this change.
   bool getDebugMode();
+
+  // Arm (true) or discard (false) a capture. Cold path only - the DisplayTask,
+  // from the "Debug capture" menu tile. arm() allocates ~100 KB, which is
+  // precisely why the tile is one menuTileBlock() refuses while the carriage
+  // is under power.
   void setDebugMode(bool mode);
+
+  // The capture object itself, for the two Leadscrew::update() sites (hot
+  // path, all inline), the uploader and the Diagnostics readout.
+  DebugCapture& debug() { return m_debug; }
 
   float getJogSpeed();
   int getJogIndex();

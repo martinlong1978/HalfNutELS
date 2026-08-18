@@ -40,7 +40,9 @@ Leadscrew::Leadscrew(LatheConfigDerived *config, Spindle* spindle, LeadscrewIO* 
   // memory or setStopPosition()'s "sync only when UNSET" guard behaves
   // non-deterministically. m_stopSync's default constructor initialises all of
   // its fields (stops UNSET, sync anchor UNSET).
-  debugPulseCount = 0;
+  // debugPulseCount is gone with the "every 11th pulse" decimator it drove;
+  // the capture's rate is now decided in DebugCapture::due(), which keeps its
+  // own state (lib/global_state/debugcapture.h).
   jogMicros = 0;
 }
 
@@ -293,16 +295,41 @@ int Leadscrew::getStoppingDistanceInPulses() {
  * This is not the absolute number of pulses, but the number of pulses gained/lost during the
  * accelleration/decelleration process.
  */
-int Leadscrew::getTargetSpeedDistanceInPulses() {
+// The two extra parameters exist ONLY so the capture's per-iteration
+// bookkeeping can live inside the `recording()` guard that is already here,
+// instead of costing the disabled hot path a second guard of its own in
+// update(). Both are values update() has to hand at the call site anyway, so
+// passing them is free; re-deriving them here would not be (nowUs would mean a
+// second micros() call, and consumePosition() must be called exactly once per
+// iteration). There is exactly one caller.
+int Leadscrew::getTargetSpeedDistanceInPulses(uint32_t nowUs, int spindleDelta) {
   float targetSpeed = m_spindle->getEstimatedVelocityInPPS() * m_ratio;
   float speedDif = (float)m_currentDirection * m_leadscrewSpeed - targetSpeed;
   float time = abs(speedDif) * 1.5 / m_leadscrewAccel;  // Leave some margin for catching up. 
-  if (m_globalState->getDebugMode()) {
-    m_globalState->debugBuffer->m_currentDirection = (int)m_currentDirection;
-    m_globalState->debugBuffer->m_leadscrewSpeed = m_leadscrewSpeed;
-    m_globalState->debugBuffer->m_targetSpeed = targetSpeed;
-    m_globalState->debugBuffer->m_speedDif = speedDif;
-    m_globalState->debugBuffer->m_timeToTarget = time;
+  // Capture site 1 of 2: the per-iteration bookkeeping, plus the five SPEED
+  // fields of the pending sample. Runs once per update() while a capture is
+  // armed; the sample is published by site 2 (further down update()), so what
+  // survives in a committed slot is always the pair of writes from ONE
+  // iteration.
+  //
+  // noteIteration() is what measures starvation: the gap since the previous
+  // iteration of the hot loop, and the spindle delta that piled up behind it.
+  // Both are peak-held until the sample is committed, so decimation cannot lose
+  // a stall (debugcapture.h).
+  //
+  // Cost when no capture is running: one volatile bool load and a
+  // not-taken branch. That is the whole of it - see DebugCapture::recording().
+  DebugCapture& dbg = m_globalState->debug();
+  if (dbg.recording()) {
+    dbg.noteIteration(nowUs, spindleDelta);
+    DebugData* s = dbg.slot();
+    s->m_currentDirection = (int)m_currentDirection;
+    s->m_leadscrewSpeed = m_leadscrewSpeed;
+    s->m_targetSpeed = targetSpeed;
+    s->m_speedDif = speedDif;
+    s->m_timeToTarget = time;
+    s->loopGapUs = dbg.peakGapUs();
+    s->spindleDelta = dbg.peakSpindleDelta();
   }
 
   return 0 - ((speedDif)*time / 2);
@@ -318,16 +345,23 @@ void Leadscrew::update() {
   bool hitLeftEndstop = m_stopSync.hitLeftEndstop(m_currentPosition);
   bool hitRightEndstop = m_stopSync.hitRightEndstop(m_currentPosition);
 
+  // Hoisted out of the two arms below, which each called consumePosition()
+  // exactly once - so this is behaviour-identical, and it gives the capture the
+  // number the starvation hypothesis turns on: how many spindle counts had
+  // piled up since the last iteration. A stalled loop shows up here as a spike,
+  // one iteration before m_expectedPosition leaps forward by delta x ratio.
+  const int spindleDelta = m_spindle->consumePosition();
   if (jogMode) {
-    m_spindle->consumePosition(); // Consume the spindle position while we're jogging
+    // Consumed above and deliberately discarded while jogging.
     m_expectedPosition = m_currentPosition;
   } else {
     // Update expected position from any unconsumed spindle pulses
-    m_expectedPosition = (m_expectedPosition + (float)(((float)m_spindle->consumePosition()) * m_ratio));
+    m_expectedPosition = (m_expectedPosition + ((float)spindleDelta * m_ratio));
   }
 
   // How far are we from the expected position
-  float pulsesToTargetSpeed = (float)getTargetSpeedDistanceInPulses();
+  const uint32_t nowUs = (uint32_t)tm;
+  float pulsesToTargetSpeed = (float)getTargetSpeedDistanceInPulses(nowUs, spindleDelta);
   float positionErrorRaw = getPositionError();
   float positionError = positionErrorRaw + pulsesToTargetSpeed;
 
@@ -432,6 +466,50 @@ void Leadscrew::update() {
         m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_SYNC);
       }
 
+    }
+  }
+
+  // Capture site 2 of 2: the six POSITION fields, and the commit that publishes
+  // the sample.
+  //
+  // PLACED HERE, BEFORE THE EARLY RETURNS, NOT INSIDE `if (sendPulse())` where
+  // it used to be. The old placement could only record on an iteration that
+  // actually emitted a step, so a stall while the axis was HELD - by the
+  // re-sync gate, or by the pulse-interval wait - produced no rows at all. That
+  // is exactly the case worth seeing: the re-sync gate is the prime suspect if
+  // the trace shows an error spike with a flat loop gap. Every iteration is now
+  // eligible, and DebugCapture::due() decides.
+  //
+  // Everything read below is settled for this iteration by this point:
+  // positionError and its two components, m_expectedPosition, and
+  // m_currentDirection (resolved by the direction block above). m_currentPosition
+  // is the pre-pulse value - at most one pulse behind what the old site
+  // recorded, which is immaterial next to a 400-pulse reversal.
+  //
+  // NOTHING IS ADDED TO THE HOT PATH WHEN NO CAPTURE IS RUNNING. The disabled
+  // cost is one volatile bool load and a not-taken branch, and it is strictly
+  // LESS than the code this replaced: that ran `++debugPulseCount` and then a
+  // two-pointer-load, subtract, multiply, compare buffer-full test on EVERY
+  // pulse, both outside the getDebugMode() guard. The decimator's state and the
+  // full test now both live inside the branch. (Binding the reference below
+  // compiles to nothing - it is the same singleton pointer the line above it
+  // already holds.)
+  DebugCapture& dbg = m_globalState->debug();
+  if (dbg.recording()) {
+    const int dir = (int)m_currentDirection;
+    if (dbg.due(nowUs, dir)) {
+      DebugData* s = dbg.slot();
+      s->tm = dbg.relativeMicros(nowUs);
+      s->positionError = positionError;
+      s->positionErrorRaw = positionErrorRaw;
+      s->pulsesToTargetSpeed = pulsesToTargetSpeed;
+      s->m_currentPosition = m_currentPosition;
+      s->m_expectedPosition = m_expectedPosition;
+      // Advances the cursor, opens a fresh peak-hold window, and stops the
+      // capture (state DBG_FULL) when the buffer is full. It never calls back
+      // into GlobalState and never frees anything - the upload happens later,
+      // from another task, once the carriage is at rest.
+      dbg.commit(nowUs, dir);
     }
   }
 
@@ -571,22 +649,6 @@ void Leadscrew::update() {
     }
 
     GlobalThreadSyncState tss = m_globalState->getThreadSyncState();
-
-    if (debugPulseCount == 0 && m_globalState->getDebugMode()) {
-      m_globalState->debugBuffer->tm = (int)tm;
-      m_globalState->debugBuffer->positionError = positionError;
-      m_globalState->debugBuffer->positionErrorRaw = positionErrorRaw;
-      m_globalState->debugBuffer->pulsesToTargetSpeed = pulsesToTargetSpeed;
-      m_globalState->debugBuffer->m_currentPosition = m_currentPosition;
-      m_globalState->debugBuffer->m_expectedPosition = m_expectedPosition;
-      m_globalState->debugBuffer++;
-    }
-    if (++debugPulseCount > 10) {
-      debugPulseCount = 0;
-    }
-    if ((m_globalState->debugBuffer - m_globalState->debugInit) * sizeof(DebugData) > 100000) {
-      m_globalState->setDebugMode(false);
-    }
 
 
     /**

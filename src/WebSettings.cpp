@@ -31,13 +31,18 @@ constexpr uint32_t latheaddress = address + sizeof(WebSettings);
 // AND-ed into whatever was already there. That corrupts silently: no error is
 // returned, the data just reads back wrong. Hence a compile-time budget.
 //
-// Current numbers (verified with the xtensa toolchain, and identical on the
-// host):
-//     sizeof(WebSettings) = 612   (4 + 32 + 63 + 512 = 611, padded to 612)
+// Current numbers:
+//     sizeof(WebSettings) = 868   (4 + 32 + 63 + 512 + 256 = 867, padded to 868)
 //     sizeof(LatheConfig) =  44
-//     total               = 656 of 4096  ->  3440 bytes headroom
+//     total               = 912 of 4096  ->  3184 bytes headroom
 // Adding fields is therefore safe today, but is NOT unlimited - grow
 // WebSettings::url and this is the assert that will stop you.
+//
+// NOTE what the 256-byte debugUrl addition cost: LatheConfig is stored at
+// `latheaddress = address + sizeof(WebSettings)`, so growing WebSettings moved
+// it, invalidating every device's stored settings. That is why CHECKVALUE was
+// bumped alongside it (latheconfig.h). Any future growth here has the same
+// consequence and needs the same bump.
 constexpr uint32_t SECTOR_SIZE = 4096;
 constexpr uint32_t SETTINGS_BYTES = sizeof(WebSettings) + sizeof(LatheConfig);
 
@@ -225,6 +230,14 @@ void showPage() {
     html += "<div class='field'><label for='url'>Firmware update URL</label><div class='control'><input id='url' name='url' type='url' placeholder='http://.../firmware.bin' value='";
     DEFAULTWEBSETTING(webSettings->url, "https://github.com/martinlong1978/TeensyELS/releases/latest/download/elstft.bin");
     html += "'></div><div class='help hintline'>Where holding Half-Nut pulls OTA updates from.</div><div class='help err'>Must start with http:// or https://</div></div>";
+
+    // The motion-trace sink. Not a required field: leave it blank and the
+    // Debug capture tile still records, it just has nowhere to send the trace.
+    // The default offered here is the server in tools/debugsink - keep the two
+    // in step if either changes.
+    html += "<div class='field'><label for='debugUrl'>Debug capture URL</label><div class='control'><input id='debugUrl' name='debugUrl' type='url' placeholder='http://host:8088/capture' value='";
+    DEFAULTWEBSETTING(webSettings->debugUrl, "http://hass.longhome.co.uk:8088/capture");
+    html += "'></div><div class='help hintline'>Where the Debug capture tile POSTs its motion trace. Blank to disable.</div><div class='help err'>Must start with http:// or https://</div></div>";
     html += "</section>";
 
     // --- Lathe Geometry ---
@@ -350,6 +363,7 @@ void setValues() {
     copyArg("ssid", settings.ssid, sizeof(settings.ssid));
     copyArg("password", settings.password, sizeof(settings.password));
     copyArg("url", settings.url, sizeof(settings.url));
+    copyArg("debugUrl", settings.debugUrl, sizeof(settings.debugUrl));
     settings.check = CHECKVALUE;
 
     LatheConfig config;  // members start at their safe defaults
@@ -554,7 +568,7 @@ static void sendFactoryResetPage(bool stale) {
     html += "<p class='lead'>Everything, not just the lathe settings.</p>";
     html += "<ul>";
     html += "<li>The Wi-Fi network name and password</li>";
-    html += "<li>The firmware update URL</li>";
+    html += "<li>The firmware update URL and the debug capture URL</li>";
     html += "<li>Spindle encoder PPR, stepper PPR, gearbox ratio, leadscrew pitch and motor direction</li>";
     html += "<li>Jog speed, acceleration and maximum leadscrew speed</li>";
     html += "<li>The display theme and DRO datum</li>";

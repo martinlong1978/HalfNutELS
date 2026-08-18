@@ -1,6 +1,7 @@
 #ifndef PIO_UNIT_TESTING
 #include <Wire.h>
 #endif
+#include <Arduino.h>  // micros(), for seeding the capture's relative clock
 #include <globalstate.h>
 
 GlobalState* GlobalState::m_instance = nullptr;
@@ -12,39 +13,30 @@ GlobalState* GlobalState::getInstance() {
 }
 
 bool GlobalState::getDebugMode() {
-  return m_debugMode;
+  return m_debug.recording();
 }
 
+// Arm or discard a motion-trace capture.
+//
+// This used to be an empty function body with the original commented out above
+// it. The original malloc'd 100 KB on enable and, on disable, dumped the whole
+// trace over Serial at 921600 baud FROM WHEREVER IT WAS CALLED - which was
+// inside Leadscrew::update(), on the 4 KB SpindleTask, once the buffer filled.
+// Both halves of that are gone: the buffer is owned by DebugCapture (so the
+// enable flag cannot outlive the allocation), and the trace leaves the machine
+// over HTTP from its own task, only once the carriage is at rest
+// (src/DebugSink.cpp).
+//
+// Cold path. Called from the DisplayTask when the "Debug capture" menu tile is
+// activated, which menuTileBlock() refuses while the carriage is under power -
+// arm() calls malloc, and a ~100 KB allocation mid-cut is exactly the kind of
+// thing that stalls a hot loop.
 void GlobalState::setDebugMode(bool mode) {
-  // if (mode == m_debugMode)return;
-  // if (mode) {
-  //   Serial.printf("Heap: %d PSRam %d \n", ESP.getFreeHeap(), ESP.getFreePsram());
-  //   debugBuffer = (DebugData*)malloc(100000);
-  //   debugInit = (DebugData*)debugBuffer;
-  // } else {
-  //   Serial.printf("Bytes found %d, %d items of %d bytes\n", (debugBuffer - debugInit) * sizeof(DebugData), (debugBuffer - debugInit), sizeof(DebugData));
-  //   int count = (debugBuffer - debugInit);
-  //   debugBuffer = debugInit;
-  //   Serial.println("time,posError,posErrorRaw,pulseToTarget,pos,expectedPos,speed,direction,targetSpeed,speedDiff,timeToTarget");
-  //   for (int i = 0; i < count; i++) {
-  //     Serial.printf("%d,%f,%f,%f,%d,%f,%f,%d,%f,%f,%f\n",
-  //       debugBuffer->tm,  //d 
-  //       debugBuffer->positionError, //f
-  //       debugBuffer->positionErrorRaw, //f
-  //       debugBuffer->pulsesToTargetSpeed, //f
-  //       debugBuffer->m_currentPosition,  //d
-  //       debugBuffer->m_expectedPosition, //f
-  //       debugBuffer->m_leadscrewSpeed, //f
-  //       debugBuffer->m_currentDirection, //d
-  //       debugBuffer->m_targetSpeed, //f
-  //       debugBuffer->m_speedDif, //f
-  //       debugBuffer->m_timeToTarget //f
-  //     );
-  //     debugBuffer++;
-  //   }
-  //   free(debugInit);
-  // }
-  // m_debugMode = mode;
+  if (mode) {
+    m_debug.arm((uint32_t)micros());
+  } else {
+    m_debug.discard();
+  }
 }
 
 

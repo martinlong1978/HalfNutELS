@@ -527,6 +527,11 @@ static const int OVERLAY_DATUM_POST_X_RIGHT =
 // suggests otherwise; the only hint is the exit.
 static const int DIAG_TITLE_X = 10;
 static const int DIAG_TITLE_Y = 6;         // 14 -> 6..22
+// The title's box runs up to the exit hint at DIAG_HINT_X (170), less a gap.
+// It is fixed-width because the label is not static: it carries the capture
+// status when a trace is running, and a shrink-to-fit box would re-lay-out
+// under it on every change.
+static const int DIAG_TITLE_W = 155;       // 10..165, clear of the hint at 170
 static const int DIAG_ERR_LABEL_Y = 30;    // 14 -> 30..46
 static const int DIAG_ERR_PULSES_X = 200;  // right-aligned box 200..310, row 1
 static const int DIAG_ERR_PULSES_W = 110;
@@ -1383,6 +1388,9 @@ static const char* menuTileName(int tile) {
   case MENU_WIFI_SETUP:       return "Wi-Fi setup";
   case MENU_DIAGNOSTICS:      return "Diagnostics";
   case MENU_ABOUT:            return "About";
+  // Two words, neither wider than TEXT14_MENU_WORD_W ("Diagnostics" at 85px is
+  // still the widest), and 13 bytes - inside the cache cap above.
+  case MENU_DEBUG_CAPTURE:    return "Debug capture";
   // Out of range: blank, the same answer formatPitch() gives for an index off
   // the end of a pitch table. The carousel asks for index-1 and index+1 on
   // purpose, and a blank neighbour is the correct rendering at the two ends.
@@ -1519,6 +1527,7 @@ void Display::resetObjectTree() {
     overlayDatumZero[i] = nullptr;
   }
   diagPanel = nullptr;
+  diagTitle = nullptr;
   diagErrValue = nullptr;
   diagErrPulses = nullptr;
   diagErrMarker = nullptr;
@@ -2250,9 +2259,13 @@ void Display::init() {
                          m_palette->background, 0);
   lv_obj_add_flag(diagPanel, LV_OBJ_FLAG_HIDDEN);
   {
-    lv_obj_t* t = createLabel(diagPanel, &lv_font_montserrat_14,
-                              m_palette->textDim, DIAG_TITLE_X, DIAG_TITLE_Y);
-    lv_label_set_text(t, "DIAGNOSTICS");
+    // The title is the ONE label on this screen that is not static furniture:
+    // it doubles as the capture-status line (see diagTitle in the header), so
+    // it is a member with a fixed box rather than a local set once here.
+    diagTitle = createLabel(diagPanel, &lv_font_montserrat_14,
+                            m_palette->textDim, DIAG_TITLE_X, DIAG_TITLE_Y);
+    fixLabelBox(diagTitle, DIAG_TITLE_W, LV_TEXT_ALIGN_LEFT);
+    lv_label_set_text(diagTitle, "DIAGNOSTICS");
     lv_obj_t* el = createLabel(diagPanel, &lv_font_montserrat_14,
                                m_palette->textDim, DIAG_TITLE_X,
                                DIAG_ERR_LABEL_Y);
@@ -3073,6 +3086,23 @@ void Display::drawOverlayDatum() {
 // the strings through setLabelText()'s slots, the marker through its x/pegged
 // pair, the sync chip through its state int.
 void Display::drawDiagnostics() {
+  // The title row doubles as the motion-trace capture's status line. Reads
+  // "DIAGNOSTICS" whenever no capture exists, so the screen is unchanged for
+  // anyone not using the instrument; while one does exist it is the only place
+  // that says whether it is recording, waiting for the carriage to stop, or
+  // has already sent. All three states are read straight off GlobalState (the
+  // SpindleTask fills the trace, the upload task sends it, this runs on the
+  // DisplayTask - no locks, see CLAUDE.md), and the wording is decided in
+  // lib/global_state so its length can be held to this row's cache slot by the
+  // host tests.
+  {
+    DebugCapture& dbg = m_globalState->debug();
+    char title[TEXT_SLOT_LEN];
+    formatCaptureStatus(title, sizeof(title), (int)dbg.state(), dbg.count(),
+                        dbg.capacity());
+    setLabelText(diagTitle, TS_DIAG_TITLE, title);
+  }
+
   const float stepsPerMm = m_leadscrew->getConfig()->leadscrewStepsPerMm();
   const float safeStepsPerMm = (stepsPerMm > 0.0f) ? stepsPerMm : 1.0f;
   const float errPulses = m_leadscrew->getPositionError();

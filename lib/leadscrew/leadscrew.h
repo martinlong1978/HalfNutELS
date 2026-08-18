@@ -59,7 +59,9 @@ private:
    */
   bool sendPulse();
   int getStoppingDistanceInPulses();
-  int getTargetSpeedDistanceInPulses();
+  // nowUs / spindleDelta are passed in for the capture only - see the note at
+  // the definition. They do not affect what this returns.
+  int getTargetSpeedDistanceInPulses(uint32_t nowUs, int spindleDelta);
 
   /**
    * ONE deceleration step of the acceleration planner: the exact rule the
@@ -90,7 +92,6 @@ private:
 
   uint64_t jogMicros;
 
-  int debugPulseCount;
   bool initPos;
 
   GlobalMotionMode m_motionMode = MM_DISABLED;

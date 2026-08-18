@@ -546,10 +546,11 @@ void ButtonPad::activateMenuTile() {
     // DisplayTask (Sec. 6: live position error and pulse counts). There is no
     // machine state to change, which is the whole nature of the screen.
     //
-    // Deliberately NOT wired to the old serial debug path: setDebugMode() is an
-    // empty body and debugBuffer is a pointer written from the 4 KB spindle
-    // task, so re-enabling it is a latent crash (Sec. 9 item 5 has it deleted,
-    // not revived).
+    // The motion-trace capture is NOT armed from here - it has its own tile
+    // (MENU_DEBUG_CAPTURE, below), which is blocked under power because it
+    // allocates. This tile stays a pure read-only screen. The two do meet on
+    // screen: the capture's status replaces this screen's title while a trace
+    // exists, which is why the Debug capture tile lands the operator here.
     break;
 
   case MENU_ABOUT:
@@ -557,6 +558,45 @@ void ButtonPad::activateMenuTile() {
     // UiFocus::About and the screen reads firmware version (include/version.h),
     // IP and uptime for itself.
     break;
+
+  case MENU_DEBUG_CAPTURE: {
+    // Arm or abandon a motion-trace capture (lib/global_state/debugcapture.h).
+    //
+    // ONE KEY, TWO ANSWERS, and which one you get is on screen before you
+    // press it: UiState has already moved focus to UiFocus::Diagnostics, whose
+    // title row IS the capture's status line. Press once from a resting state
+    // to arm; press again while it is recording (or holding a trace) to throw
+    // it away and go back to idle.
+    //
+    // ARMING MUST HAPPEN BEFORE THE CUT. That is not a convention, it is the
+    // only order the machine allows: menuTileBlock() refuses this tile while
+    // the carriage is under power, and the panel is inert under power anyway
+    // (the motion lockout, uistate.h). A capture armed afterwards would also
+    // simply not contain the cut.
+    //
+    // The gate above is doing real work here, exactly as it is for Theme:
+    // setDebugMode() calls malloc/free for ~100 KB, and the heap walk that
+    // implies is not something to run while the spindle loop is generating
+    // steps.
+    GlobalState* gs = GlobalState::getInstance();
+    const DebugCaptureState state = gs->debug().state();
+    if (state == DBG_SENDING) {
+      // THE ONE STATE THIS KEY MUST NOT TOUCH. The upload task is reading the
+      // trace right now; freeing it under that read is a use-after-free on a
+      // 100 KB buffer. The upload ends by itself (DBG_SENT or DBG_FAILED),
+      // and both of those are pressable. Nothing on screen changes, which is
+      // honest: "SENDING TRACE" is still exactly what is happening.
+      break;
+    }
+    const bool idle = (state == DBG_OFF || state == DBG_SENT ||
+                       state == DBG_NOMEM);
+    // Arm from idle; otherwise abandon - a capture still recording, or a full
+    // trace waiting to go, or a failed upload still holding its trace.
+    // setDebugMode(false) stops the hot loop before it frees, so this is safe
+    // to press at any moment the tile is reachable at all.
+    gs->setDebugMode(idle);
+    break;
+  }
 
   case MENU_TILE_COUNT:
   default:

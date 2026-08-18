@@ -250,9 +250,11 @@ class UiState {
   static const unsigned long kStopsConfirmMs = 1000;
 
   // Number of menu tiles (docs/ux-redesign.md §6: Units, Theme, DRO datum, Jog
-  // speed, Sync, Software update, Setup/Wi-Fi, Diagnostics, About). menuIndex()
-  // is clamped to [0, kMenuItemCount - 1]; it does NOT wrap.
-  static const int kMenuItemCount = 9;
+  // speed, Sync, Software update, Setup/Wi-Fi, Diagnostics, About) plus Debug
+  // capture, which §6 does not describe because it is a diagnostic instrument
+  // rather than a setting. menuIndex() is clamped to [0, kMenuItemCount - 1];
+  // it does NOT wrap.
+  static const int kMenuItemCount = 10;
 
  private:
   // How far a powered run to a stop has got. Two phases, not one flag, because
@@ -347,6 +349,12 @@ enum MenuTile {
   MENU_WIFI_SETUP,
   MENU_DIAGNOSTICS,
   MENU_ABOUT,
+  // Arms / discards a motion-trace capture (lib/global_state/debugcapture.h).
+  // APPENDED AT THE END, and it must stay there: the carousel is index-driven
+  // and so is every test that walks it, so inserting a tile anywhere else
+  // silently renumbers the ones after it - the "tile 5 fires tile 6, which
+  // REBOOTS" failure the note above this enum warns about.
+  MENU_DEBUG_CAPTURE,
   MENU_TILE_COUNT
 };
 static_assert((int)MENU_TILE_COUNT == UiState::kMenuItemCount,
@@ -405,6 +413,12 @@ inline MenuTileBlock menuTileBlock(int tile, bool motionActive,
   case MENU_DRO_DATUM:
   case MENU_SOFTWARE_UPDATE:
   case MENU_WIFI_SETUP:
+  // Debug capture - arming calls malloc for a ~100 KB trace buffer, and
+  // discarding frees it. Neither belongs under a running cut, and the tile is
+  // useless there anyway: a capture has to be ARMED BEFORE the cut starts, or
+  // it will not contain the cut. Blocking it here is what makes "arm it, then
+  // engage" the only possible order.
+  case MENU_DEBUG_CAPTURE:
     return motionActive ? MTB_MOTION : MTB_NONE;
   default:
     return MTB_NONE;
@@ -447,6 +461,10 @@ inline UiFocus menuTileDestination(int tile) {
   case MENU_JOG_SPEED:   return UiFocus::JogSpeed;
   case MENU_DIAGNOSTICS: return UiFocus::Diagnostics;
   case MENU_ABOUT:       return UiFocus::About;
+  // Debug capture lands on Diagnostics, which is where the capture's state is
+  // displayed - armed / how full / waiting to send / sent. Same rule as every
+  // other tile: OK closes the menu and leaves you looking at the result.
+  case MENU_DEBUG_CAPTURE: return UiFocus::Diagnostics;
   default:               return UiFocus::Jog;
   }
 }

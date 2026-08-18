@@ -16,7 +16,21 @@
 // struct defaults instead of trusting garbage. Per CLAUDE.md this also wipes
 // saved Wi-Fi credentials (WebSettings and LatheConfig share one erased-as-a-
 // unit 4 KB sector) - expected, not a bug.
-#define CHECKVALUE 0xDFEB0941
+// BUMPED AGAIN for the debug-capture sink URL added to WebSettings
+// (src/WebSettings.h). That struct grew by 256 bytes, and LatheConfig is stored
+// immediately after it - `latheaddress = address + sizeof(WebSettings)` in
+// src/WebSettings.cpp - so every existing device's stored LatheConfig is now at
+// the wrong offset and would read back as 44 bytes of the middle of the OTA URL
+// string. Bumping this makes `check != CHECKVALUE` on both structs, so the
+// device discards the whole blob and boots into first-run AP setup.
+//
+// CONSEQUENCE, and it is not small: THIS WIPES THE SAVED WI-FI CREDENTIALS AND
+// EVERY COMMISSIONED LATHE MEASUREMENT. Both structs share one 4 KB sector that
+// is erased as a unit. After flashing this firmware the machine comes up as the
+// ELS_Wifi access point and has to be set up from scratch - SSID, password, OTA
+// URL, encoder PPR, stepper PPR, gearbox ratio, leadscrew pitch, direction, jog
+// speed, acceleration and max speed. Write them down before flashing.
+#define CHECKVALUE 0xDFEB0942
 
 // Theme selection stored in LatheConfig::theme. Plain uint8_t rather than
 // `enum class` (which has no guaranteed underlying type/size) so the raw

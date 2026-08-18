@@ -38,6 +38,11 @@ LeadscrewIOESP leadscrewIOImpl;
 ESPCommsManager commsManager;
 
 
+// The SpindleTask's handle, set once the task exists (setup(), below) and read
+// by src/DebugSink.cpp. Null until then, and null for the whole of AP config
+// mode, where the task is never created - the uploader checks.
+TaskHandle_t spindleTaskHandle = nullptr;
+
 int64_t lastcycle;
 int cyclecount;
 int finalcyclecount;
@@ -80,34 +85,23 @@ void requestSetupOnNextBoot() {
 
 
 // ---------------------------------------------------------------------------
-// STALL TELEMETRY - temporary, for chasing the threading glitch.
+// The ELS_STALL_TELEMETRY block that used to sit here is GONE, superseded by
+// the motion-trace capture (lib/global_state/debugcapture.h, src/DebugSink.cpp).
 //
-// The reported symptom is a large FORWARD jump every few seconds plus audible
-// jitter. That is what starvation looks like: if SpindleTask misses iterations,
-// spindle counts pile up in the encoder, the next consumePosition() returns a
-// large delta, m_expectedPosition leaps forward by delta*ratio, and the
-// leadscrew rushes to catch up before overshooting and settling back.
+// It measured the right thing - hot-loop gap, worst following error - but it
+// reported over Serial, once a second, which is unreadable at the lathe. The
+// lathe is the only place the bug reproduces (the bench device has no spindle
+// and no cutting load), so everything needed has to travel in the uploaded
+// capture. Both of its numbers are now per-sample columns of that capture
+// (`loopGapUs`, and `spindleDelta`, which it did not have at all), on the same
+// time axis as positionError, which is what makes the starvation hypothesis
+// decidable rather than merely plausible.
 //
-// So measure the thing directly: how long between iterations of the hot loop,
-// and how big the following error gets. The hot-loop cost is a micros() call
-// and three compares; the Serial print happens on DisplayTask instead, because
-// printing from the spindle loop would itself cause the stalls we are hunting.
-//
-// Remove this block (and the ELS_STALL_TELEMETRY define) once the bug is found.
-#define ELS_STALL_TELEMETRY
-
-#ifdef ELS_STALL_TELEMETRY
-// A stall worth noticing. The loop normally runs far faster than this; at the
-// default config one leadscrew pulse interval at full jog is ~79us, so 2ms is
-// already ~25 missed pulses.
-#define STALL_THRESHOLD_US 2000u
-
-volatile uint32_t teleIters = 0;      // iterations since the last report
-volatile uint32_t teleStalls = 0;     // gaps over the threshold
-volatile uint32_t teleMaxGapUs = 0;   // worst gap seen
-volatile float    teleMaxAbsErr = 0;  // worst |following error| in pulses
-static uint32_t   teleLastUs = 0;     // hot-loop local, not shared
-#endif
+// Deliberately not kept alongside it: two half-instruments in one hot loop is
+// how you end up measuring the instrument. The capture costs the loop one
+// volatile bool load when it is not running; the telemetry cost a micros() call
+// and three compares unconditionally.
+// ---------------------------------------------------------------------------
 
 // have to handle the leadscrew updates in a timer callback so we can update the
 // screen independently without losing pulses
@@ -125,11 +119,14 @@ void displayLoop() {
   keyPad->handle();
 
   display->update();
-}
 
-#ifdef ELS_STALL_TELEMETRY
-static uint32_t teleReportTick = 0;
-#endif
+  // The motion-trace capture's upload poll (src/DebugSink.h). It is here, on
+  // the DisplayTask, and NOT in timerCallback() above, deliberately: the whole
+  // point of this instrument is that the motion loop gains nothing while it is
+  // not capturing, and this is a 100 ms poll of a couple of volatile scalars
+  // that does nothing at all until a trace is full AND the carriage is at rest.
+  debugCapturePoll(leadscrew);
+}
 
 void DisplayTask(void* parameter) {
   // Ensure interrupts are initialised on the right core.  
@@ -137,23 +134,6 @@ void DisplayTask(void* parameter) {
   uint64_t m = 1;
   while (true) {
     displayLoop();
-
-#ifdef ELS_STALL_TELEMETRY
-    // Once a second, on the LOW priority task, so the print cannot perturb the
-    // loop it is describing. Snapshot then zero: a lost sample across the race
-    // is irrelevant here and a lock is not worth it.
-    if (++teleReportTick >= 10) {
-      teleReportTick = 0;
-      uint32_t iters = teleIters;   teleIters = 0;
-      uint32_t stalls = teleStalls; teleStalls = 0;
-      uint32_t maxGap = teleMaxGapUs; teleMaxGapUs = 0;
-      float maxErr = teleMaxAbsErr; teleMaxAbsErr = 0;
-      Serial.printf("[stall] iters=%lu stalls=%lu maxGap=%luus maxErr=%.1f
-",
-        (unsigned long)iters, (unsigned long)stalls,
-        (unsigned long)maxGap, maxErr);
-    }
-#endif
 
     esp_task_wdt_reset();
     //uint64_t c = micros();
@@ -169,23 +149,6 @@ void DisplayTask(void* parameter) {
 void SpindleTask(void* parameter) {
   while (true) {
     timerCallback();
-
-#ifdef ELS_STALL_TELEMETRY
-    // Cheap: one micros(), a subtract and three compares. No printing here.
-    uint32_t nowUs = micros();
-    uint32_t gap = nowUs - teleLastUs;   // unsigned, so rollover-safe
-    teleLastUs = nowUs;
-    teleIters++;
-    if (gap > STALL_THRESHOLD_US) {
-      teleStalls++;
-      if (gap > teleMaxGapUs) teleMaxGapUs = gap;
-    }
-    if (leadscrew != nullptr) {
-      float e = leadscrew->getPositionError();
-      if (e < 0) e = -e;
-      if (e > teleMaxAbsErr) teleMaxAbsErr = e;
-    }
-#endif
 
     esp_task_wdt_reset();
   }
@@ -332,6 +295,12 @@ void setup() {
     TaskHandle_t displayTask;
     //TaskHandle_t commsTask;
     xTaskCreatePinnedToCore(SpindleTask, "Spindle", 4096, NULL, 24 | portPRIVILEGE_BIT, &spindleTask, 0);
+    // Published for the capture uploader, which SUSPENDS this task for the
+    // duration of a trace upload (src/DebugSink.cpp). It has to: WiFi's driver
+    // tasks share core 0 with this loop, which runs at priority 24 and never
+    // blocks, so they would otherwise get no CPU at all. Suspending costs the
+    // hot path nothing, which a "should I yield now?" flag inside it would not.
+    spindleTaskHandle = spindleTask;
     xTaskCreatePinnedToCore(DisplayTask, "Display", 8000, NULL, 1, &displayTask, 1);
     //xTaskCreatePinnedToCore(comms_loop, "Comms", 16000, NULL, 10, &commsTask, 1);
     disableLoopWDT();

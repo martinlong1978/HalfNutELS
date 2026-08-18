@@ -10,6 +10,23 @@ typedef struct WebSettings {
     char  ssid[32];
     char  password[63];
     char  url[512];
+    // Where a finished motion-trace capture is POSTed
+    // (lib/global_state/debugcapture.h, src/DebugSink.cpp). Empty means the
+    // feature has nowhere to send to; the capture still records and the
+    // Diagnostics screen still shows it filling, but the upload is skipped
+    // rather than attempted against a blank host.
+    //
+    // APPENDED AT THE END, like every other field here, but that is NOT enough
+    // on its own: LatheConfig is stored immediately after this struct
+    // (`latheaddress = address + sizeof(WebSettings)`, WebSettings.cpp), so
+    // growing it MOVES LatheConfig in flash. CHECKVALUE is bumped in the same
+    // commit for exactly that reason - see the note on it in latheconfig.h,
+    // which spells out what that costs the user.
+    //
+    // 256 bytes, not 512 like `url`: this one is a path on a machine the owner
+    // runs, not a release asset permalink, and the pair still has to fit the
+    // shared 4 KB sector (asserted in WebSettings.cpp).
+    char  debugUrl[256];
 } WebSettings;
 
 WebSettings* getWebSettings();

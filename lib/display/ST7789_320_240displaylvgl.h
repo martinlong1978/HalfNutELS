@@ -208,6 +208,14 @@ private:
   // helix sync state as a chip. Static labels (titles, units, hints) are
   // created in init() without members; only the mutated objects live here.
   lv_obj_t* diagPanel;        // full-screen opaque ground; hidden at rest
+  // The title row's left half. Reads "DIAGNOSTICS" normally, and the
+  // motion-trace capture's state ("REC 812/2400", "FULL: STOP TO SEND",
+  // "SENDING TRACE", "SENT 2400") whenever a capture exists - the operator
+  // has to be able to see that the instrument is running, and this screen is
+  // where the Debug capture tile leaves them. Wording and length are decided
+  // by formatCaptureStatus() (lib/global_state/debugcapture.h), which the
+  // host tests hold to this row's 20-byte cache slot.
+  lv_obj_t* diagTitle;
   lv_obj_t* diagErrValue;     // position error in mm (48)
   lv_obj_t* diagErrPulses;    // the same error in raw pulses (14)
   lv_obj_t* diagErrMarker;    // deflection marker on the centre-zero bar
@@ -260,6 +268,10 @@ private:
     // %.2f / %d), so nothing here can approach the TEXT_SLOT_LEN cap.
     TS_DIAG_ERR, TS_DIAG_ERR_P, TS_DIAG_RPM, TS_DIAG_CARRIAGE, TS_DIAG_EXPECT,
     TS_DIAG_SYNC, TS_DIAG_ANCHOR,
+    // The title / capture-status row. The longest string formatCaptureStatus()
+    // can produce is 18 bytes ("FULL: STOP TO SEND"), asserted against this
+    // cap by test/test_debugcapture so it cannot silently grow past it.
+    TS_DIAG_TITLE,
     // About. Longest possible IP is "255.255.255.255" -- 15 bytes, inside the
     // cap; the uptime formats are at most 8 bytes ("999d 23h").
     TS_ABOUT_IP, TS_ABOUT_UPTIME,
