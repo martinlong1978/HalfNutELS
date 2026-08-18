@@ -13,6 +13,7 @@
 
 #include "buttonpad.h"
 #include "config.h"
+#include "DebugSink.h"
 #include "display.h"
 #include "keyarray.h"
 #include "setupmode.h"
@@ -78,6 +79,36 @@ void requestSetupOnNextBoot() {
 }
 
 
+// ---------------------------------------------------------------------------
+// STALL TELEMETRY - temporary, for chasing the threading glitch.
+//
+// The reported symptom is a large FORWARD jump every few seconds plus audible
+// jitter. That is what starvation looks like: if SpindleTask misses iterations,
+// spindle counts pile up in the encoder, the next consumePosition() returns a
+// large delta, m_expectedPosition leaps forward by delta*ratio, and the
+// leadscrew rushes to catch up before overshooting and settling back.
+//
+// So measure the thing directly: how long between iterations of the hot loop,
+// and how big the following error gets. The hot-loop cost is a micros() call
+// and three compares; the Serial print happens on DisplayTask instead, because
+// printing from the spindle loop would itself cause the stalls we are hunting.
+//
+// Remove this block (and the ELS_STALL_TELEMETRY define) once the bug is found.
+#define ELS_STALL_TELEMETRY
+
+#ifdef ELS_STALL_TELEMETRY
+// A stall worth noticing. The loop normally runs far faster than this; at the
+// default config one leadscrew pulse interval at full jog is ~79us, so 2ms is
+// already ~25 missed pulses.
+#define STALL_THRESHOLD_US 2000u
+
+volatile uint32_t teleIters = 0;      // iterations since the last report
+volatile uint32_t teleStalls = 0;     // gaps over the threshold
+volatile uint32_t teleMaxGapUs = 0;   // worst gap seen
+volatile float    teleMaxAbsErr = 0;  // worst |following error| in pulses
+static uint32_t   teleLastUs = 0;     // hot-loop local, not shared
+#endif
+
 // have to handle the leadscrew updates in a timer callback so we can update the
 // screen independently without losing pulses
 void timerCallback() {
@@ -96,12 +127,34 @@ void displayLoop() {
   display->update();
 }
 
+#ifdef ELS_STALL_TELEMETRY
+static uint32_t teleReportTick = 0;
+#endif
+
 void DisplayTask(void* parameter) {
   // Ensure interrupts are initialised on the right core.  
   keyArray->initPad();
   uint64_t m = 1;
   while (true) {
     displayLoop();
+
+#ifdef ELS_STALL_TELEMETRY
+    // Once a second, on the LOW priority task, so the print cannot perturb the
+    // loop it is describing. Snapshot then zero: a lost sample across the race
+    // is irrelevant here and a lock is not worth it.
+    if (++teleReportTick >= 10) {
+      teleReportTick = 0;
+      uint32_t iters = teleIters;   teleIters = 0;
+      uint32_t stalls = teleStalls; teleStalls = 0;
+      uint32_t maxGap = teleMaxGapUs; teleMaxGapUs = 0;
+      float maxErr = teleMaxAbsErr; teleMaxAbsErr = 0;
+      Serial.printf("[stall] iters=%lu stalls=%lu maxGap=%luus maxErr=%.1f
+",
+        (unsigned long)iters, (unsigned long)stalls,
+        (unsigned long)maxGap, maxErr);
+    }
+#endif
+
     esp_task_wdt_reset();
     //uint64_t c = micros();
     //uint64_t delay = (100000 - (c - m)) / 1000;
@@ -116,6 +169,24 @@ void DisplayTask(void* parameter) {
 void SpindleTask(void* parameter) {
   while (true) {
     timerCallback();
+
+#ifdef ELS_STALL_TELEMETRY
+    // Cheap: one micros(), a subtract and three compares. No printing here.
+    uint32_t nowUs = micros();
+    uint32_t gap = nowUs - teleLastUs;   // unsigned, so rollover-safe
+    teleLastUs = nowUs;
+    teleIters++;
+    if (gap > STALL_THRESHOLD_US) {
+      teleStalls++;
+      if (gap > teleMaxGapUs) teleMaxGapUs = gap;
+    }
+    if (leadscrew != nullptr) {
+      float e = leadscrew->getPositionError();
+      if (e < 0) e = -e;
+      if (e > teleMaxAbsErr) teleMaxAbsErr = e;
+    }
+#endif
+
     esp_task_wdt_reset();
   }
 }
