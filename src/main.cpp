@@ -300,21 +300,45 @@ void setup() {
     TaskHandle_t spindleTask;
     TaskHandle_t displayTask;
     //TaskHandle_t commsTask;
-    xTaskCreatePinnedToCore(SpindleTask, "Spindle", 4096, NULL, 24 | portPRIVILEGE_BIT, &spindleTask, 0);
-    // Published for the capture uploader, which SUSPENDS this task for the
-    // duration of a trace upload (src/DebugSink.cpp). It has to: WiFi's driver
-    // tasks share core 0 with this loop, which runs at priority 24 and never
-    // blocks, so they would otherwise get no CPU at all. Suspending costs the
-    // hot path nothing, which a "should I yield now?" flag inside it would not.
-    spindleTaskHandle = spindleTask;
-    xTaskCreatePinnedToCore(DisplayTask, "Display", 8000, NULL, 1, &displayTask, 1);
+    // CORE 1 IS THE SPINDLE'S, AND NOTHING ELSE RUNS THERE.
+    //
+    // Core 0 is where the ESP-IDF puts WiFi, lwIP and the timer service, so
+    // leaving the motion loop there meant sharing with every background stack
+    // the SDK starts. The display, buttons, OTA task and capture uploader all
+    // tolerate being descheduled; the step generator does not.
+    //
+    // THE SPINDLE TASK IS CREATED LAST, AND THAT IS LOAD-BEARING.
+    //
+    // setup() runs on the Arduino loopTask, which is ITSELF pinned to core 1 at
+    // priority 1. Creating a priority-24 task on core 1 preempts it there and
+    // then - permanently, because that loop never blocks - so every statement
+    // after the creation call is simply never executed. Created first, as it
+    // was, it silently ate the DisplayTask creation two lines below and the
+    // whole watchdog setup: the display never initialised and the device sat
+    // there printing nothing, which is exactly how the earlier attempt at this
+    // swap failed and got reverted (d7a9a7b / f66472d).
+    //
+    // Everything that must happen at startup therefore happens ABOVE this line.
+    //
+    // NOTE for anything that writes flash: a flash operation stops the OTHER
+    // core and waits for it to acknowledge, so it now needs CORE 1 to respond -
+    // and this loop never blocks. That is why the capture uploader lowers this
+    // task's priority rather than suspending it (src/DebugSink.cpp); the same
+    // applies to any future settings write.
+    xTaskCreatePinnedToCore(DisplayTask, "Display", 8000, NULL, 1, &displayTask, 0);
     //xTaskCreatePinnedToCore(comms_loop, "Comms", 16000, NULL, 10, &commsTask, 1);
     disableLoopWDT();
     esp_task_wdt_delete(xTaskGetHandle("IDLE0"));
     esp_task_wdt_delete(xTaskGetHandle("IDLE1"));
-    esp_task_wdt_delete(spindleTask);
     esp_task_wdt_delete(displayTask);
     //esp_task_wdt_delete(commsTask);
+
+    // LAST. See above.
+    xTaskCreatePinnedToCore(SpindleTask, "Spindle", 4096, NULL, 24 | portPRIVILEGE_BIT, &spindleTask, 1);
+    // Published for the capture uploader, which lowers this task's priority for
+    // the duration of a trace upload (src/DebugSink.cpp).
+    spindleTaskHandle = spindleTask;
+    esp_task_wdt_delete(spindleTask);
 
     delay(2000);
   }

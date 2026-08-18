@@ -30,10 +30,39 @@ void Spindle::update() {
 }
 #else
 
+// The largest spindle delta one update() can legitimately see. ESP32Encoder
+// runs the PCNT counter to +-INT16 (counter_h_lim/_l_lim = _INT16_MAX/MIN) and
+// accumulates the wrap in a limit ISR; a getAndClearCount() that races that ISR
+// returns a spurious value at the 16-bit boundary.
+//
+// MEASURED on the lathe, mid-cut (tools/debugsink capture 20260818-230340):
+// two excursions, both identical - one sample of delta +32765, the next
+// -32766, nearly cancelling. Leadscrew::update() believed them, multiplied by
+// the ratio into m_expectedPosition and saturated posError to -2^31. That is
+// the large forward jump then correction reported while threading, and the
+// audible jitter is the same race at smaller amplitude. The loop gap stayed at
+// 30-58 us throughout, so this was never CPU starvation.
+//
+// 16384 is half the 16-bit range: far above anything physical, far below the
+// glitch. A real delta is well under one count per iteration (1200 PPR at
+// 3000 rpm is 60 counts/ms against a loop running at ~70 kHz), and even a
+// 100 ms hiccup at that speed is only ~6000. Rejecting is correct rather than
+// merely safe: the reading is not motion that happened, so dropping it keeps
+// the spindle position TRUE and leaves thread sync intact.
+static const int64_t kMaxPlausibleSpindleDelta = 16384;
+
 void Spindle::update() {
   // read the encoder and update the current position
   // todo: we should keep the absolute position of the spindle, cbf right now
   int64_t position = m_encoder.getAndClearCount();
+  if (position > kMaxPlausibleSpindleDelta ||
+      position < -kMaxPlausibleSpindleDelta) {
+    // Deliberately dropped, not clamped: clamping would inject 16384 counts of
+    // motion that never happened. The counts are already gone from the
+    // encoder (getAndClearCount consumed them), which is what makes the pair
+    // self-cancelling - the true position is unchanged.
+    return;
+  }
   incrementCurrentPosition(position);
 }
 #endif

@@ -175,7 +175,7 @@ void ESPCommsManager::loop() {
         return;
     }
     updating = true;
-    xTaskCreatePinnedToCore(otaTask, "OTA", 24576, this, 3, nullptr, 1);
+    xTaskCreatePinnedToCore(otaTask, "OTA", 24576, this, 3, nullptr, 0);
 }
 
 void ESPCommsManager::runOta() {

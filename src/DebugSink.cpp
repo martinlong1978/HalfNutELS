@@ -366,7 +366,7 @@ void debugCapturePoll(Leadscrew* leadscrew) {
   // session and the CA bundle on it, which is what makes the OTA task 24 KB.
   // Never the SpindleTask (4 KB) - that is the mistake the OTA path documents.
   if (xTaskCreatePinnedToCore(uploadTask, "DbgSend", 20480, leadscrew, 1,
-                              nullptr, 1) != pdPASS) {
+                              nullptr, 0) != pdPASS) {
     Serial.println("capture: could not start upload task");
     g_uploadRunning = false;
     dbg.setState(DBG_FAILED);
