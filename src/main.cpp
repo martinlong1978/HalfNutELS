@@ -260,8 +260,29 @@ void setup() {
     TaskHandle_t spindleTask;
     TaskHandle_t displayTask;
     //TaskHandle_t commsTask;
-    xTaskCreatePinnedToCore(SpindleTask, "Spindle", 4096, NULL, 24 | portPRIVILEGE_BIT, &spindleTask, 0);
-    xTaskCreatePinnedToCore(DisplayTask, "Display", 8000, NULL, 1, &displayTask, 1);
+    // CORE ASSIGNMENT - the spindle loop goes on core 1, NOT core 0.
+    //
+    // Core 0 is PRO_CPU: it carries the WiFi/lwIP stack, the IPC task and most
+    // of the ESP-IDF housekeeping. Arduino runs loop() on core 1 for exactly
+    // that reason. SpindleTask is a hard-realtime busy-loop with no delay - it
+    // must consume every spindle encoder count promptly, because a missed
+    // iteration lets counts pile up and the next consumePosition() returns a
+    // large delta. m_expectedPosition then leaps forward by that delta times
+    // the ratio and the leadscrew rushes to catch up, overshoots, and settles
+    // back. On a thread that is a visible jump followed by a correction.
+    //
+    // This was the other way round and produced exactly that symptom on the
+    // lathe: audible jitter plus a large forward jump every few seconds.
+    //
+    // DisplayTask goes on core 0. It sleeps 100 ms per pass, so it costs core 0
+    // little, and it takes the keypad GPIO interrupts with it (initPad() runs
+    // inside that task specifically so the ISRs land on its core) - which keeps
+    // interrupt load off the realtime core as well.
+    //
+    // Core 1 also hosts the Arduino loopTask, but in normal operation that just
+    // vTaskDelay(1000)s forever and is priority 1 against SpindleTask's 24.
+    xTaskCreatePinnedToCore(SpindleTask, "Spindle", 4096, NULL, 24 | portPRIVILEGE_BIT, &spindleTask, 1);
+    xTaskCreatePinnedToCore(DisplayTask, "Display", 8000, NULL, 1, &displayTask, 0);
     //xTaskCreatePinnedToCore(comms_loop, "Comms", 16000, NULL, 10, &commsTask, 1);
     disableLoopWDT();
     esp_task_wdt_delete(xTaskGetHandle("IDLE0"));

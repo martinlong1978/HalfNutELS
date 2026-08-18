@@ -22,9 +22,14 @@ PlatformIO CLI. If `pio` isn't on `PATH`, use the venv binary: `~/.platformio/pe
 ## Architecture & the realtime constraint (read before touching motion code)
 
 Two FreeRTOS tasks, pinned to different cores (see `src/main.cpp`):
-- **SpindleTask** (core 0, high priority, small 4 KB stack): the hot loop. Each iteration runs
+- **SpindleTask** (**core 1**, high priority, small 4 KB stack): the hot loop. Each iteration runs
   `timerCallback()` â†’ `spindle->update()` + `leadscrew->update()` (or `commsManager.loop()` during OTA).
-- **DisplayTask** (core 1): buttons (`keyPad->handle()`) + LVGL `display->update()`.
+- **DisplayTask** (**core 0**): buttons (`keyPad->handle()`) + LVGL `display->update()`.
+- **The realtime loop is on core 1 deliberately.** Core 0 is PRO_CPU and carries the WiFi/lwIP
+  stack, the IPC task and most ESP-IDF housekeeping; Arduino runs `loop()` on core 1 for the same
+  reason. Starving SpindleTask lets encoder counts pile up, so the next `consumePosition()`
+  returns a large delta and the leadscrew jumps forward then corrects — visible on a thread as a
+  jump every few seconds plus audible jitter. Do NOT move it back.
 
 **Keep `Leadscrew::update()` and the spindle path fast and inline.** No new virtual dispatch, heap
 allocation, locks, or non-inlinable calls in that path. A lot of code there is inline on purpose. Derived
