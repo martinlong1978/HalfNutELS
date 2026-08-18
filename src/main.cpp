@@ -97,7 +97,22 @@ void displayLoop() {
 }
 
 void DisplayTask(void* parameter) {
-  // Ensure interrupts are initialised on the right core.  
+  // BOTH of these must be initialised on the core that will drive them.
+  //
+  // The keypad has always done this - the GPIO interrupt handlers attach to
+  // whichever core calls attachInterrupt(). The display needs exactly the same
+  // treatment and did not get it: display->init() used to run in setup(), on
+  // the Arduino task, which was the same core DisplayTask ran on, so it worked
+  // by coincidence. Moving the spindle loop to core 1 moved DisplayTask to
+  // core 0 and broke that coincidence - LVGL and TFT_eSPI were set up on one
+  // core and flushed from the other, and the panel rendered the right layout
+  // in the wrong colours with the values invisible: the signature of a colour
+  // format mismatch in the SPI flush rather than a logic fault.
+  //
+  // Initialise here and the two are on the same core again by construction,
+  // whatever core this task is pinned to.
+  display->init();
+  display->update();
   keyArray->initPad();
   uint64_t m = 1;
   while (true) {
@@ -248,13 +263,11 @@ void setup() {
     // ELS_ENABLE_BUTTON would still have resolved here and quietly configured
     // the wrong pin. There is no discrete-button hardware left to support.
 
-    // Display Initalisation
-
-    display->init();
+    // Display initialisation happens INSIDE DisplayTask, not here - see the
+    // comment there. setup() runs on the Arduino task, which is pinned to a
+    // different core than DisplayTask now is.
 
     leadscrew->setTargetPitchMM(globalState->getCurrentFeedPitch());
-
-    display->update();
 
 
     TaskHandle_t spindleTask;
