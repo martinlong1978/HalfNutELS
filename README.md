@@ -29,7 +29,10 @@ threading and powered feeding — without swapping gears.
 - [Building & flashing the firmware](#building--flashing-the-firmware)
 - [Connecting & configuring](#connecting--configuring)
 - [Operating the ELS — controls & display](#operating-the-els--controls--display)
+- [Cutting a thread](#cutting-a-thread)
+- [Firmware updates](#firmware-updates)
 - [Settings reference](#settings-reference)
+- [Diagnostics](#diagnostics)
 - [Testing / development](#testing--development)
 - [License](#license)
 - [Attribution](#attribution)
@@ -44,22 +47,29 @@ threading and powered feeding — without swapping gears.
 - **Reverse threading** — a thread mode that runs the carriage in the opposite direction (from the
   left stop toward the right) for left-hand threads or threading away from a shoulder.
 - **Feeding** — powered feed at a selectable feed rate (mm/rev metric, or thou/rev imperial).
-- **Feed / thread mode switching** and **metric / imperial** switching from the keypad.
+- **Feed / thread mode switching** from the panel; **metric / imperial** from the menu.
 - **Jog** — move the carriage left/right under power. Supports both an interactive "hold to jog"
   mode and a "jog to stop" mode.
 - **End stops / stop positions** — set left and right stop positions so the carriage automatically
   decelerates and stops at a repeatable point (useful for threading up to a shoulder).
 - **Thread sync** — the leadscrew tracks the spindle's angular position so a partially cut thread can
   be picked up again on the next pass.
-- **Button lock** — lock the keypad to prevent accidental changes while cutting.
+- **Motion lockout** — while the carriage is under power the panel answers only **HALT** and
+  **ENABLE**. There is no lock key to remember: the machine locks itself exactly when it matters.
+  (This replaced an explicit button lock, which had to be unlocked at every power-on.)
+- **DRO** — carriage position referenced to an endstop, with a travel bar that doubles as a readout.
+- **Dark and light themes**, selectable on the device.
 - **Web-based configuration** — all lathe parameters (encoder PPR, stepper PPR, gearbox ratio,
   leadscrew pitch, speeds, acceleration) plus WiFi credentials are configured over a built-in web
   page; settings are stored in the ESP32's non-volatile flash.
-- **Over-the-air (OTA) firmware update** — the device can pull a new firmware image from a configured
-  HTTP(S) URL.
+- **Over-the-air (OTA) firmware update** — pulls the latest [GitHub release](https://github.com/martinlong1978/TeensyELS/releases)
+  from a stable permalink and skips the download if the device is already on that version.
+- **Motion-trace capture** — records ~25 s of following error, loop timing and spindle deltas and
+  uploads it as CSV for offline analysis. Built to diagnose a threading glitch; kept because it is
+  the fastest way to answer "is the fault in the maths or in the timing?".
 - **On-device display** — a 240×320 ST7789 SPI TFT, driven in landscape (**320×240**) via **LVGL**,
   shows current mode, pitch, spindle RPM and status.
-- **Rotary encoder UI** — an illuminated (RGB) rotary encoder selects the pitch / jog rate; its
+- **Rotary encoder** — turns to adjust whatever the panel currently has focused; its
   built-in LED shows the run state at a glance (the firmware drives the red and green channels,
   alternating them to flash a two-colour status).
 
@@ -165,14 +175,19 @@ Defined in [`lib/config/board.h`](lib/config/board.h) and matching the LVGL sche
 | Leadscrew direction | 26 |
 | Stepper enable | 17 |
 | Stepper driver alarm input | 27 *(wired on the board; not read by the current firmware)* |
-| Button-array columns (H1/H2/H3) | 32 / 33 / 2 |
-| Button-array rows (V1/V2/V3) | 13 / 14 / 15 |
+| Keypad matrix rows (H1/H2/H3) | 32 / 33 / 2 |
+| Keypad matrix columns (V1/V2/V3) | 13 / 14 / 15 |
 | TFT display (MOSI/SCLK/CS/DC/RST) | 19 / 18 / 5 / 16 / 23 |
 | TFT backlight (`TFT_BL`) | 4 *(defined in the build flags but **not connected** on this board)* |
 | Programming UART TXD / RXD (J5) | 1 / 3 |
 
 > The A/B pins of both encoders are swapped in `board.h` relative to the schematic net names — that
 > only sets which way round the counting goes, and is deliberate.
+
+> **The keypad matrix is polled, not interrupt-driven.** A 2 ms task scans it and a host-tested
+> debounce ([`lib/keyscan/`](lib/keyscan/)) turns the readings into press / click / hold / release
+> events. Edge interrupts were tried and removed — see [`docs/keypad-audit.md`](docs/keypad-audit.md)
+> for why they cannot be made reliable here.
 
 ---
 
@@ -314,8 +329,8 @@ Configuration is done over WiFi through a built-in web page — there is no need
 retune the firmware for your lathe.
 
 1. **Enter configuration mode.** The device starts a WiFi **Access Point** on first boot (when no
-   valid settings are stored yet), or whenever you **hold the centre button of the keypad — Half Nut —
-   while powering on**. See [`src/main.cpp`](src/main.cpp).
+   valid settings are stored yet), whenever you **hold `OK` — the centre key — while powering on**,
+   or from the **Wi-Fi setup** menu tile. See [`src/main.cpp`](src/main.cpp).
    - AP SSID: **`ELS_Wifi`**
    - AP password: **`123456789`**
 2. **Connect** your phone or laptop to that access point. The SSID, password and IP address are shown
@@ -325,6 +340,10 @@ retune the firmware for your lathe.
    page up automatically on connecting. If yours doesn't, browse to the IP shown on the display
    (typically `192.168.4.1`) to reach the *ELS Setup* page.
 
+| First-run setup screen | Connected |
+|---|---|
+| ![](tools/screenshot/out/wifi-setup.png) | ![](tools/screenshot/out/wifi-connected.png) |
+
 4. **Fill in the settings** (see [Settings reference](#settings-reference)) and press **Submit**.
    Settings are written to the ESP32's flash. Press **Reset** on the page (or power-cycle) to reboot
    into normal operation with the new settings.
@@ -333,101 +352,288 @@ retune the firmware for your lathe.
 
 ## Operating the ELS — controls & display
 
-In normal operation the 320×240 display shows the current **feed/thread pitch**, the **mode**, spindle
-**RPM**, the **end-stop** status, the sync state, and the keypad **lock** state. Input is via a
-**3×3 button keypad** (scanned as a matrix on GPIO 32/33/2 × 13/14/15) plus the **illuminated rotary
-encoder**.
+The panel is nine keys and a rotary encoder. Everything below is driven from those.
 
-> **The keypad starts LOCKED at power-on** as a safety measure — press **Lock** once to unlock before
-> anything else will respond.
+> Every screenshot in this README is rendered from the **real display code** on a host machine
+> (`bash tools/screenshot/render.sh`), so what you see here is what the panel draws.
+
+### The rest screen
+
+![Rest screen, metric feed](tools/screenshot/out/rest-metric-feed.png)
+
+Top row: **mode**, **units**, **sync state**, **spindle RPM**. The large figure is the current pitch
+or feed rate. Below it the **travel bar** shows the carriage between the endstops — it doubles as a
+DRO readout. The chip at the bottom left is the **machine state** (`IDLE`, `FEED`, `THREAD`, `JOG`).
+
+| Metric thread | Imperial feed | Spindle running backwards |
+|---|---|---|
+| ![](tools/screenshot/out/rest-metric-thread-r.png) | ![](tools/screenshot/out/rest-imperial-feed.png) | ![](tools/screenshot/out/rest-reverse-spindle.png) |
 
 ### Keypad layout
 
-The nine keys of the matrix, as they sit on the board (SW2–SW10, bottom-left of the PCB; the rotary
-encoder is above and to their right, with the display along the top):
+Selectors along the top, the two actuators plus `OK` in the middle where your thumbs sit, and
+machine state along the bottom:
 
 | | Left | Centre | Right |
 |---|---|---|---|
-| **Top row** | Rate − | Rate + | Mode |
-| **Middle row** | Thread Sync | Half Nut | Enable |
-| **Bottom row** | Lock | Jog Left | Jog Right |
+| **Top row** | `MODE` | `RATE` | `STOPS` |
+| **Middle row** | `◀` | `OK` | `▶` |
+| **Bottom row** | `HALT` | `MENU` | `ENABLE` |
 
-*(Holding **Half Nut** — the centre key — during power-on boots into WiFi configuration mode.)*
+The three top keys choose **what the arrows drive**; the arrows are the only actuators. That is the
+*focus model*: press a selector, a panel opens, the arrows adjust it, `OK` commits. Focus returns to
+jog on its own after 4 seconds.
 
-### Modes
+*(Holding `OK` during power-on boots into Wi-Fi configuration mode.)*
 
-Press **Mode** to cycle through:
+### Arrows at rest — jog
 
-| Mode | What it does |
-|---|---|
-| **Feed** | Leadscrew feeds at a set distance per spindle revolution (mm/rev or thou/rev). |
-| **Thread** | Leadscrew is synced to the spindle to cut a thread; starts at the **right** stop and travels **left**. |
-| **Thread ↺ (reverse)** | Same as Thread but the leadscrew travels the **opposite** way — starts at the **left** stop and moves **right** (for left-hand threads / threading away from the shoulder). Shown with a ↺ marker next to the pitch. |
-| **Jog** | Move the carriage independently of the spindle; the encoder/rate buttons set the jog speed. |
+With nothing else focused the arrows move the carriage, and what they do depends on whether that
+side has a stop set — the machine already knows which behaviour you mean:
 
-*Hold* **Mode** to toggle between **metric** and **imperial** units.
-
-### Button reference
-
-| Control | Press (click) | Hold |
+| | Stop **set** on that side | Stop **unset** |
 |---|---|---|
-| **Mode** | Cycle Feed → Thread → Thread ↺ → Jog | Toggle metric / imperial |
-| **Rate +** / **Rate −** | Select next / previous pitch (or jog speed in Jog mode) | — |
-| **Rotary encoder** | Turn to change pitch / jog speed | — |
-| **Enable** | Start / stop the leadscrew following the spindle (it decelerates to a stop, it does not stop dead) | — |
-| **Lock** | Lock / unlock the keypad | — |
-| **Jog Left** / **Jog Right** | *Feed/Thread:* jog the carriage to the set left/right stop (press again to stop early). *Jog mode:* jog while the button is held. | *Feed/Thread:* **set** the left/right stop at the current position, or **clear** it if already set |
-| **Thread Sync** | — | Reset / re-initialise the display |
-| **Half Nut** | Toggle debug mode | **Trigger an over-the-air firmware update** (see below) |
+| **Click** | Run under power to the stop, then hold | — |
+| **Hold** | (same as click) | Jog continuously while held; decelerate on release |
 
-### Cutting a thread (typical flow)
+A second press of the same arrow during a powered run **cancels** it.
 
-1. Unlock the keypad (**Lock**), select **Thread** (or **Thread ↺** for a left-hand thread) with **Mode**, and choose the pitch with the encoder / **Rate ±**.
-2. Position the carriage and **hold Jog Left/Right** to set your **end stops**.
-3. Move to the starting stop, press **Enable** — the leadscrew waits for the spindle sync point, then tracks the thread to the far stop, where it stops automatically. Retract, return, and **Enable** again for the next pass; sync is preserved so every pass follows the same helix.
+### Key reference
 
-### Over-the-air (web) firmware update
+| Control | Click | Hold |
+|---|---|---|
+| `MODE` | Open the mode picker — Feed / Thread R / Thread L | — |
+| `RATE` | Open the pitch picker | — |
+| `STOPS` | Open the stops panel | Clear **both** stops, after a 1 s confirm |
+| `◀` / `▶` | Jog, or run to the stop (see above) | Continuous jog when no stop is set |
+| `OK` | Jog-speed picker (at rest); commit and close (in a picker) | **Zero the DRO** here |
+| `MENU` | Open the menu carousel; press again to close | — |
+| `HALT` | Decelerate to a stop. **Always live**, from any screen | — |
+| `ENABLE` | Engage / disengage the leadscrew | — |
+| Encoder | Adjust whatever is focused (pitch at rest) | — |
 
-**Hold the Half Nut button** to start an OTA update: the device downloads the firmware binary from the
-**Update URL** configured on the web page (see [Settings reference](#settings-reference)) and flashes
-itself, showing progress on the display. Publish new firmware to that URL to update in the field
-without opening the enclosure. *(The wired path — `pio run -e esp32dev_usb -t upload` over the J5
-serial header — remains available too.)*
+Pressing the **same selector twice** closes its panel again — `MODE`, `RATE`, `STOPS` and `MENU` all
+toggle.
+
+**`ENABLE` takes two presses when a panel is open**: the first dismisses the panel, the second
+engages. Engaging is a commitment to cut, and it should not happen while a picker is covering the
+state chip.
+
+### The selector panels
+
+| `MODE` | `RATE` | `OK` — jog speed |
+|---|---|---|
+| ![](tools/screenshot/out/overlay-mode.png) | ![](tools/screenshot/out/overlay-rate.png) | ![](tools/screenshot/out/overlay-jogspeed.png) |
+
+**Stops.** The panel shows the travel bar full width with both markers and the live position.
+Setting a stop is cheap to undo; clearing one loses a position you may have spent time finding, so
+the two gestures are deliberately asymmetric:
+
+| Gesture | Effect |
+|---|---|
+| `◀` click, left stop unset | Set the left stop **here** |
+| `◀` click, left stop set | Prompts "hold to clear" — no action |
+| `◀` hold, left stop set | Clear the left stop |
+| `STOPS` hold | Clear **both**, after a 1 s confirm bar |
+
+`▶` is the mirror.
+
+| Stops panel | Clearing both — confirm bar filling |
+|---|---|
+| ![](tools/screenshot/out/overlay-stops.png) | ![](tools/screenshot/out/overlay-stops-confirm-60.png) |
+
+### The menu
+
+`MENU` opens a horizontal carousel; the arrows move between tiles and `OK` activates. The carousel
+**wraps**, so the far end is one press away in the other direction. Tiles never edit in place — `OK`
+either performs a one-shot action or opens the matching panel.
+
+![Menu carousel](tools/screenshot/out/menu-units.png)
+
+| Tile | `OK` does |
+|---|---|
+| **Units** | Toggle mm / inch |
+| **Theme** | Toggle dark / light (persisted) |
+| **DRO datum** | Choose which endstop is zero (persisted) |
+| **Jog speed** | Open the jog-speed picker |
+| **Sync** | Set a thread sync point at the current spindle angle and carriage position |
+| **Software update** | Check for and install a new firmware release |
+| **Wi-Fi setup** | Reboot into the configuration access point |
+| **Diagnostics** | Live following error, spindle vs leadscrew rates, sync anchor |
+| **About** | Firmware version, IP address, uptime |
+| **Debug capture** | Arm a motion-trace capture |
+
+A tile that cannot act right now renders as **UNAVAILABLE** with the reason on the hint row, rather
+than vanishing — so the tile numbering never shifts under you:
+
+| Sync, outside a thread mode | Update, while the carriage is moving |
+|---|---|
+| ![](tools/screenshot/out/menu-sync-blocked.png) | ![](tools/screenshot/out/menu-update-blocked.png) |
+
+### The DRO
+
+A position is meaningless without a zero, and "wherever the machine happened to boot" is the worst
+available choice — so **zero is referenced to an endstop**. First match wins:
+
+| # | Condition | Datum |
+|---|---|---|
+| 1 | Manual zero set (`OK` held) | That position, tagged `MAN` |
+| 2 | Both stops set | The one chosen on the **DRO datum** tile |
+| 3 | Exactly one stop set | That one — the preference cannot be honoured |
+| 4 | Neither stop set | Power-on origin, flagged `REL` |
+
+Position increases to the **right**, so a right-hand datum counts negative leftward — ordinary DRO
+behaviour. The readout flashes for about a second whenever the datum moves, because setting a second
+stop can hand zero to the other end and the numbers will jump.
+
+| DRO datum picker | Refused while under power |
+|---|---|
+| ![](tools/screenshot/out/overlay-datum.png) | ![](tools/screenshot/out/overlay-datum-locked.png) |
+
+### While the carriage is moving
+
+The panel answers **only `HALT` and `ENABLE`**. No menus, no pickers, no settings — and any open
+panel closes itself when motion starts. Your attention belongs on the tool and the work, not the
+screen. `HALT` is the reflex; `ENABLE` is the deliberate one.
+
+The one exception is **Diagnostics**, which stays up through jogging and cutting because watching it
+while the machine runs is the entire point. `OK` clears it.
+
+| Jogging | Cutting | Decelerating |
+|---|---|---|
+| ![](tools/screenshot/out/state-jogging.png) | ![](tools/screenshot/out/state-cutting.png) | ![](tools/screenshot/out/state-decelerating.png) |
+
+---
+
+## Cutting a thread
+
+1. **Set the mode.** `MODE`, arrows to **Thread R** (or **Thread L** for a left-hand thread), `OK`.
+2. **Set the pitch.** `RATE`, arrows to your pitch, `OK`. The **Units** tile switches between metric
+   and TPI; the controller remembers a pitch per mode-and-unit pair, so switching back and forth
+   does not lose your place.
+3. **Set the stops.** Jog to where the thread should end — usually just short of the shoulder — press
+   `STOPS`, then `◀` or `▶` to set that stop. Do the same at the starting end. The carriage now
+   decelerates and stops there on every pass, which is what makes threading to a shoulder
+   repeatable.
+4. **Return to the start** and take your first depth of cut on the cross-slide.
+5. **Press `ENABLE`.** The leadscrew waits for the spindle to come round to the sync point, then
+   tracks the thread to the far stop and stops.
+6. **Retract, return the carriage, advance the depth, `ENABLE` again.** The sync point is preserved,
+   so every pass follows the same helix.
+
+**Picking up an existing thread.** Stop the spindle, hand-position the tool so it sits in an existing
+groove, then use the **Sync** menu tile. That declares "this spindle angle and this carriage position
+are in sync", and every later engagement re-enters that same helix instead of ploughing a new groove
+across it. The **Diagnostics** screen shows which anchor is currently in use.
+
+### Feeding
+
+Same flow, simpler: `MODE` → **Feed**, `RATE` → your feed rate (mm/rev, or thou/rev in imperial), set
+a stop if you want the cut to end somewhere repeatable, then `ENABLE`.
+
+---
+
+## Firmware updates
+
+**From the device.** `MENU` → **Software update** → `OK`. The controller checks the latest
+[GitHub release](https://github.com/martinlong1978/TeensyELS/releases), tells you if you are already
+on it, and otherwise downloads and flashes, showing progress on screen. It uses the Wi-Fi credentials
+from the setup page.
+
+| Checking | Already current | Downloading |
+|---|---|---|
+| ![](tools/screenshot/out/ota-checking.png) | ![](tools/screenshot/out/ota-no-update.png) | ![](tools/screenshot/out/ota-downloading.png) |
+
+**Over USB.** `pio run -e esp32dev_usb -t upload`, via the J5 serial header.
+
+**Publishing your own.** Bump `FIRMWARE_VERSION` in [`include/version.h`](include/version.h), then
+`pio run -e esp32dev_publish` and `bash scripts/release.sh` (needs the `gh` CLI). The OTA permalink
+resolves to whatever is marked *latest*, so publish full releases rather than drafts.
 
 ---
 
 ## Settings reference
 
-All of the following are exposed on the web configuration page
-([`src/WebSettings.cpp`](src/WebSettings.cpp)); the lathe parameters and their defaults are defined in
-[`lib/config/latheconfig.h`](lib/config/latheconfig.h).
+Settings come in two kinds, and the split is deliberate.
 
-### WiFi / update settings
+**Lathe geometry is web-only.** Encoder PPR, stepper PPR, direction, gearbox ratio, leadscrew pitch,
+jog speed, acceleration and max speed are *commissioning* values: set once over Wi-Fi with the lathe
+offline, and changed only there. The device never writes them. Getting one wrong turns every
+subsequent cut into scrap, so they are deliberately not reachable from a panel you might brush past
+mid-job.
+
+**Preferences are on-device.** Theme and DRO datum are the things worth changing mid-session, and
+they live on the menu. Saving them is refused while the carriage is under power.
+
+### Wi-Fi / update settings
 
 | Web label | Field | Meaning |
 |---|---|---|
-| **SSID** | `ssid` | WiFi network name the device joins (or serves) for connectivity. Up to 31 chars. |
-| **Password** | `password` | WiFi password. Up to 62 chars. |
-| **Update URL** | `url` | HTTP(S) URL of a firmware `.bin` used for OTA updates. Example default in the UI: `http://hass.longhome.co.uk/els/elstft.bin` — **change this to your own** update endpoint. |
+| **Wi-Fi network** | `ssid` | Network the device joins for OTA updates and trace uploads. Up to 31 chars. |
+| **Wi-Fi password** | `password` | Up to 62 chars. Leave blank for an open network. |
+| **Firmware update URL** | `url` | Where **Software update** pulls from. Defaults to this repo's `latest` release permalink. |
+| **Debug capture URL** | `debugUrl` | Where the **Debug capture** tile POSTs its motion trace. Blank disables sending. See [`tools/debugsink/`](tools/debugsink/). |
 
-### Lathe / motion settings
+### Lathe geometry
+
+Defaults are in [`lib/config/latheconfig.h`](lib/config/latheconfig.h).
 
 | Web label | Field | Default | Units | Meaning |
 |---|---|---|---|---|
-| **Encoder PPR** | `spindleEncoderPpr` | `1200` | pulses/rev | Pulses per revolution of the spindle encoder. Must match your encoder for correct thread/feed tracking. |
-| **Stepper PPR** | `stepperPpr` | `400` | steps/rev | Steps per revolution of the leadscrew stepper motor (i.e. full-steps × microstepping set on the driver). |
-| **Invert motor direction** | `invertDirection` | `true` (checked) | boolean | Flips the stepper direction sense so that "right" and "left" match your lathe's geometry. |
-| **Gearbox ratio numerator** | `gearboxRatioNumerator` | `2` | ratio | Numerator of any mechanical reduction between the stepper and the leadscrew. |
-| **Gearbox ratio denominator** | `gearboxRatioDenominator` | `1` | ratio | Denominator of the stepper-to-leadscrew reduction. Effective ratio = numerator ÷ denominator (default 2:1). |
-| **Leadscrew pitch** | `leadscrewPitchMm` | `2.54` | mm/rev | Pitch (lead) of the physical leadscrew — millimetres of carriage travel per leadscrew revolution. |
-| **Max jog speed** | `jogSpeed` | `40` | mm/s | Speed used when jogging the carriage. *(The UI labels the unit "m/s"; the value is millimetres per second.)* |
-| **Leadscrew acceleration** | `leadscrewAcceleration` | `150` | mm/s² | Acceleration/deceleration ramp used for leadscrew motion. *(UI labels it "m/s²"; value is mm/s².)* |
-| **Max leadscrew speed** | `leadscrewMaxSpeed` | `40` | mm/s | Upper speed limit for leadscrew motion. *(UI labels it "m/s"; value is mm/s.)* |
+| **Spindle encoder** | `spindleEncoderPpr` | `1200` | pulses/rev | Pulses per spindle revolution. Must match your encoder or every pitch is wrong. |
+| **Stepper** | `stepperPpr` | `400` | steps/rev | Steps per stepper revolution — full steps × the microstepping set on the driver. |
+| **Invert motor direction** | `invertDirection` | `true` | boolean | Flips the direction sense so left and right match your lathe. |
+| **Gearbox ratio** | `gearboxRatioNumerator` / `gearboxRatioDenominator` | `2` / `1` | ratio | Any mechanical reduction between stepper and leadscrew. Effective ratio = numerator ÷ denominator. |
+| **Leadscrew pitch** | `leadscrewPitchMm` | `2.54` | mm/rev | Carriage travel per leadscrew revolution. |
+| **Jog speed** | `jogSpeed` | `40` | mm/s | Full-speed jog. The on-device jog-speed picker selects a percentage of this. |
+| **Acceleration** | `leadscrewAcceleration` | `150` | mm/s² | Ramp used for all leadscrew motion. |
+| **Max speed** | `leadscrewMaxSpeed` | `40` | mm/s | Upper limit for leadscrew motion. |
 
-> The firmware derives internal quantities (steps/mm, pulses/sec, acceleration in pulses, initial
-> pulse delay) from these values — see [`lib/config/latheconfig.cpp`](lib/config/latheconfig.cpp).
-> A fixed jerk limit (`LEADSCREW_JERK`, the max instantaneous start speed) and the built-in
-> metric/imperial thread and feed pitch tables live in [`lib/config/config.h`](lib/config/config.h).
+Steps/mm, pulses/sec and the pulse timings are derived from these once at startup
+([`lib/config/latheconfig.cpp`](lib/config/latheconfig.cpp)); the metric and imperial pitch tables
+are in [`lib/config/config.h`](lib/config/config.h).
+
+### On-device preferences
+
+| Setting | Where | Options |
+|---|---|---|
+| **Units** | `MENU` → Units | mm / inch |
+| **Theme** | `MENU` → Theme | Dark / light — persisted |
+| **DRO datum** | `MENU` → DRO datum | Which endstop is zero when both are set — persisted |
+| **Jog speed** | `OK` at rest, or `MENU` → Jog speed | 1 %, 5 %, 10 %, 25 %, 50 %, 100 % of the configured jog speed |
+
+![Light theme](tools/screenshot/out/light-rest-metric-feed.png)
+
+*The light theme. Both are designed for the panel rather than inverted from each other.*
+
+### Where settings live, and how to wipe them
+
+Settings are stored as a raw struct in flash, guarded by a validity sentinel (`CHECKVALUE` in
+[`lib/config/latheconfig.h`](lib/config/latheconfig.h)). If the stored value does not match the
+firmware's, the whole blob is discarded and the device boots into first-run AP setup — which is how
+a firmware change that moves the layout avoids reading someone else's bytes as your geometry.
+
+To clear everything deliberately — including Wi-Fi credentials — use **Factory reset** at the bottom
+of the web setup page. It asks for confirmation, then reboots into first-run setup.
+
+---
+
+## Diagnostics
+
+`MENU` → **Diagnostics** shows live following error, spindle and leadscrew rates, and which sync
+anchor the helix is currently pinned to. Unlike every other screen it **stays up while the machine
+runs**, because that is when its numbers mean anything — at rest they are all zero. `OK` clears it.
+
+| Diagnostics | Following error | Manual sync anchor |
+|---|---|---|
+| ![](tools/screenshot/out/diagnostics.png) | ![](tools/screenshot/out/diagnostics-error.png) | ![](tools/screenshot/out/diagnostics-manual.png) |
+
+**Motion-trace capture.** `MENU` → **Debug capture** arms a recorder that samples following error,
+loop timing and spindle deltas at 40 Hz for about 25 seconds, then uploads it as CSV to the
+**Debug capture URL** once the carriage is at rest. [`tools/debugsink/`](tools/debugsink/) has a
+stdlib-only Python receiver, a PHP drop-in and an analysis script that flags direction reversals and
+correlates error spikes against loop stalls — which is what distinguishes "the maths is wrong" from
+"the loop is being starved".
 
 ---
 
@@ -440,6 +646,23 @@ GoogleTest/GMock:
 ```sh
 pio test -e native
 ```
+
+The suite is 455 cases and covers the parts where a mistake is expensive: the UI focus state machine,
+the keypad debounce and gesture recognition, DRO datum resolution, thread-sync anchoring, stop
+handling, the config layout in flash, and the trace capture. Motion tests drive a virtual clock so a
+spindle can be turned at a chosen rate without hardware.
+
+### Seeing the screens without a lathe
+
+```sh
+bash tools/screenshot/render.sh
+```
+
+Renders the **real** `Display` class on the host and writes one 320×240 PNG per scenario to
+`tools/screenshot/out/` — every screenshot in this README came from it. Only `Arduino.h`, `SPI.h` and
+`TFT_eSPI.h` are shimmed; the display, DRO, UI state and LVGL build are the production code, against
+the project's own `lv_conf.h`. Scenes drive it through the same public inputs the firmware does, so a
+screen the keypad cannot reach cannot be screenshotted either.
 
 `native` is built with `-D PIO_UNIT_TESTING=1`, which selects host test doubles in place of the
 ESP32 hardware classes. See the [`test/`](test/) directory for the test suites.
