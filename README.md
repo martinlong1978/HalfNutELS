@@ -374,11 +374,19 @@ DRO readout. The chip at the bottom left is the **machine state** (`IDLE`, `FEED
 Selectors along the top, the two actuators plus `OK` in the middle where your thumbs sit, and
 machine state along the bottom:
 
+![Mk2 keypad layout](docs/images/keypad.svg)
+
 | | Left | Centre | Right |
 |---|---|---|---|
 | **Top row** | `MODE` | `RATE` | `STOPS` |
 | **Middle row** | `◀` | `OK` | `▶` |
 | **Bottom row** | `HALT` | `MENU` | `ENABLE` |
+
+The small numbers on the diagram are the **matrix scan codes** — useful when wiring a panel or
+reading a debug trace. They are `code = H | V << 3`, with the H rows on GPIO 32 / 33 / 2 and the V
+columns on GPIO 13 / 14 / 15; the mapping is defined in [`lib/config/board.h`](lib/config/board.h).
+If you rewire the loom the nine codes stay distinct but the assignment transposes, so re-confirm by
+pressing each key and reading its code before making new caps.
 
 The three top keys choose **what the arrows drive**; the arrows are the only actuators. That is the
 *focus model*: press a selector, a panel opens, the arrows adjust it, `OK` commits. Focus returns to
