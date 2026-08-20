@@ -29,3 +29,7 @@ kicad/LVGL/jlcpcb/production_files/
 kicad/LVGL/TeensyELS-backups/
 
 kicad/LVGL/jlcpcb/
+
+# Python bytecode from scripts/ (make_logo.py imports make_glyphs.py)
+__pycache__/
+*.pyc

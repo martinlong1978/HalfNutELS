@@ -606,6 +606,38 @@ static const int ABOUT_HINT_X = 170;       // right-aligned box, bottom
 static const int ABOUT_HINT_W = 140;
 static const int ABOUT_HINT_Y = 216;
 
+// --- Boot splash -------------------------------------------------------------
+//
+// A centred stack: mark, name, what the thing is, which firmware is running.
+// Shown once per boot by showSplash(), for SPLASH_HOLD_MS (main.cpp), and never
+// again -- so it carries no live values and needs no cache slots or object
+// members. Everything on it is created local to the call and left to the
+// lv_obj_clean() that init() opens with.
+//
+// Every text row is a FULL-WIDTH box with LV_TEXT_ALIGN_CENTER rather than a
+// measured x. Centring three strings of three different lengths by hand means
+// three measured ink widths that have to be re-measured whenever a word or a
+// font changes -- and a wrong one is off-centre, not caught by any assert. The
+// widths below are still recorded, but only as BOUNDS: they answer "does this
+// fit", which is what an assert can actually check, and not "where does it go".
+//
+// The name is Montserrat 36, not 48. At 48 "HalfNut ELS" measures ~297 px of
+// the 320 available -- the same no-margin overrun the Wi-Fi screens were pulled
+// up on -- and the mark above it is doing the work a bigger wordmark would.
+static const int SPLASH_LOGO_W = 96;       // halfNutLogo is 96x96
+static const int SPLASH_LOGO_H = 96;
+static const int SPLASH_LOGO_X = (SCREEN_W - SPLASH_LOGO_W) / 2;  // 112
+static const int SPLASH_LOGO_Y = 16;       // 16..112
+static const int SPLASH_NAME_Y = 122;      // 36 -> 122..162
+static const int SPLASH_TAG_Y = 172;       // 14 -> 172..188
+static const int SPLASH_VERSION_Y = 210;   // 14 -> 210..226, sat apart from the
+                                           // block above it as a footer
+// Measured worst-case ink, same summed-adv_w basis as the constants above.
+static const int TEXT36_SPLASH_NAME_W = 224;  // "HalfNut ELS" at 36
+static const int TEXT14_SPLASH_TAG_W = 168;   // "ELECTRONIC LEADSCREW" at 14
+static const int TEXT14_SPLASH_VERSION_W = 60;  // "v10.10.10", well past any
+                                                // version this will ever carry
+
 // --- Wi-Fi setup screens -----------------------------------------------------
 //
 // showWifi() / showConnected() run BEFORE any stored config is valid -- that is
@@ -1019,6 +1051,18 @@ static_assert(TEXT14_ABOUT_HINT_W <= ABOUT_HINT_W, "about exit hint wider than i
 
 // --- Wi-Fi screen assertions ---------------------------------------------------
 // The card is square (the QR is), so one width serves both axes.
+// Boot splash. The rows are centred in full-width boxes, so what has to be
+// checked is that each row FITS (a row wider than the screen would clip at both
+// ends, since it is centred) and that the four of them stack without touching.
+static_assert(SPLASH_LOGO_X >= 0, "splash mark wider than the screen");
+static_assert(SPLASH_LOGO_Y + SPLASH_LOGO_H <= SPLASH_NAME_Y, "splash mark overlaps the name");
+static_assert(SPLASH_NAME_Y + FONT36_H <= SPLASH_TAG_Y, "splash name overlaps the tagline");
+static_assert(SPLASH_TAG_Y + FONT14_H <= SPLASH_VERSION_Y, "splash tagline overlaps the version");
+static_assert(SPLASH_VERSION_Y + FONT14_H <= SCREEN_H, "splash version off the bottom");
+static_assert(TEXT36_SPLASH_NAME_W <= SCREEN_W, "splash name wider than the screen");
+static_assert(TEXT14_SPLASH_TAG_W <= SCREEN_W, "splash tagline wider than the screen");
+static_assert(TEXT14_SPLASH_VERSION_W <= SCREEN_W, "splash version wider than the screen");
+
 static_assert(WIFI_CARD_X + WIFI_CARD_W <= SCREEN_W, "QR card off the right edge");
 static_assert(WIFI_CARD_Y + WIFI_CARD_W <= SCREEN_H, "QR card off the bottom");
 static_assert(WIFI_SCAN_Y + FONT14_H <= WIFI_CARD_Y, "\"Scan to join\" overlaps the QR card");
@@ -1639,6 +1683,51 @@ static void appendWifiQrEscaped(String& out, const char* src) {
     }
     out += c;
   }
+}
+
+// The boot splash. See the SPLASH_* constants for the layout and its asserts.
+//
+// Deliberately drawn on the PALETTE the display was constructed with rather
+// than pinned to dark like the Wi-Fi screens: by the time this runs the stored
+// config has been read and validated (main.cpp calls it on the normal boot
+// path, after the Display is constructed with a real theme), so a light-theme
+// machine should not flash a dark screen for two seconds before its dashboard
+// arrives. On the AP-setup path there IS no valid theme -- and no splash: that
+// path wants the join credentials on screen as fast as possible.
+//
+// The mark is recoloured to the ACCENT, the one colour in either palette that
+// belongs to the project rather than to a machine state. Nothing on this screen
+// is a machine state, so none of the state colours may appear here.
+void Display::showSplash() {
+  initDisplay();
+
+  lv_obj_set_style_bg_color(lv_screen_active(), m_palette->background, 0);
+  lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+
+  lv_obj_t* mark = lv_image_create(lv_screen_active());
+  lv_image_set_src(mark, &halfNutLogo);
+  lv_obj_set_pos(mark, SPLASH_LOGO_X, SPLASH_LOGO_Y);
+  // A8 mask: it has alpha but no colour of its own, exactly like the mode
+  // glyphs, so the recolour IS the colour.
+  lv_obj_set_style_image_recolor(mark, m_palette->accent, 0);
+  lv_obj_set_style_image_recolor_opa(mark, LV_OPA_COVER, 0);
+
+  lv_obj_t* name = createLabel(lv_screen_active(), &lv_font_montserrat_36,
+                               m_palette->textPrimary, 0, SPLASH_NAME_Y);
+  fixLabelBox(name, SCREEN_W, LV_TEXT_ALIGN_CENTER);
+  lv_label_set_text(name, "HalfNut ELS");
+
+  lv_obj_t* tag = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                              m_palette->textDim, 0, SPLASH_TAG_Y);
+  fixLabelBox(tag, SCREEN_W, LV_TEXT_ALIGN_CENTER);
+  lv_label_set_text(tag, "ELECTRONIC LEADSCREW");
+
+  lv_obj_t* version = createLabel(lv_screen_active(), &lv_font_montserrat_14,
+                                  m_palette->textDim, 0, SPLASH_VERSION_Y);
+  fixLabelBox(version, SCREEN_W, LV_TEXT_ALIGN_CENTER);
+  lv_label_set_text(version, FIRMWARE_VERSION);
+
+  lv_timer_handler();
 }
 
 void Display::showWifi(const char* ssid, const char* password, IPAddress ip) {

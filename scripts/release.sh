@@ -47,4 +47,4 @@ gh release create "$VERSION" \
   --notes "Firmware release $VERSION"
 
 echo "Done. OTA permalink:"
-echo "  https://github.com/martinlong1978/TeensyELS/releases/latest/download/elstft.bin"
+echo "  https://github.com/martinlong1978/HalfNutELS/releases/latest/download/elstft.bin"

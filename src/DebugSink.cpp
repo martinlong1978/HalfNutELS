@@ -130,7 +130,7 @@ bool postTrace(const HttpUrlParts& url, const DebugData* trace, int count) {
   // allocation the size of the trace itself, next to the trace.
   String head = String("POST ") + url.path + " HTTP/1.1\r\n";
   head += String("Host: ") + url.host + "\r\n";
-  head += "User-Agent: TeensyELS-capture\r\n";
+  head += "User-Agent: HalfNutELS-capture\r\n";
   head += "Content-Type: text/csv\r\n";
   // Metadata the sink puts in the filename / summary line, so a capture can be
   // told apart from the next one without opening it.

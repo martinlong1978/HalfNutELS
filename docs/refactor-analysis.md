@@ -1,4 +1,4 @@
-# TeensyELS - Component Design Analysis & Refactor Plan
+# HalfNutELS - Component Design Analysis & Refactor Plan
 
 Prioritized, constructive analysis of the firmware's component design, with concrete
 directions and risk/effort estimates. This project was assembled from someone else's
@@ -111,10 +111,13 @@ filename stops implying a separate `TestSpindle` class. Add a one-line CI job th
   `native`. The Teensy envs pull `lib_deps` (Adafruit GFX/SSD1306, elapsedMillis) no longer
   used by the ESP32 build. **Direction:** delete the Teensy envs, or gate them clearly as
   unsupported; rename the project to something ESP32-accurate.
+  **(DONE)** The Teensy envs are gone from `platformio.ini` and the project was renamed to
+  **HalfNutELS** - after the half-nuts an electronic leadscrew makes redundant, rather than after
+  whichever microcontroller it happens to run on.
 - **Vestigial `leadscrew_io_teensy.h`.** `lib/leadscrew/leadscrew_io_teensy.h` is entirely under
   `#ifdef CORE_TEENSY` (never defined) - dead. It is a clean, self-contained file, so deletion
   is trivial, but it is *not* exercised by any test, so I left it (out of the "provable-safe"
-  envelope). **Direction:** delete alongside the Teensy envs.
+  envelope). **Direction:** delete alongside the Teensy envs. **(DONE)** - the file no longer exists.
 - **`ELS_USE_RMT` is always on.** `board.h:19` unconditionally defines it, so the non-RMT
   `sendPulse()` branch (`leadscrew.cpp:144-154`) and the `pinMode(ELS_LEADSCREW_STEP, OUTPUT)`
   fallback (`main.cpp:176`) are dead on hardware. Note the native tests actually exercise the

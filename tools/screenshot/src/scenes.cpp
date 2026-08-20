@@ -186,6 +186,13 @@ struct SceneDef {
   uint8_t theme;
   bool wifiScreen;  // uses the parameterless Display + showWifi/showConnected
   int wifiVariant;  // 0 = join screen, 1 = connected screen
+  // The boot splash. Its own flag rather than a wifiVariant because it is the
+  // other axis entirely: the splash IS themed (main.cpp shows it only on the
+  // normal boot path, where a stored theme exists), so it needs the full Rig
+  // like every dashboard scene -- but it must be rendered WITHOUT init(), since
+  // on the device it is what stands on the screen before init() builds the
+  // dashboard over it. Rows that omit this get false, which is every other one.
+  bool splashScreen;
 };
 
 void sc_restMetricFeed(Rig& r) { baseState(r); spin(r, 850, 200); }
@@ -541,6 +548,11 @@ const SceneDef kScenes[] = {
   // Wi-Fi setup path: the parameterless Display, no dashboard at all.
   { "wifi-setup",             nullptr,                THEME_DARK,  true,  0 },
   { "wifi-connected",         nullptr,                THEME_DARK,  true,  1 },
+
+  // Both themes: the splash is the one screen every user sees on every boot,
+  // and it is drawn on the stored palette, so both have to be looked at.
+  { "splash",                 nullptr,                THEME_DARK,  false, 0, true },
+  { "light-splash",           nullptr,                THEME_LIGHT, false, 0, true },
 };
 
 const char* g_names[sizeof(kScenes) / sizeof(kScenes[0])];
@@ -590,6 +602,20 @@ bool renderScene(const char* name) {
 
   Rig r;
   r.build(def->theme);
+
+  if (def->splashScreen) {
+    // No init() and no pump(): showSplash() draws the whole screen itself, and
+    // update() would walk a dashboard object tree that was never built. This is
+    // the device's own boot order -- splash first, dashboard after -- stopped
+    // at the splash.
+    r.display->showSplash();
+    for (int i = 0; i < 6; i++) {
+      advanceMockMicros(40000);
+      lv_timer_handler();
+    }
+    return true;
+  }
+
   r.display->init();
   def->apply(r);
   pump(r.display);

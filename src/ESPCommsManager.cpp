@@ -15,7 +15,7 @@ static const char* GITHUB_API_URL =
 static const char* GITHUB_DOWNLOAD_URL =
     "https://github.com/" OTA_GITHUB_REPO "/releases/latest/download/" OTA_ASSET_NAME;
 
-static const char* OTA_USER_AGENT = "TeensyELS-OTA";
+static const char* OTA_USER_AGENT = "HalfNutELS-OTA";
 
 ESPCommsManager::ESPCommsManager(/* args */) {}
 

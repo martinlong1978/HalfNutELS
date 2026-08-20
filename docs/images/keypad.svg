@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 540" width="780" height="540" role="img" aria-labelledby="title desc">
-  <title id="title">TeensyELS Mk2 keypad layout</title>
+  <title id="title">HalfNutELS Mk2 keypad layout</title>
   <desc id="desc">A three by three keypad. Top row: MODE, RATE, STOPS — the selectors, which choose what the arrows drive. Middle row: left arrow, OK, right arrow — the actuators. Bottom row: HALT, MENU, ENABLE — machine state. Small numbers in each key corner are the matrix scan codes.</desc>
 
   <defs>

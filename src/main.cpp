@@ -43,6 +43,14 @@ ESPCommsManager commsManager;
 // mode, where the task is never created - the uploader checks.
 TaskHandle_t spindleTaskHandle = nullptr;
 
+// How long the boot splash stays up. This is dead time before the machine can
+// move, so it is a real cost and not free branding: two seconds is long enough
+// to read the version off the screen (the reason the splash carries it) and
+// short enough not to be in the way of someone power-cycling to clear a fault.
+// The dwell lives here rather than inside showSplash() so the display library
+// holds no timing of its own - see the note on that method.
+static const uint32_t SPLASH_HOLD_MS = 2000;
+
 int64_t lastcycle;
 int cyclecount;
 int finalcyclecount;
@@ -289,6 +297,15 @@ void setup() {
     // the wrong pin. There is no discrete-button hardware left to support.
 
     // Display Initalisation
+
+    // The splash goes up first and is simply left on screen for the dwell.
+    // Blocking here is safe and is the whole mechanism: setup() still owns the
+    // CPU at this point -- the priority-24 SpindleTask that will take core 1 is
+    // not created until the end of this function -- so nothing is moving, no
+    // task is being starved, and no watchdog is armed yet. init() opens with
+    // lv_obj_clean(), and that is what takes the splash back off the screen.
+    display->showSplash();
+    delay(SPLASH_HOLD_MS);
 
     display->init();
 

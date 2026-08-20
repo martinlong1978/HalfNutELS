@@ -1,4 +1,4 @@
-# ESP32 ELS — Electronic Leadscrew
+# HalfNutELS — Electronic Leadscrew
 
 An open-source **Electronic Leadscrew (ELS)** controller for a metalworking lathe, running on an
 **ESP32-WROOM-32E**, with a 320×240 LVGL TFT interface, a 3×3 keypad and a rotary encoder.
@@ -9,22 +9,25 @@ the microcontroller, which drives a **stepper motor** on the leadscrew in softwa
 the spindle. This lets you select any thread pitch or feed rate electronically — for single-point
 threading and powered feeding — without swapping gears.
 
-> **Note on the name:** the repository is historically called *TeensyELS* because it began life on a
-> Teensy microcontroller. Teensy support has since been **removed** — the active firmware targets the
-> **ESP32**. See [Attribution](#attribution).
+> **Note on the name:** *half-nuts* are the split nut a lathe operator clamps onto the leadscrew to
+> engage a threading pass — and the part an electronic leadscrew makes redundant, since the pitch is
+> now held in software rather than caught on a thread-dial line. The project was called *TeensyELS*
+> until August 2026, after the Teensy it began on; Teensy support was removed well before the rename,
+> and naming firmware after its microcontroller was a poor idea in the first place. The upstream
+> project it derives from is still called TeensyELS — see [Attribution](#attribution). The KiCad
+> projects and the board silkscreen also still carry the old name.
 
 > **Note on the hardware:** the current design is the **LVGL board** in
-> [`kicad/LVGL/`](kicad/LVGL/) (`TeensyELS v0.6`) — an ESP32-WROOM-32E soldered directly to the board,
-> driving a 320×240 SPI TFT through LVGL. The older **2-layer** and **4-layer** boards, which socketed
-> a LilyGO T-Display module (and carried a Teensy 4.1 footprint), are **legacy** and are kept only for
-> reference. See [Legacy boards](#legacy-boards-2-layer--4-layer).
+> [`kicad/LVGL/`](kicad/LVGL/) (silkscreened `TeensyELS v0.6`, pre-rename) — an ESP32-WROOM-32E
+> soldered directly to the board, driving a 320×240 SPI TFT through LVGL. It is the only board design
+> in the repository — the earlier revisions have been removed.
 
 ---
 
 ## Contents
 - [Features](#features)
 - [Hardware / Components](#hardware--components)
-- [Legacy boards (2-layer / 4-layer)](#legacy-boards-2-layer--4-layer)
+- [Enclosure & keycaps](#enclosure--keycaps)
 - [Getting boards made (PCB)](#getting-boards-made-pcb)
 - [Building & flashing the firmware](#building--flashing-the-firmware)
 - [Connecting & configuring](#connecting--configuring)
@@ -62,7 +65,7 @@ threading and powered feeding — without swapping gears.
 - **Web-based configuration** — all lathe parameters (encoder PPR, stepper PPR, gearbox ratio,
   leadscrew pitch, speeds, acceleration) plus WiFi credentials are configured over a built-in web
   page; settings are stored in the ESP32's non-volatile flash.
-- **Over-the-air (OTA) firmware update** — pulls the latest [GitHub release](https://github.com/martinlong1978/TeensyELS/releases)
+- **Over-the-air (OTA) firmware update** — pulls the latest [GitHub release](https://github.com/martinlong1978/HalfNutELS/releases)
   from a stable permalink and skips the download if the device is already on that version.
 - **Motion-trace capture** — records ~25 s of following error, loop timing and spindle deltas and
   uploads it as CSV for offline analysis. Built to diagnose a threading glitch; kept because it is
@@ -81,13 +84,10 @@ The controller is built around a custom PCB. KiCad design files, gerbers and fab
 in the [`kicad/`](kicad/) directory.
 
 **The current design is [`kicad/LVGL/`](kicad/LVGL/)** — silkscreened *TeensyELS v0.6*, a **4-layer**
-board of roughly **113 × 109 mm**. Unlike the older boards it does not socket a dev-board module: the
-**ESP32-WROOM-32E is soldered directly to the PCB**, the display is a separate SPI TFT module on a
-14-pin socket, and the board is designed to be **SMT-assembled** (JLCPCB) with only the connectors and
-the rotary encoder hand-soldered.
-
-Everything below refers to the LVGL board. For the older boards see
-[Legacy boards](#legacy-boards-2-layer--4-layer).
+board of roughly **113 × 109 mm**. It does not socket a dev-board module: the **ESP32-WROOM-32E is
+soldered directly to the PCB**, the display is a separate SPI TFT module on a 14-pin socket, and the
+board is designed to be **SMT-assembled** (JLCPCB) with only the connectors and the rotary encoder
+hand-soldered.
 
 ### Bill of materials
 
@@ -191,33 +191,27 @@ Defined in [`lib/config/board.h`](lib/config/board.h) and matching the LVGL sche
 
 ---
 
-## Legacy boards (2-layer / 4-layer)
+## Enclosure & keycaps
 
-Two earlier board revisions are kept in the repository for reference. **They are not the current
-design** and the firmware is no longer developed against them:
+Two 3D models are provided in [`cad/`](cad/), both as **STEP** files:
 
-| Directory | Silkscreen | Layers | Controller |
-|---|---|---|---|
-| [`kicad/2Layer/`](kicad/2Layer/) | TeensyELS v0.3 | 2 | LilyGO T-Display module socket + Teensy 4.1 footprint |
-| [`kicad/4Layer/`](kicad/4Layer/) | TeensyELS v0.5 | 4 | LilyGO T-Display module socket + Teensy 4.1 footprint |
+| File | What it is |
+|---|---|
+| [`cad/Keycaps.step`](cad/Keycaps.step) | Keycaps for the 3×3 keypad |
+| [`cad/Enclosure.step`](cad/Enclosure.step) | A full enclosure for the controller |
 
-Notable differences from the LVGL board:
+STEP is a neutral CAD interchange format — it imports into FreeCAD, Fusion and SolidWorks, so the
+models can be measured and edited before you make anything from them. To 3D-print a part, convert it
+to **STL** or **3MF** in your CAD tool and slice that; the same STEP file can go to a machine shop if
+you would rather have the enclosure cut than printed.
 
-- The MCU was a **socketed LilyGO TTGO T-Display** module (ESP32 + built-in 1.14" 240×135 ST7789),
-  with an unpopulated **Teensy 4.1** footprint alongside it from the project's Teensy origins. Teensy
-  support has since been removed from the firmware entirely.
-- Because the T-Display module carries its own USB port, no separate programming header was needed.
-- **J3** was a 4-pin **I²C** header (SDA/SCL/5 V/GND) for an SSD1306 OLED, rather than a TFT socket.
-- Through-hole (Omron B3F) tactile switches instead of SMD ones.
-- The current firmware's display code targets a 320×240 LVGL screen, so it will not drive the
-  T-Display's 240×135 panel as-is (`ELS_DISPLAY` in [`lib/config/board.h`](lib/config/board.h) still
-  lists the older options, but they are not maintained).
+The keycaps cover the nine keys of the panel keypad — which legend belongs on which cap is set out in
+[Keypad layout](#keypad-layout), along with the warning to re-confirm the scan codes before making
+caps if you have rewired the loom. For reference when checking fit, the board itself is roughly
+**113 × 109 mm**.
 
-J1 (stepper), J2 (encoder), J4 (5 V in) and E1 (rotary encoder) serve the same purposes as on the
-LVGL board.
-
-> The BOM and production files under `kicad/4Layer/production/` describe **that** board, not the
-> current one.
+> No print settings, material or fastener sizes are specified with these models. Check them against
+> your own printer and hardware before committing to a run.
 
 ---
 
@@ -229,8 +223,8 @@ to use — it is the only output that carries **LCSC part numbers**, and its BOM
 intent (SMT parts only, encoder level-shift path left off).
 
 > ⚠️ **Do not use `kicad/LVGL/production/bom.csv` or `positions.csv`.** Those files are stale
-> carry-overs from the 4-layer board — they still list a TTGO T-Display and a Teensy 4.1 and do not
-> describe this board. Regenerate them from KiCad if you need them.
+> carry-overs from an earlier board revision — they still list a socketed display module and a Teensy
+> footprint, neither of which exists on this board. Regenerate them from KiCad if you need them.
 
 ### Option A — JLCPCB (bare board, or with assembly)
 
@@ -254,11 +248,6 @@ intent (SMT parts only, encoder level-shift path left off).
 3. Confirm layer count (**4**) and dimensions, pick your board options, and add to cart.
 4. *(Optional — assembly)* Choose **Turnkey Assembly** and provide the BOM and pick-and-place files
    above. PCBWay does not use LCSC numbers directly, so expect to confirm equivalents for each line.
-
-> The legacy 2-layer and 4-layer boards can still be ordered from their own directories
-> ([`kicad/2Layer/gerbers.zip`](kicad/2Layer/gerbers.zip), 2 layers;
-> [`kicad/4Layer/gerbers.zip`](kicad/4Layer/gerbers.zip), 4 layers) — but the current firmware
-> targets the LVGL board.
 
 ---
 
@@ -291,9 +280,6 @@ header **J5**:
 Use a **3.3 V** adapter. If you only wire TX/RX/GND, you must put the module into the bootloader by
 hand — hold GPIO0 low, pulse EN low and release it, then start the upload.
 
-*(The legacy 2-layer/4-layer boards socket a LilyGO T-Display, which has its own USB port; on those,
-just plug the module in.)*
-
 ### 3. Build & upload
 
 There are two ESP32 build environments:
@@ -317,9 +303,6 @@ Both ESP32 environments still declare `board = lilygo-t-display`. That is just a
 ESP32-D0WD profile and is compatible with the WROOM-32E module — the display geometry that matters is
 set explicitly in the build flags (`TFT_WIDTH=240`, `TFT_HEIGHT=320`, ST7789 driver, SPI pins), and a
 custom 4 MB partition table (`my_4MB.csv`) is used.
-
-> The `teensy41` / `teensy41_debug` environments remain in `platformio.ini` for historical reasons but
-> are **not the supported target** — the code paths for Teensy have been removed.
 
 ---
 
@@ -356,6 +339,16 @@ The panel is nine keys and a rotary encoder. Everything below is driven from tho
 
 > Every screenshot in this README is rendered from the **real display code** on a host machine
 > (`bash tools/screenshot/render.sh`), so what you see here is what the panel draws.
+
+### Power-on
+
+![Boot splash](tools/screenshot/out/splash.png)
+
+The splash holds for **two seconds** on every normal boot, then the rest screen replaces it. It
+carries the running **firmware version**, which is the quickest way to check what a machine is on
+without opening the menu — worth a glance after an over-the-air update. It is drawn on whichever
+theme is stored, and it is skipped entirely on the first-run setup path, where the Wi-Fi credentials
+matter more than the branding.
 
 ### The rest screen
 
@@ -544,7 +537,7 @@ a stop if you want the cut to end somewhere repeatable, then `ENABLE`.
 ## Firmware updates
 
 **From the device.** `MENU` → **Software update** → `OK`. The controller checks the latest
-[GitHub release](https://github.com/martinlong1978/TeensyELS/releases), tells you if you are already
+[GitHub release](https://github.com/martinlong1978/HalfNutELS/releases), tells you if you are already
 on it, and otherwise downloads and flashes, showing progress on screen. It uses the Wi-Fi credentials
 from the setup page.
 
@@ -695,10 +688,10 @@ builds on:
 
 - **Upstream repository:** https://github.com/NoEngineerHere/TeensyELS
 
-The derivation is evidenced by the matching repository name, the near-verbatim original `README.md`
-stub, a shared project structure (PlatformIO project, `native` GoogleTest environment, `kicad/`
-hardware directory), and this repo's history migrating from Teensy to ESP32 (Teensy support removed in
-commit `cbd1b22`).
+The derivation is evidenced by this repository's original name (*TeensyELS*, matching upstream, until
+the August 2026 rename to *HalfNutELS*), the near-verbatim original `README.md` stub, a shared project
+structure (PlatformIO project, `native` GoogleTest environment, `kicad/` hardware directory), and this
+repo's history migrating from Teensy to ESP32 (Teensy support removed in commit `cbd1b22`).
 
 **Licensing:** the project owner has confirmed that release under the GPLv3 is cleared.
 

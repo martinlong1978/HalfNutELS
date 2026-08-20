@@ -8,7 +8,7 @@
 //   API:      https://api.github.com/repos/<REPO>/releases/latest
 //   Download: https://github.com/<REPO>/releases/latest/download/<ASSET>
 // The download asset MUST be named OTA_ASSET_NAME so the permalink resolves.
-#define OTA_GITHUB_REPO "martinlong1978/TeensyELS"
+#define OTA_GITHUB_REPO "martinlong1978/HalfNutELS"
 #define OTA_ASSET_NAME "elstft.bin"
 
 #define ELS_SPINDLE_ENCODER_A 35
