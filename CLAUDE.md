@@ -99,6 +99,20 @@ OTA pulls from **GitHub Releases** via the stable permalink
   redirects a renamed repo, release-asset downloads included. So never create a new repo at
   `martinlong1978/TeensyELS`: that kills the redirect and bricks OTA for every device still on the old URL.
   Clearing settings (`CHECKVALUE`) or a fresh setup adopts the new default.
+- **WiFi modem sleep must be OFF for the download** (`WiFi.setSleep(false)` in `wifiConnect()`). It is ON
+  by default for `WIFI_STA`, and it is the difference between a 13-second update and one that never
+  finishes. Measured, both directions: with sleep on, the transfer took a single 1364-byte MSS every
+  ~350 ms — a beacon interval, not congestion — giving 2-4 kB/s and a hard stall around 18%; with it
+  off, 1.56 MB lands in 13-25 s at 63-124 kB/s. Do not "restore" the default to save power: the OTA
+  path ends in `ESP.restart()` regardless, so the radio is only awake for the duration.
+- Things that instrumenting **ruled out**, so nobody re-litigates them: it is not the flash write (1% of
+  elapsed time with sleep on, ~5.2 s of any run — that part is constant), not the SpindleTask holding
+  core 1 against the cache-disable IPC (it parks correctly in `commsManager.loop()`'s `vTaskDelay`,
+  measured at ~4 entries/sec), not heap (steady ~55 kB free throughout), and not the display (parking
+  `DisplayTask` for a whole download made throughput *worse*, not better). The rename's extra redirect
+  hop is real but costs one handshake, not throughput.
+- RSSI is worth reading off the `OTA:` log line when an update is slow — it swung -86 to -49 dBm across
+  runs on the same bench, and at the bottom of that range TLS connect itself intermittently fails.
 - **To release:** bump `FIRMWARE_VERSION` in `include/version.h`, `pio run -e esp32dev_publish`, then
   `bash scripts/release.sh` (needs `gh` + `gh auth login`). It uploads `firmware.bin` as asset `elstft.bin`.
   Publish full releases (not drafts/pre-releases) or the `/latest/` permalink won't resolve.

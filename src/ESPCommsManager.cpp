@@ -33,8 +33,23 @@ bool ESPCommsManager::wifiConnect(WebSettings* webSettings, uint32_t timeoutMs) 
         }
         vTaskDelay(250 / portTICK_PERIOD_MS);
     }
+    // Modem sleep is ON by default for WIFI_STA in arduino-esp32: between DTIM
+    // beacons the radio powers down, so incoming data is only collected once per
+    // DTIM period. For a request/response workload that is free power saving; for
+    // a 1.5 MB bulk download it is throughput poison, because the TCP receive
+    // window drains and refills once per beacon instead of continuously.
+    //
+    // That is not a guess about this device. The instrumented run measured one
+    // ~1360-byte segment (a single MSS) arriving every ~350 ms, which is a beacon
+    // period times a small DTIM count -- not what a busy or a lossy link looks
+    // like. Turning sleep off for the update costs nothing: the download ends in
+    // ESP.restart() either way.
+    WiFi.setSleep(false);
+
     Serial.print("OTA: WiFi connected, IP ");
     Serial.println(WiFi.localIP());
+    Serial.printf("OTA: rssi=%d dBm, modem sleep %s\n", (int)WiFi.RSSI(),
+                  WiFi.getSleep() ? "ON" : "OFF");
     return true;
 }
 
@@ -139,8 +154,20 @@ bool ESPCommsManager::downloadAndFlash(const char* url) {
         return false;
     }
 
+    // Bulk transfer. Timed and reported because "the OTA download is slow" was
+    // a real fault here once (see the modem-sleep note in wifiConnect()), and
+    // the thing that made it decidable rather than arguable was a throughput
+    // number. Three lines is cheap insurance against having to build that
+    // instrument again from scratch.
+    const uint32_t tStart = millis();
     size_t written = Update.writeStream(http.getStream());
+    const uint32_t elapsedMs = millis() - tStart;
     http.end();
+
+    Serial.printf("OTA: %u bytes in %u ms (%u B/s), rssi=%d dBm\n",
+                  (unsigned)written, (unsigned)elapsedMs,
+                  (unsigned)(elapsedMs ? (uint32_t)((uint64_t)written * 1000 / elapsedMs) : 0),
+                  (int)WiFi.RSSI());
 
     if (written != (size_t)contentLength) {
         Serial.printf("OTA: wrote %u/%d bytes: %s\n", (unsigned)written,
