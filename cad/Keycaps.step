@@ -10,7 +10,7 @@ FILE_DESCRIPTION(
 
 FILE_NAME(
 /* name */ 'Keycaps.step',
-/* time_stamp */ '2026-08-21T19:39:28+01:00',
+/* time_stamp */ '2026-08-21T22:27:22+01:00',
 /* author */ (''),
 /* organization */ (''),
 /* preprocessor_version */ 'ST-DEVELOPER v20.1',
@@ -19787,19 +19787,18 @@ SOLID_ANGLE_UNIT()
 #18447=SHAPE_REPRESENTATION('',(#10360,#10763),#18435);
 #18448=SHAPE_REPRESENTATION('',(#10361),#18436);
 #18449=PRODUCT_DEFINITION_CONTEXT('part definition',#18457,'design');
-#18450=PRODUCT_DEFINITION('Enclosure','Enclosure v10',#18452,#18449);
+#18450=PRODUCT_DEFINITION('Enclosure','Enclosure v3',#18452,#18449);
 #18451=PRODUCT_DEFINITION('Buttons','Buttons',#18453,#18449);
 #18452=PRODUCT_DEFINITION_FORMATION('',$,#18459);
 #18453=PRODUCT_DEFINITION_FORMATION('',$,#18460);
-#18454=PRODUCT_RELATED_PRODUCT_CATEGORY('Enclosure v10','Enclosure v10',
-(#18459));
+#18454=PRODUCT_RELATED_PRODUCT_CATEGORY('Enclosure v3','Enclosure v3',(#18459));
 #18455=PRODUCT_RELATED_PRODUCT_CATEGORY('Buttons','Buttons',(#18460));
 #18456=APPLICATION_PROTOCOL_DEFINITION('international standard',
 'automotive_design',2009,#18457);
 #18457=APPLICATION_CONTEXT(
 'Core Data for Automotive Mechanical Design Process');
 #18458=PRODUCT_CONTEXT('part definition',#18457,'mechanical');
-#18459=PRODUCT('Enclosure','Enclosure v10',$,(#18458));
+#18459=PRODUCT('Enclosure','Enclosure v3',$,(#18458));
 #18460=PRODUCT('Buttons','Buttons',$,(#18458));
 #18461=PRESENTATION_STYLE_ASSIGNMENT((#18462));
 #18462=SURFACE_STYLE_USAGE(.BOTH.,#18463);

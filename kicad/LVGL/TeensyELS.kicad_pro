@@ -519,7 +519,7 @@
       "plot": "gerbers/",
       "pos_files": "pnp/",
       "specctra_dsn": "",
-      "step": "TeensyELS.step",
+      "step": "../../cad/board.step",
       "svg": "",
       "vrml": ""
     },

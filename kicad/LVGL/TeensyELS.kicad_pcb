@@ -5194,7 +5194,7 @@
 			(net 21 "/PadV1")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "25330215-a27b-49e7-8599-535d4a8fca1e")
+			(uuid "32aed9ff-c3b1-42d5-8704-aa06dbbad2bd")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -5212,7 +5212,7 @@
 			(net 14 "/PadH3")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "162f4b5d-f1c8-46f0-a39f-f23a2a9b898e")
+			(uuid "eed49829-69f1-497f-9a7b-654bd4cf6eee")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -7174,7 +7174,7 @@
 			(net 15 "/PadV2")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "b3684a5e-0eb9-4873-8209-cc03007d8c9e")
+			(uuid "dee3f625-ede5-4f4f-b5ad-1dc322094161")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -7192,7 +7192,7 @@
 			(net 22 "/PadH2")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "814bf27c-2eab-42d5-9c71-50bb3bcfe773")
+			(uuid "210f80d5-c3f7-4a34-bb30-f4cab785e93f")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -8456,7 +8456,7 @@
 			(net 4 "Net-(Q2-D)")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "4f78e98c-0594-46e0-9d64-c6204f680ad9")
+			(uuid "e4400710-3a8c-45f5-8e3b-ec2efb20dbb1")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -8474,7 +8474,7 @@
 			(net 6 "+5V")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "0ceb95d8-be16-46ce-8529-7b8766d6d328")
+			(uuid "5a69e23c-b60e-4994-96b9-825e9ad877fa")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -10205,7 +10205,7 @@
 			(net 15 "/PadV2")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "55fafc15-63a0-4c10-ab6b-87298f130291")
+			(uuid "91f28783-6ef4-4ad7-8f4e-98be127772af")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -10223,7 +10223,7 @@
 			(net 11 "/PadH1")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "459946e2-9b8b-4780-9171-eccf9ca0ea27")
+			(uuid "eea1b0fd-5a45-4f2d-bb0b-fc0713703245")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -12418,7 +12418,7 @@
 			(net 16 "/PadV3")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "d518daa0-6d5d-49de-a00e-c8f0983e6dd9")
+			(uuid "4685661e-bd15-49f9-96cf-a78c37c6a476")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -12436,7 +12436,7 @@
 			(net 11 "/PadH1")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "eb7625f7-f492-4193-9f54-1a1d8419a202")
+			(uuid "eabe9df9-28f9-44d1-8621-07393778b7fd")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -13533,7 +13533,7 @@
 			(net 21 "/PadV1")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "1070813a-4f29-4061-ba7b-3e2fa23947ce")
+			(uuid "562cccb4-a1ab-4b8d-9711-8c8a12195712")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -13551,7 +13551,7 @@
 			(net 11 "/PadH1")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "0764734f-904a-4040-9299-c8110a317edf")
+			(uuid "3b99b322-cb4f-43b1-a948-ee3eff3633b0")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -14015,7 +14015,7 @@
 			(net 1 "GND")
 			(pinfunction "MP")
 			(pintype "power_in")
-			(uuid "7ee7517c-7652-4605-ad1e-5987ed000c09")
+			(uuid "ccb5b8a5-b430-440a-8441-aae951ac6b19")
 		)
 		(embedded_fonts no)
 		(model "${KICAD8_3DMODEL_DIR}/Rotary_Encoder.3dshapes/RotaryEncoder_Alps_EC12E-Switch_Vertical_H20mm.wrl"
@@ -14573,7 +14573,7 @@
 			(net 16 "/PadV3")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "0f18c932-3b67-4f2c-8415-90bf712ceba7")
+			(uuid "144499ec-f4c1-4fdf-993a-f3a78b8bb24a")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -14591,7 +14591,7 @@
 			(net 22 "/PadH2")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "f0cf2635-d89d-4dc2-bd23-e62c993dbb43")
+			(uuid "3a1ae7b0-d88f-47d4-9cb2-b0c884f34791")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -14935,7 +14935,7 @@
 			(net 21 "/PadV1")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "d755bde4-161d-429f-9166-e9d6467bb545")
+			(uuid "0a84301b-139e-42d7-a2b1-8d4b62635d1b")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -14953,7 +14953,7 @@
 			(net 22 "/PadH2")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "326ca4ab-fb9c-4627-8e3c-0293447aa577")
+			(uuid "4e78b351-3822-4d04-a6be-42f32a0b39ff")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -15511,7 +15511,7 @@
 			(net 15 "/PadV2")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "89aed4fd-c919-4174-8158-a64c3962819e")
+			(uuid "07eedcca-e0ae-4cba-bc7a-54e1dd919ee0")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -15529,7 +15529,7 @@
 			(net 14 "/PadH3")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "9b322994-c71c-4040-a1b1-6c79931024b7")
+			(uuid "f1446cff-bea5-4203-817b-a92ab8c72627")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
@@ -15873,7 +15873,7 @@
 			(net 16 "/PadV3")
 			(pinfunction "1")
 			(pintype "passive")
-			(uuid "b90bf7f4-3c03-4754-94f8-9c3f116b36e7")
+			(uuid "2893515f-da03-4c1e-baec-543b44f45719")
 		)
 		(pad "2" smd rect
 			(at -4 2.25 180)
@@ -15891,7 +15891,7 @@
 			(net 14 "/PadH3")
 			(pinfunction "2")
 			(pintype "passive")
-			(uuid "d570f3ed-9b32-4240-b04e-93a2933409fc")
+			(uuid "e3e811da-9d6b-41d0-9952-a37e18dd1542")
 		)
 		(embedded_fonts no)
 		(model "${KICAD9_3DMODEL_DIR}/Button_Switch_SMD.3dshapes/SW_SPST_Omron_B3FS-101xP.step"
