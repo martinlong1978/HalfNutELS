@@ -11,6 +11,7 @@
 // via buttonpad.h. display.h is still needed here for Display itself - the
 // Theme and DRO datum tiles call Display::setTheme()/setDroDatum().
 #include <display.h>
+#include "alarm.h"
 #include "WebSettings.h"
 #include "setupmode.h"
 
@@ -115,6 +116,12 @@ UiContext ButtonPad::buildContext() {
   // check exists to catch.
   const GlobalFeedMode feedMode = globalState->getFeedMode();
   ctx.threadMode = (feedMode == FM_THREAD || feedMode == FM_THREAD_REVERSE);
+  // The stepper alarm. Latched fault OR reset pulse in flight - both inhibit
+  // the machine and both keep the modal up, so UiState sees one flag (see
+  // UiContext in lib/ui/uistate.h). Sampled from GlobalState like the rest,
+  // where the alarm task publishes it; ButtonPad never touches the AlarmMonitor
+  // except to ask for a clear.
+  ctx.alarm = globalState->alarmActive();
   return ctx;
 }
 
@@ -229,6 +236,17 @@ void ButtonPad::applyIntent(UiIntent intent) {
   case UiIntent::JogRightStart:
     globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
     globalState->setMotionMode(GlobalMotionMode::MM_INTERACTIVE_JOG_RIGHT);
+    break;
+
+  // --- The stepper alarm modal ---------------------------------------------
+  case UiIntent::ClearAlarm:
+    // OK on the alarm modal. This does NOT dismiss anything: it asks the alarm
+    // task to pulse the driver's ENABLE line, and the modal comes down only if
+    // the fault has actually gone (src/alarm.cpp, lib/alarm/alarmmonitor.h).
+    // Nothing is restarted either - motion stays at MM_DISABLED and the sync
+    // state stays SS_UNSYNC, so the operator jogs and re-syncs deliberately,
+    // which is the whole reason the dialog says so.
+    alarmRequestClear();
     break;
 
   case UiIntent::JogStop:

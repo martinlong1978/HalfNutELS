@@ -53,8 +53,31 @@ enum class UiFocus {
   Jog,
   JogSpeed, Rate, Mode, Stops, DroDatum,  // the widgets: OK commits, 4 s expiry
   Menu,
-  Diagnostics, About                      // read-only screens: no expiry
+  Diagnostics, About,                     // read-only screens: no expiry
+  Alarm                                   // the stepper-alarm modal. NOT chosen
+                                          // by the operator - see below.
 };
+
+// UiFocus::Alarm is the one focus nothing on the panel can ask for. The stepper
+// driver has raised a fault (lib/alarm/alarmmonitor.h), motion has been stopped
+// underneath the operator, and the panel's only remaining job is to say so and
+// take the acknowledgement - so the focus is FORCED, from both handleKey() and
+// tick(), for as long as ctx.alarm is true, and released the moment it is not.
+//
+// It is therefore neither a widget nor a read-only screen: it has no idle
+// timeout (a modal that times out is a modal the operator can miss entirely),
+// it cannot be dismissed by MENU or HALT, and it does not survive motion
+// because it is the reason there is none. Every other key is inert while it is
+// up, INCLUDING HALT - the one exception to "HALT is checked before anything"
+// in the whole of this file, and it is only an exception in the letter: HALT
+// exists to stop the machine, the machine is already stopped and held stopped,
+// so there is nothing for it to do that the alarm has not already done.
+//
+// The lockout being total is the point. The operator has a crash to clear, and
+// a panel that would still open a menu or step a pitch behind the dialog is a
+// panel that can be operated in a state where nothing it reports is true - the
+// carriage position and the thread sync are both stale the instant the driver
+// stops stepping.
 
 // The nine physical keys of the Mk2 panel, plus the two synthetic keys the
 // rotary encoder produces.
@@ -134,6 +157,11 @@ enum class UiIntent {
   MenuNext, MenuPrev, MenuActivate,
   CloseMenu,
   ToggleEngage,
+  // OK on the stepper-alarm modal: pulse the driver's ENABLE line to reset it
+  // (AlarmMonitor::requestClear()). NOT "dismiss the dialog" - the dialog goes
+  // when the alarm does, and if the fault is still present at the driver the
+  // clear fails and the modal stays up saying so.
+  ClearAlarm,
 };
 
 // Machine state the decision depends on. Supplied fresh by the caller on every
@@ -165,6 +193,15 @@ struct UiContext {
                        // mode. It is the SAME menuTileBlock() the display dims
                        // with and ButtonPad re-checks against fresh GlobalState,
                        // not a second copy of the rule.
+  bool alarm;          // the stepper driver has raised a LATCHED fault, or is
+                       // in the middle of the reset pulse that clears one -
+                       // i.e. GlobalState::alarmActive(). Both states inhibit
+                       // the machine and both keep the modal up, so they are
+                       // one flag here; the display tells them apart from
+                       // GlobalState because only it needs to.
+                       //
+                       // Read BEFORE anything else in handleKey() and tick(),
+                       // above even HALT. See the ruling on UiFocus::Alarm.
 };
 
 class UiState {

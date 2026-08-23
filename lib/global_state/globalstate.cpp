@@ -172,6 +172,24 @@ void GlobalState::setMotionMode(GlobalMotionMode mode) { m_motionMode = mode; }
 
 GlobalMotionMode GlobalState::getMotionMode() { return m_motionMode; }
 
+void GlobalState::setAlarmState(GlobalAlarmState state, bool faultPresent,
+                                bool clearFailed) {
+  m_alarmFaultPresent = faultPresent;
+  m_alarmClearFailed = clearFailed;
+  // The state word LAST. It is the one the display gates on, so writing it
+  // after the detail means a reader that sees "alarmed" is guaranteed to see
+  // detail from this sample or newer, never from before the trip.
+  m_alarmState = state;
+}
+
+bool GlobalState::getAlarmFaultPresent() { return m_alarmFaultPresent; }
+
+bool GlobalState::getAlarmClearFailed() { return m_alarmClearFailed; }
+
+GlobalAlarmState GlobalState::getAlarmState() { return m_alarmState; }
+
+bool GlobalState::alarmActive() { return m_alarmState != AS_CLEAR; }
+
 void GlobalState::setUnitMode(GlobalUnitMode mode) {
   m_unitMode = mode;
   // Restore the remembered pitch index for the newly-selected unit's slot

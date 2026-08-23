@@ -13,7 +13,7 @@ PlatformIO CLI. If `pio` isn't on `PATH`, use the venv binary: `~/.platformio/pe
 - **Host unit tests (do this for every logic change):** `pio test -e native` — googletest/gmock, default
   env. Suites live in `test/test_*/`; host stubs (a virtual-clock `Arduino.h`, empty `ESP32Encoder`) are in
   `test/stubs/`; `scripts/exclude_espspindle_native.py` keeps `TestSpindle.cpp` the only `Spindle::` def on
-  host. As of this writing the suite is 455 cases and should stay green.
+  host. As of this writing the suite is 487 cases and should stay green.
 - **Build / flash the device:** `pio run -e esp32dev_usb -t upload`. The USB serial port is set in
   `platformio.ini` (`esp32dev_usb` `upload_port`). `pio run -e esp32dev_usb` (no `-t upload`) is a
   compile-check — do this after any change to device code.
@@ -49,6 +49,42 @@ writes flash while the spindle runs must LOWER the spindle task's priority, neve
 **Keep `Leadscrew::update()` and the spindle path fast and inline.** No new virtual dispatch, heap
 allocation, locks, or non-inlinable calls in that path. A lot of code there is inline on purpose. Derived
 config values are precomputed once (`LatheConfigDerived`) specifically to keep divides out of the loop.
+
+## Stepper driver alarm (lib/alarm + src/alarm.cpp)
+
+The driver's ALM output is on **IO27** and its ENA input on **IO17**; both go through
+BSS138 level translators with pull-ups to +5V (driver side) and +3.3V (MCU side). Polarity
+follows from those pull-ups and is written up in `board.h`:
+
+- **ALM: active LOW.** Idle/disconnected/unpowered reads HIGH, so a cut wire is "no alarm"
+  rather than a fault the operator cannot clear. Do not "normalise" it to active-high.
+- **ENA: LOW = drivers enabled.** Pulsing it HIGH for ~1 s and back LOW resets a latched
+  driver fault - the same thing the panel switch SW1 does by hand. **IO17 now has exactly
+  one writer, the alarm task**; a second would fight the pulse.
+
+`AlarmMonitor` (`lib/alarm/alarmmonitor.h`) is the whole of the decision logic - pure C++,
+no Arduino headers, host-tested in `test/test_alarm`, like `lib/keyscan` and `lib/ui`. It
+debounces (25 ms), LATCHES, runs the clear pulse and judges whether it worked. `src/alarm.cpp`
+owns the pins and the task: core 0, priority 2, 5 ms poll, alongside KeyScan.
+
+- **The latch is the point.** A fault that trips and releases still stopped the motor, so the
+  carriage is no longer where the software thinks it is and the sync is worthless. The alarm
+  does not clear itself; the operator has to acknowledge it.
+- **The task HOLDS `MM_DISABLED`** for the whole alarm rather than writing it once on the
+  edge - the panel does not see the alarm until its next 100 ms pass, and that window is long
+  enough to press ENABLE. This makes the alarm task a **third writer of `m_motionMode`**
+  (with ButtonPad and the endstop arrest in `Leadscrew::update()`); it only ever writes the
+  most restrictive value, so a race cannot produce motion.
+- **The input is ignored during the clear pulse**, and for a settle period after it: the
+  driver is disabled while being reset, so its alarm output says nothing about the fault.
+- `UiFocus::Alarm` is the one focus **nothing on the panel can ask for** - it is forced from
+  both `handleKey()` and `tick()` while `ctx.alarm`, and released only when the fault goes.
+  Every key is inert except OK, **including HALT** - the single exception to "HALT is checked
+  first" in `lib/ui/uistate.cpp`, and only in the letter: the machine is already stopped and
+  held stopped, so `CancelMotion` has nothing to ask for. OK emits `UiIntent::ClearAlarm`,
+  which requests the pulse; it does NOT dismiss the dialog.
+- Nothing is restarted automatically. After a clear the machine is free to jog and re-sync,
+  but only because the operator asks - which is what the modal's sync warning is about.
 
 ## Cross-task state — `GlobalState` (lib/global_state)
 
@@ -120,6 +156,22 @@ OTA pulls from **GitHub Releases** via the stable permalink
 ## Display (lib/display)
 
 - 320×240 landscape ST7789 via LVGL. `drawMode`/`drawPitch`/etc. render from `GlobalState`.
+- **THE LVGL HEAP IS NEARLY FULL - CHECK BEFORE ADDING WIDGETS.** `LV_MEM_SIZE` is 64 KB
+  (`include/lv_conf.h`) and the built object tree runs it to ~85%, leaving ~8.8 KB
+  (measured with `lv_mem_monitor()` from the screenshot harness). An object with a few local
+  style properties - what `createRect()`/`createLabel()` make - costs on the order of 400
+  bytes, so there is room for roughly **twenty more objects on the whole screen**, not per
+  panel. Running out does not degrade, it **HANGS**: `LV_ASSERT_HANDLER` is `while(1);` and
+  `LV_USE_ASSERT_MALLOC` is on, so the first failed allocation spins forever - on the device,
+  where nothing watches the display task, and in the host renderer. The alarm modal's hazard
+  bands were 22 rectangles on the first attempt and every scene hung inside
+  `lv_timer_handler()`, including scenes that never showed that panel; they are now one
+  label of "/" glyphs per band, two objects for both. Growing `LV_MEM_SIZE` is not free
+  either - it is a static buffer, and OTA already needs a 24 KB task stack plus TLS out of
+  what is left.
+- lv_line is unusable on this build, in two ways, both found the hard way: an lv_line child
+  whose box overhangs its parent hangs the object-tree BUILD, and even wholly inside a parent,
+  DRAWING one hangs at any line width. Use rects (or glyphs) for anything linear.
 - **Colour order:** the panel is R↔B swapped and every colour is authored **pre-swapped** to compensate
   (e.g. red is `0x0000FF`). This renders correctly — it is NOT a bug. Author any new colour in the same
   swapped form, or take it from the palette. On the `ux-redesign` branch the `COLOUR_*` defines become a
@@ -161,6 +213,9 @@ screen can pass all thirty of them while being unreadable.
   cannot reach cannot be screenshotted either.
 - `render.sh <scene>` renders one; `build/elsshot.exe --list` names them all. One scene per process
   (`lv_init()` is global).
+- The four `alarm*` scenes drive the modal the only way it can arise - by publishing the alarm
+  onto `GlobalState` and letting `UiState::tick()` force the focus. There is no key that opens
+  it, on the bench or on the machine.
 - Each line of output is the proof the image is real: `colours=`, `ink=` (fraction differing from the
   modal colour) and `unpainted=`, the count of pixels still holding the pre-render sentinel. **`unpainted`
   must be 0** — anything else is a hole in the render and the script exits non-zero.

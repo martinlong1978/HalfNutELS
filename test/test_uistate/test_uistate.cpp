@@ -36,6 +36,7 @@ std::ostream& operator<<(std::ostream& os, UiFocus f) {
     case UiFocus::Menu: return os << "Focus::Menu";
     case UiFocus::Diagnostics: return os << "Focus::Diagnostics";
     case UiFocus::About: return os << "Focus::About";
+    case UiFocus::Alarm: return os << "Focus::Alarm";
   }
   return os << "Focus::<?>";
 }
@@ -61,6 +62,7 @@ std::ostream& operator<<(std::ostream& os, UiIntent i) {
     case UiIntent::ClearRightStop: return os << "ClearRightStop";
     case UiIntent::ClearBothStops: return os << "ClearBothStops";
     case UiIntent::ToggleEngage: return os << "ToggleEngage";
+    case UiIntent::ClearAlarm: return os << "ClearAlarm";
     case UiIntent::ZeroDro: return os << "ZeroDro";
     case UiIntent::DroDatumLeft: return os << "DroDatumLeft";
     case UiIntent::DroDatumRight: return os << "DroDatumRight";
@@ -70,6 +72,23 @@ std::ostream& operator<<(std::ostream& os, UiIntent i) {
     case UiIntent::CloseMenu: return os << "CloseMenu";
   }
   return os << "Intent::<?>";
+}
+
+std::ostream& operator<<(std::ostream& os, UiKey k) {
+  switch (k) {
+    case UiKey::Mode: return os << "Key::Mode";
+    case UiKey::Rate: return os << "Key::Rate";
+    case UiKey::Stops: return os << "Key::Stops";
+    case UiKey::Left: return os << "Key::Left";
+    case UiKey::Ok: return os << "Key::Ok";
+    case UiKey::Right: return os << "Key::Right";
+    case UiKey::Halt: return os << "Key::Halt";
+    case UiKey::Menu: return os << "Key::Menu";
+    case UiKey::Enable: return os << "Key::Enable";
+    case UiKey::EncoderCw: return os << "Key::EncoderCw";
+    case UiKey::EncoderCcw: return os << "Key::EncoderCcw";
+  }
+  return os << "Key::<?>";
 }
 
 std::ostream& operator<<(std::ostream& os, UiKeyEvent e) {
@@ -92,13 +111,15 @@ const int kMenuItems = UiState::kMenuItemCount;
 // it, and only for the Sync tile, so every test that is not about Sync is
 // unaffected by the default; the ones that are pass it explicitly.
 UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false,
-              bool motionActive = false, bool threadMode = false) {
+              bool motionActive = false, bool threadMode = false,
+              bool alarm = false) {
   UiContext c;
   c.leftStopSet = leftStopSet;
   c.rightStopSet = rightStopSet;
   c.motionEnabled = motionEnabled;
   c.motionActive = motionActive;
   c.threadMode = threadMode;
+  c.alarm = alarm;
   return c;
 }
 
@@ -179,6 +200,10 @@ class Rig {
       case UiFocus::DroDatum: activateTile(MENU_DRO_DATUM); break;
       case UiFocus::Diagnostics: activateTile(MENU_DIAGNOSTICS); break;
       case UiFocus::About: activateTile(MENU_ABOUT); break;
+      // NOT reachable by any gesture, by design: the stepper-alarm modal is
+      // forced by the machine, never chosen. Its tests drive it with a context
+      // instead, which is the only way it can arise on the device either.
+      case UiFocus::Alarm: break;
     }
   }
 
@@ -3849,6 +3874,240 @@ TEST(UiStateMotionLockout, AConfirmBarIsNotLeftPinnedWhenMotionStarts) {
   ASSERT_EQ(400, r.ui().stopsConfirmPermille(r.now()));
   EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, moving));
   EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+}
+
+
+// ---------------------------------------------------------------------------
+// THE STEPPER ALARM MODAL (UiFocus::Alarm)
+//
+// The driver has faulted, the alarm task has stopped the axis and is HOLDING it
+// stopped, and the panel's only remaining job is to show the modal and take the
+// acknowledgement. So: focus is forced from wherever the operator was, no other
+// key does anything at all (HALT included - the one place in this file where it
+// is not first), OK asks for the clear but does NOT dismiss, and the modal
+// comes down only when the fault itself has gone.
+//
+// Note how the alarm arrives in every test below: through the CONTEXT. There is
+// no gesture that opens it, which is the same thing on the bench as it is on the
+// machine.
+// ---------------------------------------------------------------------------
+
+// A latched fault with the machine already reported stopped - the steady state
+// of an alarm, a few tens of ms after the trip.
+const UiContext kAlarm = ctx(false, false, /*motionEnabled=*/false,
+                             /*motionActive=*/false, /*threadMode=*/false,
+                             /*alarm=*/true);
+// The same fault while the carriage is still reported as under power: the state
+// the machine is genuinely in for the first instants of a trip, before the alarm
+// task's MM_DISABLED has been read back into a context.
+const UiContext kAlarmMoving = ctx(false, false, /*motionEnabled=*/true,
+                                   /*motionActive=*/true, /*threadMode=*/false,
+                                   /*alarm=*/true);
+
+TEST(UiStateAlarm, TakesFocusOnTheTick) {
+  Rig r;
+  EXPECT_TRUE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  // Only on the transition: a modal that reported a change every 100 ms would
+  // repaint the whole screen for the duration of the fault.
+  EXPECT_FALSE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+TEST(UiStateAlarm, ClosesAnOpenWidget) {
+  Rig r;
+  r.click(UiKey::Mode);
+  ASSERT_EQ(UiFocus::Mode, r.focus());
+  EXPECT_TRUE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+// The carousel survives everything short of MENU or HALT. It does not survive
+// this.
+TEST(UiStateAlarm, ClosesTheCarousel) {
+  Rig r;
+  r.click(UiKey::Menu);
+  ASSERT_TRUE(r.ui().menuOpen());
+  EXPECT_TRUE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_FALSE(r.ui().menuOpen());
+}
+
+// Diagnostics is the one screen that survives motion. It does not survive this
+// either: the numbers on it - following error, carriage rate, sync - are all
+// derived from a step count the driver stopped honouring when it faulted.
+TEST(UiStateAlarm, ClosesEvenTheDiagnosticsScreen) {
+  Rig r;
+  r.enterFocus(UiFocus::Diagnostics);
+  ASSERT_EQ(UiFocus::Diagnostics, r.focus());
+  EXPECT_TRUE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+TEST(UiStateAlarm, AKeyEventTakesFocusToo) {
+  // Not everything waits for a tick: a key can arrive first, and it must not be
+  // judged against the focus the operator was in when the driver faulted.
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Mode, UiKeyEvent::Click, kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+TEST(UiStateAlarm, EveryKeyButOkIsInert) {
+  Rig r;
+  r.tick(kAlarm);
+  const UiKey keys[] = {UiKey::Mode,  UiKey::Rate,   UiKey::Stops,
+                        UiKey::Left,  UiKey::Right,  UiKey::Halt,
+                        UiKey::Menu,  UiKey::Enable, UiKey::EncoderCw,
+                        UiKey::EncoderCcw};
+  const UiKeyEvent evs[] = {UiKeyEvent::Press, UiKeyEvent::Click,
+                            UiKeyEvent::Hold, UiKeyEvent::Release};
+  for (UiKey k : keys) {
+    for (UiKeyEvent e : evs) {
+      EXPECT_EQ(UiIntent::None, r.key(k, e, kAlarm))
+          << k << " " << e << " acted during an alarm";
+      EXPECT_EQ(UiFocus::Alarm, r.focus());
+    }
+  }
+}
+
+// HALT gets its own test because it is the exception to this file's oldest
+// rule. It is inert here not because the alarm outranks stopping, but because
+// the machine is already stopped and HELD stopped by the alarm task - there is
+// nothing left for CancelMotion to ask for, and MM_DECELLERATE would be
+// overwritten within milliseconds anyway.
+TEST(UiStateAlarm, HaltIsInert) {
+  Rig r;
+  r.tick(kAlarmMoving);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Halt, UiKeyEvent::Press, kAlarmMoving));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Halt, UiKeyEvent::Click, kAlarmMoving));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+TEST(UiStateAlarm, OkAsksForTheClearOnTheClickOnly) {
+  Rig r;
+  r.tick(kAlarm);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Press, kAlarm));
+  EXPECT_EQ(UiIntent::ClearAlarm, r.key(UiKey::Ok, UiKeyEvent::Click, kAlarm));
+  // Release must not fire a second reset pulse off one tap.
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Release, kAlarm));
+}
+
+// The distinction the whole feature rests on: OK acknowledges, it does not
+// dismiss. While the fault is still present the context still says alarm, so
+// the modal is still up and OK still offers to try again.
+TEST(UiStateAlarm, OkDoesNotDismissTheModalWhileTheFaultRemains) {
+  Rig r;
+  r.tick(kAlarm);
+  ASSERT_EQ(UiIntent::ClearAlarm, r.key(UiKey::Ok, UiKeyEvent::Click, kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  r.tick(kAlarm);
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_EQ(UiIntent::ClearAlarm, r.key(UiKey::Ok, UiKeyEvent::Click, kAlarm));
+}
+
+TEST(UiStateAlarm, TheModalComesDownWhenTheFaultDoes) {
+  Rig r;
+  r.tick(kAlarm);
+  ASSERT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_TRUE(r.tick(kNoStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_FALSE(r.tick(kNoStops));
+}
+
+// ...and a key event can be the thing that observes the clear, exactly as it
+// can be the thing that observes the fault.
+TEST(UiStateAlarm, AKeyAfterTheFaultClearsFindsTheRestScreen) {
+  Rig r;
+  r.tick(kAlarm);
+  ASSERT_EQ(UiFocus::Alarm, r.focus());
+  // MODE from the rest screen opens the MODE widget - i.e. this key was judged
+  // against Jog, and not against a focus nothing below the gate has heard of.
+  r.click(UiKey::Mode, kNoStops);
+  EXPECT_EQ(UiFocus::Mode, r.focus());
+}
+
+// Motion is not restarted for the operator. Once the fault has cleared the
+// machine is free again - but only because they ask: the first jog after an
+// alarm is an ordinary jog, started by an ordinary arrow press.
+TEST(UiStateAlarm, JoggingIsAvailableAgainOnceItClears) {
+  Rig r;
+  r.tick(kAlarm);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Press, kAlarm));
+  r.tick(kNoStops);
+  EXPECT_EQ(UiIntent::JogLeftStart,
+            r.key(UiKey::Left, UiKeyEvent::Press, kNoStops));
+}
+
+// A fault that lands mid-jog. The arrow is still physically down when the modal
+// goes up, so its Release arrives afterwards - and must be inert, because the
+// jog it would terminate ended when the driver stopped stepping. If m_jogDir
+// survived the trip, that Release would emit JogStop against an axis the alarm
+// task is already holding at MM_DISABLED.
+TEST(UiStateAlarm, AJogInFlightWhenItTripsIsForgotten) {
+  Rig r;
+  ASSERT_EQ(UiIntent::JogRightStart,
+            r.key(UiKey::Right, UiKeyEvent::Press, kNoStops));
+  r.tick(kAlarmMoving);
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Right, UiKeyEvent::Release, kAlarmMoving));
+  // And after the clear, the stale direction is not lurking either.
+  r.tick(kNoStops);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, UiKeyEvent::Release, kNoStops));
+}
+
+// Same for a powered run to a stop: the latch must not outlive the fault, or
+// the first arrow click after the clear would cancel a run that is long over
+// instead of starting a new one.
+TEST(UiStateAlarm, APoweredRunLatchDoesNotSurviveIt) {
+  Rig r;
+  const UiContext idle = ctx(true, false);
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
+  r.tick(kAlarmMoving);
+  r.tick(idle);
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
+}
+
+// The alarm outranks the motion lockout, not the other way round. Both are true
+// for the first instants of a trip, and if the lockout were reached first it
+// would swallow the OK - leaving no way to acknowledge the fault until the
+// machine got round to reporting itself stopped.
+TEST(UiStateAlarm, OkStillWorksWhileTheContextStillReportsMotion) {
+  Rig r;
+  r.tick(kAlarmMoving);
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_EQ(UiIntent::ClearAlarm,
+            r.key(UiKey::Ok, UiKeyEvent::Click, kAlarmMoving));
+}
+
+// The whole of an alarm can happen with no key event in it: the operator watches
+// the modal appear, frees the crash and presses OK, all with an arrow still held
+// down from the jog that was running when the driver faulted. tick() therefore
+// has to retire the jog and the run latch itself - handleKey() cannot, because
+// it is never called. Without that, the eventual Release emits a JogStop for a
+// jog that ended when the driver stopped stepping.
+TEST(UiStateAlarm, AJogIsRetiredEvenIfNoKeyEventEverSeesTheAlarm) {
+  Rig r;
+  ASSERT_EQ(UiIntent::JogRightStart,
+            r.key(UiKey::Right, UiKeyEvent::Press, kNoStops));
+  r.tick(kAlarmMoving);   // trips
+  r.tick(kAlarm);         // ...and settles
+  r.tick(kNoStops);       // ...and clears, all without a key
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, UiKeyEvent::Release, kNoStops));
+}
+
+// The modal does not expire. Four seconds is the widget timeout; a fault the
+// operator has walked away from must still be on screen when they come back.
+TEST(UiStateAlarm, HasNoIdleTimeout) {
+  Rig r;
+  r.tick(kAlarm);
+  r.advance(kTimeout * 10);
+  EXPECT_FALSE(r.tick(kAlarm));
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
 }
 
 }  // namespace

@@ -180,6 +180,63 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
+  // THE STEPPER ALARM, above every other rule in this function - HALT included.
+  //
+  // The driver has faulted (lib/alarm/alarmmonitor.h). The axis is stopped and
+  // is being HELD stopped by the alarm task for as long as this flag is true,
+  // so there is no motion left for any key to influence: the panel's whole job
+  // here is to display the modal and take the acknowledgement.
+  //
+  // WHY THIS IS ABOVE HALT, when nothing else in this file is. HALT's placement
+  // is not a courtesy, it is "the stop key must never acquire a precondition" -
+  // and that reasoning is satisfied here rather than violated. CancelMotion
+  // asks for MM_DECELLERATE; the alarm has already published MM_DISABLED and
+  // re-publishes it every few milliseconds, so a HALT let through would either
+  // be overwritten immediately or, worse, briefly command a deceleration ramp
+  // on an axis whose driver is not listening. The machine is stopped harder
+  // than HALT can stop it, and it stays that way without the operator's help.
+  //
+  // The focus is FORCED rather than merely preferred, and the same bookkeeping
+  // is cleared as on the HALT path - the carousel, the confirm bar, the toggle
+  // marker, the run latch and the jog direction. A fault mid-jog is exactly the
+  // case: the arrow is still physically down, its Release will arrive after the
+  // modal is up, and with m_jogDir cleared here that Release is inert instead
+  // of emitting a JogStop for a jog that the driver ended by faulting.
+  //
+  // OK - and only OK, and only its Click - asks for the clear. Everything else
+  // returns None. Note what this does NOT do: it does not dismiss the modal.
+  // ClearAlarm starts a one-second ENA pulse, and the modal goes only when the
+  // alarm itself goes, which is the difference between acknowledging a fault
+  // and hiding it.
+  // -------------------------------------------------------------------------
+  if (ctx.alarm) {
+    m_menuOpen = false;
+    m_focus = UiFocus::Alarm;
+    m_runPhase = RunPhase::None;
+    m_jogDir = 0;
+    m_stopsConfirming = false;
+    m_stopsOpenedByPress = false;
+    if (key == UiKey::Ok && ev == UiKeyEvent::Click) {
+      return UiIntent::ClearAlarm;
+    }
+    return UiIntent::None;
+  }
+
+  // Leaving the alarm behind. ctx.alarm has just gone false with the modal
+  // still on screen, so focus has to come back to somewhere the operator can
+  // use - and Jog is the only honest destination: whatever widget was open
+  // when the driver faulted belongs to a machine state that no longer exists.
+  //
+  // Not left to tick(): tick() runs on the display's own cadence and would get
+  // there eventually, but a key event can arrive first, and it would then be
+  // judged against Alarm focus by every branch below - none of which has ever
+  // heard of it, so it would fall through to the per-focus arrow switch's
+  // default and do something arbitrary.
+  if (m_focus == UiFocus::Alarm) {
+    m_focus = UiFocus::Jog;
+  }
+
+  // -------------------------------------------------------------------------
   // HALT: checked before focus, before overlays, before anything (§5).
   // Safety-critical, so it fires on the earliest event of the gesture (Press)
   // as well as on Click and Hold. CancelMotion is idempotent, so a short press
@@ -1035,6 +1092,50 @@ int UiState::stopsConfirmPermille(unsigned long nowMs) const {
 }
 
 bool UiState::tick(const UiContext& ctx, unsigned long nowMs) {
+  // -------------------------------------------------------------------------
+  // THE STEPPER ALARM, above close-on-motion for the same reason it is above
+  // HALT in handleKey(): it overrides everything, and it is the only focus
+  // change that can happen with no key event at all AND no motion either - a
+  // driver faults on its own schedule.
+  //
+  // This is also what RELEASES the modal. Nothing acknowledges it into
+  // submission: ClearAlarm asks the driver to reset, the alarm task decides
+  // whether that worked, and this line is where the panel finds out. So the
+  // dialog can only come down because the fault is genuinely gone.
+  //
+  // No idle timeout applies in either direction - a modal that expired would
+  // let a fault go unread, and that is the whole thing it exists to prevent.
+  // -------------------------------------------------------------------------
+  if (ctx.alarm) {
+    m_stopsConfirming = false;
+    m_stopsOpenedByPress = false;
+    // The jog direction and the run latch go too, exactly as they do on
+    // handleKey()'s alarm path - and UNLIKE close-on-motion below, which
+    // deliberately leaves both alone because the jog it is closing a widget
+    // over is still running. Here it is not: the driver stopped honouring
+    // steps, so the jog and the run are over whatever the panel still believes.
+    //
+    // This branch has to do it rather than leaving it to handleKey(), because
+    // an alarm can trip AND clear with no key event at all - the operator
+    // watches it happen and does nothing but press OK. Without this, an arrow
+    // still physically held through all of that would emit a JogStop for a jog
+    // that ended when the driver faulted.
+    m_runPhase = RunPhase::None;
+    m_jogDir = 0;
+    if (m_focus == UiFocus::Alarm && !m_menuOpen) {
+      return false;  // already up: no transition, nothing to redraw
+    }
+    m_menuOpen = false;
+    m_focus = UiFocus::Alarm;
+    return true;
+  }
+  if (m_focus == UiFocus::Alarm) {
+    // The fault has cleared. Back to the rest screen - see the matching note
+    // in handleKey() for why Jog and not wherever the operator had been.
+    m_focus = UiFocus::Jog;
+    return true;
+  }
+
   // -------------------------------------------------------------------------
   // CLOSE-ON-MOTION (OWNER RULING), checked before the idle timeout because it
   // overrides it: "any open widgets, if they can survive into motion, should

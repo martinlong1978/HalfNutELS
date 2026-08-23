@@ -53,6 +53,21 @@ enum GlobalThreadSyncState { SS_UNSET, SS_SYNC, SS_UNSYNC };
  */
 enum GlobalOtaStatus { OTA_IDLE, OTA_CHECKING, OTA_NO_UPDATE, OTA_DOWNLOADING, OTA_FAILED };
 
+/**
+ * The stepper driver's alarm, published by the alarm task (src/alarm.cpp) and
+ * read by the DisplayTask - the display, to raise the modal, and ButtonPad, to
+ * put UiState into UiFocus::Alarm. The decision logic is all in
+ * lib/alarm/alarmmonitor.h; these three values are its state() mirrored onto
+ * the coordination bus so nothing outside that task touches the object itself.
+ *  AS_CLEAR    - no fault
+ *  AS_ALARM    - a fault has been LATCHED. Motion is inhibited and the modal is
+ *                up until the operator acknowledges it, whether or not the
+ *                driver is still asserting.
+ *  AS_CLEARING - the acknowledgement is in flight: ENA is being pulsed and the
+ *                drivers are off. Still inhibited; the modal stays up.
+ */
+enum GlobalAlarmState { AS_CLEAR = 0, AS_ALARM = 1, AS_CLEARING = 2 };
+
 // this is a singleton class - we don't want more than one of these existing at
 // a time!
 class GlobalState {
@@ -74,6 +89,22 @@ private:
   volatile GlobalMotionMode m_motionMode;
   volatile GlobalUnitMode m_unitMode;
   volatile GlobalThreadSyncState m_threadSyncState;
+
+  // Written by the alarm task (core 0), read by the DisplayTask. 32-bit and
+  // aligned, so the read is atomic on the ESP32, and `volatile` is doing its
+  // usual job: stopping the display from caching a stale copy across its
+  // 100 ms loop. The alarm task owns this field outright - unlike m_motionMode,
+  // which it also writes (see the note on setMotionMode below).
+  volatile GlobalAlarmState m_alarmState;
+  // Two facts the STATE word above does not carry, and that only the modal
+  // needs: whether the driver is asserting a fault right now (as opposed to
+  // having latched one that has since gone away), and whether the last reset
+  // attempt finished with it still faulted. They are what let the dialog say
+  // "clear the fault" or "press OK" or "that did not work" instead of showing
+  // one blank wall for all three. Published by the same task, in the same
+  // call, as m_alarmState.
+  volatile bool m_alarmFaultPresent;
+  volatile bool m_alarmClearFailed;
 
   // The motion-trace capture. Not a bool any more: the "is debug on" flag and
   // the buffer that flag lets the hot loop write through are one object, so
@@ -162,6 +193,9 @@ private:
         m_pitchMemory[pitchMemoryUnitIndex(m_unitMode)][pitchMemoryTypeIndex(m_feedMode)]);
     setThreadSyncState(SS_UNSYNC);
     m_motionMode = MM_DISABLED;
+    m_alarmState = AS_CLEAR;
+    m_alarmFaultPresent = false;
+    m_alarmClearFailed = false;
     m_resyncPulseCount = 0;
     // Derived, not a hardcoded 5 - the same latent bug incJogSpeed() was fixed
     // for (docs/ux-redesign.md Sec. 4). Shrinking jogSpeeds[] would otherwise
@@ -217,6 +251,17 @@ public:
   void IncFeedMode();
   GlobalFeedMode getFeedMode();
 
+  // THREE writers, and that is deliberate rather than an accident of growth:
+  //   * the DisplayTask, from ButtonPad, for everything the operator commands;
+  //   * the SpindleTask, from Leadscrew::update(), for the endstop arrest;
+  //   * the alarm task, which HOLDS this at MM_DISABLED for the whole of a
+  //     stepper alarm (src/alarm.cpp).
+  // All three only ever publish a single aligned 32-bit value, and the third
+  // only ever writes MM_DISABLED - the most restrictive value there is - so a
+  // race between it and either of the others cannot produce motion that nobody
+  // asked for. It holds the value rather than writing it once on the trip,
+  // which is what closes the window between the fault and the panel finding
+  // out about it on its next 100 ms pass.
   void setMotionMode(GlobalMotionMode mode);
   GlobalMotionMode getMotionMode();
 
@@ -225,6 +270,23 @@ public:
 
   void setThreadSyncState(GlobalThreadSyncState state);
   GlobalThreadSyncState getThreadSyncState();
+
+  // The stepper alarm, mirrored off AlarmMonitor by the alarm task. Read
+  // freely; the ONLY legitimate writer is that task (src/alarm.cpp), because
+  // the latch it describes lives in the AlarmMonitor and this is only a copy.
+  // All three published together, from the one call site in src/alarm.cpp, so
+  // the modal can never render a state word against detail from a different
+  // sample. `faultPresent` is the debounced input; `clearFailed` says the last
+  // reset attempt ended with the driver still faulted.
+  void setAlarmState(GlobalAlarmState state, bool faultPresent,
+                     bool clearFailed);
+  GlobalAlarmState getAlarmState();
+  bool getAlarmFaultPresent();
+  bool getAlarmClearFailed();
+  // "Anything but clear" - the predicate every consumer actually wants. The
+  // modal is up and motion is inhibited for AS_CLEARING as much as for
+  // AS_ALARM, since the drivers are switched off during the reset pulse.
+  bool alarmActive();
 
   bool hasOTA();
   void setOTA();

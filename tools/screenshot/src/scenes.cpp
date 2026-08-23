@@ -139,6 +139,13 @@ UiContext ctxOf(Rig& r) {
   const GlobalMotionMode m = r.gs->getMotionMode();
   c.motionEnabled = (m == MM_ENABLED);
   c.motionActive = (m != MM_DISABLED && m != MM_UNSET);
+  // Built the same way ButtonPad::buildContext() builds them on the device, off
+  // the same GlobalState. threadMode was previously left UNSET here - an
+  // uninitialised bool feeding menuTileBlock(), so the Sync tile's refusal was
+  // decided by whatever was on the stack.
+  const GlobalFeedMode fm = r.gs->getFeedMode();
+  c.threadMode = (fm == FM_THREAD || fm == FM_THREAD_REVERSE);
+  c.alarm = r.gs->alarmActive();
   return c;
 }
 
@@ -475,6 +482,61 @@ void sc_about(Rig& r) {
   key(r, UiKey::Ok, UiKeyEvent::Click);
 }
 
+
+// --- The stepper-alarm modal ------------------------------------------------
+//
+// Driven exactly as the firmware drives it and no other way: the alarm task's
+// GlobalState publication is set, and then UiState::tick() is given a context
+// built from that same GlobalState (ctxOf). There is no key that opens this
+// dialog, on the bench or on the machine, so there is none here either - which
+// is also what makes these images proof that the FORCED focus works, rather
+// than proof that a setter was called.
+//
+// Each of the four variants gets a picture, because each is a different
+// sentence to the operator and the assertions in the .cpp check box arithmetic,
+// not whether the wording fits or reads.
+void alarmState(Rig& r, GlobalAlarmState state, bool faultPresent,
+                bool clearFailed) {
+  r.gs->setAlarmState(state, faultPresent, clearFailed);
+  r.ui.tick(ctxOf(r), millis());
+}
+
+// The ordinary case: a fault has tripped mid-cut and is still present. Set up
+// with the machine engaged and threading first, so what the modal covers is a
+// screen that had live numbers on it a moment ago.
+void sc_alarm(Rig& r) {
+  baseState(r);
+  setFeedMode(r, FM_THREAD);
+  r.gs->setThreadSyncState(SS_SYNC);
+  r.gs->setMotionMode(MM_ENABLED);
+  spin(r, 320, 300);
+  // What the alarm task does on the trip, in the order it does it.
+  r.gs->setMotionMode(MM_DISABLED);
+  r.gs->setThreadSyncState(SS_UNSYNC);
+  alarmState(r, AS_ALARM, /*faultPresent=*/true, /*clearFailed=*/false);
+}
+
+// A momentary fault: the driver released its alarm output by itself, but the
+// latch holds, because the machine still stopped and the sync still died.
+void sc_alarmReleased(Rig& r) {
+  baseState(r);
+  alarmState(r, AS_ALARM, /*faultPresent=*/false, /*clearFailed=*/false);
+}
+
+// OK pressed, ENA pulse in flight. OK is refused for the second it lasts, so
+// the chip has to stop offering it.
+void sc_alarmClearing(Rig& r) {
+  baseState(r);
+  alarmState(r, AS_CLEARING, /*faultPresent=*/true, /*clearFailed=*/false);
+}
+
+// The reset did not take - the crash has not been freed. Without its own
+// wording this is indistinguishable from OK having done nothing.
+void sc_alarmFailed(Rig& r) {
+  baseState(r);
+  alarmState(r, AS_ALARM, /*faultPresent=*/true, /*clearFailed=*/true);
+}
+
 void sc_otaDownloading(Rig& r) {
   baseState(r);
   r.gs->setOTA();
@@ -536,11 +598,20 @@ const SceneDef kScenes[] = {
   { "diagnostics-error",      sc_diagnosticsError,    THEME_DARK,  false, 0 },
   { "diagnostics-manual",     sc_diagnosticsManualAnchor, THEME_DARK, false, 0 },
   { "about",                  sc_about,               THEME_DARK,  false, 0 },
+  // The stepper-alarm modal, one image per variant.
+  { "alarm",                  sc_alarm,               THEME_DARK,  false, 0 },
+  { "alarm-released",         sc_alarmReleased,       THEME_DARK,  false, 0 },
+  { "alarm-clearing",         sc_alarmClearing,       THEME_DARK,  false, 0 },
+  { "alarm-failed",           sc_alarmFailed,         THEME_DARK,  false, 0 },
   // Light palette. Same two states as their dark counterparts above, so the
   // pair is directly comparable.
   { "light-rest-metric-feed", sc_restMetricFeed,      THEME_LIGHT, false, 0 },
   { "light-overlay-mode",     sc_overlayMode,         THEME_LIGHT, false, 0 },
   { "light-menu-sync-blocked",sc_menuSyncBlocked,     THEME_LIGHT, false, 0 },
+  // The modal is red-on-red furniture over a hazard fill, and the light
+  // palette's ground is white: worth its own look rather than assuming the
+  // dark one transfers.
+  { "light-alarm",            sc_alarm,               THEME_LIGHT, false, 0 },
   // OTA screen (a separate screen, not the dashboard).
   { "ota-downloading",        sc_otaDownloading,      THEME_DARK,  false, 0 },
   { "ota-checking",           sc_otaChecking,         THEME_DARK,  false, 0 },

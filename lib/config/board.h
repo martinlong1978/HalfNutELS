@@ -30,7 +30,36 @@
 #define ELS_LEADSCREW_DIR 26
 #define ELS_LEADSCREW_DIR_BIT BIT26
 
+// --- Stepper driver enable / alarm -------------------------------------------
+//
+// Two lines to the driver, both through BSS138 level translators on the board
+// (Q2 for ENA, Q5 for ALM; kicad/LVGL/TeensyELS.kicad_sch). Each has a 10K
+// pull-up to +5V on the DRIVER side and a 10K pull-up to +3.3V on the MCU side,
+// which is what fixes both polarities below - a floating or unpowered driver
+// reads HIGH at the MCU, and HIGH must therefore mean "nothing wrong".
+//
+// ENA (IO17), OUTPUT:
+//   LOW  = drivers enabled. This is the resting state, and what setup() writes.
+//   HIGH = drivers disabled. Pulsing HIGH and back LOW is what clears a latched
+//          driver fault - exactly what the panel switch SW1 does by hand (it
+//          shorts the driver side of Q2 to +5V), which is why the software
+//          clear is a timed pulse of the same line and not a mode. The pulse
+//          length is AlarmMonitor::kEnaPulseMs (lib/alarm/alarmmonitor.h).
 #define ELS_STEPPER_ENA 17
+
+// ALM (IO27), INPUT:
+//   HIGH = no alarm (both pull-ups, or the driver asserting "healthy").
+//   LOW  = ALARM. The driver's alarm output is open-collector and pulls the
+//          line down, so the ASSERTED state is the one that cannot happen by
+//          accident on a broken or disconnected loom: a cut wire reads HIGH,
+//          i.e. no alarm, rather than latching a fault the operator has no way
+//          to clear. That is why the sense is this way round; do not
+//          "normalise" it to active-high without rewiring the board.
+//
+// No internal pull is configured for this pin - the external 10K to +3.3V is
+// the pull, and the ESP32's own ~45K would only fight it. Plain INPUT.
+#define ELS_STEPPER_ALARM 27
+#define ELS_STEPPER_ALARM_ACTIVE_LEVEL 0
 
 // ---------------------------------------------------------------------------
 // Keypad matrix codes (Mk2 layout, docs/ux-redesign.md Sec. 2)

@@ -584,6 +584,118 @@ static const int DIAG_ANCHOR_VALUE_W = 60;
 static const int DIAG_HINT_X = 170;        // right-aligned box 170..310, row 1
 static const int DIAG_HINT_W = 140;
 
+// --- The stepper-alarm modal (UiFocus::Alarm) --------------------------------
+//
+// The stepper driver has raised a latched fault (lib/alarm/alarmmonitor.h).
+// Motion is stopped and being HELD stopped, and this dialog is the only thing
+// the panel will answer until the operator acknowledges it.
+//
+// A DIALOG, not a full screen, and that is the whole visual argument: it is
+// inset by 6 px so a rim of the live dashboard shows all the way round it,
+// which is what makes it read as something that has landed ON TOP of the
+// machine rather than as another mode the machine has entered. Hazard stripes
+// top and bottom, a 3 px colourFault border, and nothing else on it that could
+// be mistaken for a control.
+//
+//     0 +==========================================+  6px rim of dashboard
+//       | //////////////////////////////////////// |  hazard band (16)
+//       |                                          |
+//       |               DRIVE ALARM                |  title      (36)
+//       |        FAULT PRESENT AT THE DRIVE        |  status     (14, varies)
+//       |                                          |
+//       |        All motion has been halted.       |  body       (14)
+//       |       Clear the fault at the machine.    |  body       (14, varies)
+//       |     [ SYNC IS LOST - RE-SYNC TO THREAD ] |  caution chip
+//       |            [ OK  reset drive ]           |  accent chip (the action)
+//       | //////////////////////////////////////// |  hazard band (16)
+//   240 +==========================================+
+//
+// "DRIVE ALARM" and not "STEPPER ALARM" for a measurable reason: at Montserrat
+// 36 the latter is 312 px of ink and the panel's content area is 302, so it
+// cannot be centred at all, let alone with a margin. 36 is kept over dropping
+// to 26 because this is the one screen that has to be readable from wherever
+// the operator was standing when the machine stopped.
+//
+// The OK chip is ACCENT, not colourFault. Everything red on this dialog is the
+// alarm; the one thing that is not part of the alarm is the control that
+// answers it, and painting it in the same red as the border and the stripes
+// would bury it in them. Accent is the palette's "the arrows drive THIS"
+// colour and it is doing exactly that job here.
+static const int ALARM_X = 6;
+static const int ALARM_Y = 6;
+static const int ALARM_W = 308;
+static const int ALARM_H = 228;
+static const int ALARM_BORDER = 3;
+static const int ALARM_CONTENT_W = ALARM_W - (2 * ALARM_BORDER);  // 302
+static const int ALARM_CONTENT_H = ALARM_H - (2 * ALARM_BORDER);  // 222
+
+// The hazard bands. Stripes rather than a plain red bar because a bar is a
+// colour and stripes are a SIGN - the same one that is on the machine's own
+// guarding - and because a solid red block that wide competes with the title
+// for the eye.
+//
+// EACH BAND IS ONE LABEL. Not a row of rectangles, and not lv_line diagonals:
+// a Montserrat "/" IS a diagonal stroke, so a line of them on a colourFault
+// ground is hazard tape for the cost of a single object. That matters more than
+// it sounds, and the reason is the paragraph below.
+//
+// *** THE LVGL HEAP IS NEARLY FULL - READ THIS BEFORE ADDING ANY WIDGET ***
+//
+// LV_MEM_SIZE is 64 KB (include/lv_conf.h) and the dashboard, the overlay, the
+// carousel, Diagnostics, About and this dialog between them run it to 84% with
+// about 9 KB free (measured with lv_mem_monitor() from the screenshot harness).
+// An LVGL object with a handful of local style properties - which is what
+// createRect() makes - costs on the order of 400 bytes, so the pool has room
+// for roughly twenty more objects on the whole screen. Not per panel. Twenty.
+//
+// Running out does not degrade, it HANGS: LV_ASSERT_HANDLER is `while(1);`
+// (lv_conf.h line 467) and LV_USE_ASSERT_MALLOC is on, so the first failed
+// allocation spins forever - on the device, with no watchdog watching the
+// display task, and on the host renderer, which is how this was found. The
+// first attempt at these bands was 22 rectangles, eleven per band. It rendered
+// nothing at all: every scene sat inside lv_timer_handler() until it was
+// killed, including scenes that never show this panel, because the allocation
+// that failed was the one the draw pass needed after the tree had eaten the
+// pool.
+//
+// So: two objects for both bands, and if a future screen needs more than a
+// handful of new widgets, the pool has to grow first - and that is not free
+// either, since LV_MEM_SIZE is a static buffer and the OTA path already needs
+// its own 24 KB task stack plus TLS out of what is left.
+static const int ALARM_BAND_H = FONT14_H;  // one Montserrat 14 line
+static const int ALARM_BAND_TOP_Y = 0;
+static const int ALARM_BAND_BOTTOM_Y = ALARM_CONTENT_H - ALARM_BAND_H;  // 206
+// 33 slashes, space-separated: 33 x 5 + 32 x 4 = 293 px of ink in the 302 px
+// band. Spaced rather than solid so the stripes read as stripes and not as
+// cross-hatching, and it is a compile-time literal so nothing has to build it.
+#define ALARM_STRIPE_ROW \
+  "/ / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /"
+static const int TEXT14_ALARM_STRIPE_ROW_W = 293;
+
+static const int ALARM_TITLE_Y = 24;    // 36 -> 24..64
+static const int ALARM_STATUS_Y = 70;   // 14 -> 70..86
+static const int ALARM_BODY1_Y = 100;   // 14 -> 100..116
+static const int ALARM_BODY2_Y = 118;   // 14 -> 118..134
+// The two chips. Both are full-content-width label boxes with centred text and
+// their own padding, so the fill grows with the ink and stays centred without
+// anything here having to know how wide the ink is.
+static const int ALARM_CHIP_PAD_H = 10;
+static const int ALARM_CHIP_PAD_V = 5;
+static const int ALARM_SYNC_CHIP_Y = 148;  // 14 ink -> 148..164, chip 143..169
+static const int ALARM_OK_CHIP_Y = 182;    // 14 ink -> 182..198, chip 177..203
+
+// Measured ink, same summed-adv_w basis as every other TEXT*_W in this file.
+static const int TEXT36_ALARM_TITLE_W = 260;   // "DRIVE ALARM"
+static const int TEXT14_ALARM_STATUS_W = 230;  // "RESET FAILED - FAULT REMAINS",
+                                               // the longest of the four
+static const int TEXT14_ALARM_BODY_W = 243;    // "Free the machine, then try
+                                               // again." - the longest of the
+                                               // five body strings (one fixed,
+                                               // four per-variant)
+static const int TEXT14_ALARM_SYNC_W = 261;    // "SYNC IS LOST - RE-SYNC TO
+                                               // THREAD"
+static const int TEXT14_ALARM_OK_W = 108;      // "OK  reset drive"
+
 // --- About screen ------------------------------------------------------------
 //
 // Quiet and plain (docs/ux-redesign.md section 6: "Firmware version, IP,
@@ -1090,6 +1202,58 @@ static_assert(WIFI_LABEL_X + TEXT36_CONN_TITLE_W <= SCREEN_W, "\"Connected!\" of
 static_assert(WIFI_LABEL_X + TEXT14_CONN_MSG_W <= SCREEN_W, "connected message off the right edge");
 static_assert(WIFI_LABEL_X + TEXT26_CONN_IP_W <= SCREEN_W, "connected IP off the right edge");
 
+
+// --- Stepper-alarm modal assertions ------------------------------------------
+// The dialog is the one screen an operator reads under stress, so both axes are
+// checked: that every row is inside the panel and clear of the two hazard
+// bands, and - because every string on it is centred and auto-width, like the
+// splash and the OTA line - that the widest ink in each row actually leaves a
+// margin. The OTA regression (306 px of ink in 320) is the reason the second
+// half of that exists at all.
+static_assert(ALARM_X + ALARM_W <= SCREEN_W, "alarm modal off the right edge");
+static_assert(ALARM_Y + ALARM_H <= SCREEN_H, "alarm modal off the bottom");
+static_assert(ALARM_X > 0 && ALARM_Y > 0,
+              "alarm modal is full-bleed - the rim of dashboard around it is "
+              "what makes it read as a dialog");
+static_assert(ALARM_BAND_TOP_Y + ALARM_BAND_H <= ALARM_TITLE_Y,
+              "title runs into the top hazard band");
+static_assert(ALARM_TITLE_Y + FONT36_H <= ALARM_STATUS_Y,
+              "title overlaps the status line");
+static_assert(ALARM_STATUS_Y + FONT14_H <= ALARM_BODY1_Y,
+              "status line overlaps the body");
+static_assert(ALARM_BODY1_Y + FONT14_H <= ALARM_BODY2_Y,
+              "body lines overlap");
+static_assert(ALARM_BODY2_Y + FONT14_H <= ALARM_SYNC_CHIP_Y - ALARM_CHIP_PAD_V,
+              "body runs into the sync chip");
+static_assert(ALARM_SYNC_CHIP_Y + FONT14_H + ALARM_CHIP_PAD_V <=
+                ALARM_OK_CHIP_Y - ALARM_CHIP_PAD_V,
+              "sync chip runs into the OK chip");
+static_assert(ALARM_OK_CHIP_Y + FONT14_H + ALARM_CHIP_PAD_V <=
+                ALARM_BAND_BOTTOM_Y,
+              "OK chip runs into the bottom hazard band");
+static_assert(ALARM_BAND_BOTTOM_Y + ALARM_BAND_H <= ALARM_CONTENT_H,
+              "bottom hazard band off the panel");
+// Ink margins. 20 px a side for the free-standing centred text, the same bar
+// the OTA status line is now held to; the two chips are boxes with their own
+// padding, so they only have to FIT.
+static_assert(TEXT36_ALARM_TITLE_W <= ALARM_CONTENT_W - (2 * 20),
+              "alarm title leaves no side margin");
+static_assert(TEXT14_ALARM_STATUS_W <= ALARM_CONTENT_W - (2 * 20),
+              "longest alarm status line leaves no side margin");
+static_assert(TEXT14_ALARM_BODY_W <= ALARM_CONTENT_W - (2 * 20),
+              "alarm body line leaves no side margin");
+static_assert(TEXT14_ALARM_SYNC_W + (2 * ALARM_CHIP_PAD_H) <= ALARM_CONTENT_W,
+              "sync-lost chip wider than the panel");
+static_assert(TEXT14_ALARM_OK_W + (2 * ALARM_CHIP_PAD_H) <= ALARM_CONTENT_W,
+              "OK chip wider than the panel");
+// The stripe row must fit the band it fills: wider and the end slashes clip to
+// stubs, much narrower and the band ends in a bare red gap. Both look like a
+// rendering fault rather than like tape.
+static_assert(TEXT14_ALARM_STRIPE_ROW_W <= ALARM_CONTENT_W,
+              "hazard stripe row is wider than its band");
+static_assert(TEXT14_ALARM_STRIPE_ROW_W >= ALARM_CONTENT_W - 20,
+              "hazard stripe row leaves a bare gap at the ends of its band");
+
 // --- OTA screen assertion ------------------------------------------------------
 // The status label is centred and auto-width, so a margin of at least 20 px a
 // side is a claim about the widest STRING, not about any box constant -- which
@@ -1106,6 +1270,67 @@ static const int RADIUS_TRACK = 4;
 
 static uint32_t my_tick(void) {
   return millis();
+}
+
+
+// --- The alarm modal's four states -------------------------------------------
+//
+// One enum, because the status line, the OK chip's words and the OK chip's FILL
+// all move together and must never be picked from three separate tests. It is
+// the same bargain the overlay hint row makes (OverlayHint above): every string
+// here is a compile-time literal, so drawAlarm() caches the VARIANT and pushes
+// the literals only when it changes.
+//
+// The four are genuinely different situations and the operator needs to be able
+// to tell them apart:
+//   AV_FAULT     the driver is faulted right now. There is something to fix.
+//   AV_RELEASED  the fault has gone by itself, but the alarm is still LATCHED -
+//                because the machine still stopped, and the sync still died.
+//                This is the state a momentary fault leaves behind, and without
+//                its own wording the dialog would be telling the operator to
+//                clear something that is not there any more.
+//   AV_FAILED    OK was pressed and the reset did not take. Saying so is the
+//                whole point: otherwise OK looks broken rather than refused.
+//   AV_CLEARING  the ENA pulse is in flight (a second, AlarmMonitor::
+//                kEnaPulseMs). OK is IGNORED during it - AlarmMonitor drops a
+//                request that arrives mid-pulse - so the chip must stop
+//                offering it, or the dialog spends that second lying.
+enum AlarmVariant { AV_FAULT, AV_RELEASED, AV_FAILED, AV_CLEARING };
+
+static const char* alarmStatusText(AlarmVariant v) {
+  switch (v) {
+    case AV_RELEASED: return "FAULT CLEARED - PRESS OK";
+    case AV_FAILED: return "RESET FAILED - FAULT REMAINS";
+    case AV_CLEARING: return "RESETTING DRIVE";
+    case AV_FAULT:
+    default: return "FAULT PRESENT AT THE DRIVE";
+  }
+}
+
+// The second body line: WHAT TO DO, which is the one sentence on this dialog
+// that is different in each of the four states. It used to be static furniture
+// reading "Clear the fault at the machine." in all of them, which is wrong in
+// three: it contradicts "FAULT CLEARED" outright, it is unhelpful mid-reset,
+// and after a failed attempt it repeats the instruction the operator has just
+// followed instead of saying it did not take.
+static const char* alarmBodyText(AlarmVariant v) {
+  switch (v) {
+    case AV_RELEASED: return "Press OK to re-enable the drive.";
+    case AV_FAILED: return "Free the machine, then try again.";
+    case AV_CLEARING: return "Holding the drive in reset.";
+    case AV_FAULT:
+    default: return "Clear the fault at the machine.";
+  }
+}
+
+static const char* alarmOkText(AlarmVariant v) {
+  switch (v) {
+    case AV_FAILED: return "OK  try again";
+    case AV_CLEARING: return "PLEASE WAIT";
+    case AV_FAULT:
+    case AV_RELEASED:
+    default: return "OK  reset drive";
+  }
 }
 
 // --- Small object-construction helpers ---------------------------------------
@@ -1583,6 +1808,10 @@ void Display::resetObjectTree() {
   aboutPanel = nullptr;
   aboutIpValue = nullptr;
   aboutUptimeValue = nullptr;
+  alarmPanel = nullptr;
+  alarmStatus = nullptr;
+  alarmBody = nullptr;
+  alarmOkChip = nullptr;
   updateSlider = nullptr;
   updateLabel = nullptr;
 
@@ -1632,6 +1861,10 @@ void Display::resetObjectTree() {
   m_lastDiagErrPegged = false;  // init() builds the marker textPrimary
   m_lastDiagSyncState = -1;
   m_lastAboutConnected = -1;
+  // -1, not AV_FAULT: the first drawAlarm() after a rebuild must push both
+  // strings AND the chip fill, since init() builds the chip with no text and
+  // the freshly-built panel has never been painted for any variant.
+  m_lastAlarmVariant = -1;
   // NOTE m_palette and m_droDatum are deliberately NOT reset here. Both are
   // RUNTIME settings owned by setTheme()/setDroDatum(), and init() calls this
   // on every rebuild -- including the rebuild setTheme() itself requests, which
@@ -2486,6 +2719,79 @@ void Display::init() {
                                  m_palette->textPrimary, ABOUT_UP_X,
                                  ABOUT_ROW2_VALUE_Y);
   fixLabelBox(aboutUptimeValue, ABOUT_UP_W, LV_TEXT_ALIGN_LEFT);
+
+  // --- The stepper-alarm modal (UiFocus::Alarm) -----------------------------
+  // Built LAST of everything on this screen, so it is last in the sibling
+  // z-order and therefore above the overlay AND both read-only screens: an
+  // alarm has to be able to cover whatever the operator happened to be looking
+  // at when the driver faulted.
+  //
+  // Everything except the status line and the OK chip is furniture - locals,
+  // set once, never touched again - because none of it varies. The dialog says
+  // the same thing about the machine every time; only what to do next changes.
+  alarmPanel = createRect(lv_screen_active(), ALARM_X, ALARM_Y, ALARM_W,
+                          ALARM_H, m_palette->surface, RADIUS_TRACK);
+  lv_obj_add_flag(alarmPanel, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_border_width(alarmPanel, ALARM_BORDER, 0);
+  lv_obj_set_style_border_color(alarmPanel, m_palette->colourFault, 0);
+  {
+    // The two hazard bands. One label each, carrying its own colourFault
+    // background with the slashes punched out of it in chipInk - the same
+    // dark-ink-on-a-vivid-fill pairing every chip on this screen uses, and for
+    // the same contrast reason. See ALARM_BAND_H for why this is a label and
+    // not the row of rectangles it looks like.
+    const int bandY[2] = { ALARM_BAND_TOP_Y, ALARM_BAND_BOTTOM_Y };
+    for (int b = 0; b < 2; b++) {
+      lv_obj_t* band = createLabel(alarmPanel, &lv_font_montserrat_14,
+                                   m_palette->chipInk, 0, bandY[b]);
+      fixLabelBox(band, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+      lv_obj_set_style_bg_color(band, m_palette->colourFault, 0);
+      lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
+      lv_label_set_text(band, ALARM_STRIPE_ROW);
+    }
+
+    lv_obj_t* title = createLabel(alarmPanel, &lv_font_montserrat_36,
+                                  m_palette->textPrimary, 0, ALARM_TITLE_Y);
+    fixLabelBox(title, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(title, "DRIVE ALARM");
+
+    lv_obj_t* body1 = createLabel(alarmPanel, &lv_font_montserrat_14,
+                                  m_palette->textPrimary, 0, ALARM_BODY1_Y);
+    fixLabelBox(body1, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+    lv_label_set_text(body1, "All motion has been halted.");
+
+    // The sync warning, as a colourCaution CHIP rather than caution-coloured
+    // text. Same reasoning as the blocked-hint chip in the overlay: caution ink
+    // on the light palette's surface is 1.5:1, while chipInk on the caution
+    // fill is ~10:1 in both. It also has to survive being read at a glance by
+    // someone who is looking at a crashed carriage, not at the screen.
+    lv_obj_t* sync = createLabel(alarmPanel, &lv_font_montserrat_14,
+                                 m_palette->chipInk, 0, ALARM_SYNC_CHIP_Y);
+    fixLabelBox(sync, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+    lv_obj_set_style_pad_ver(sync, ALARM_CHIP_PAD_V, 0);
+    lv_obj_set_style_radius(sync, RADIUS_TRACK, 0);
+    lv_obj_set_style_bg_color(sync, m_palette->colourCaution, 0);
+    lv_obj_set_style_bg_opa(sync, LV_OPA_COVER, 0);
+    lv_label_set_text(sync, "SYNC IS LOST - RE-SYNC TO THREAD");
+  }
+  // The status line, the second body line and the OK chip: the only things on
+  // the dialog that depend on anything. All three are pushed by drawAlarm() off
+  // the one variant cache.
+  alarmStatus = createLabel(alarmPanel, &lv_font_montserrat_14,
+                            m_palette->textDim, 0, ALARM_STATUS_Y);
+  fixLabelBox(alarmStatus, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+  alarmBody = createLabel(alarmPanel, &lv_font_montserrat_14,
+                          m_palette->textPrimary, 0, ALARM_BODY2_Y);
+  fixLabelBox(alarmBody, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+  alarmOkChip = createLabel(alarmPanel, &lv_font_montserrat_14,
+                            m_palette->chipInk, 0, ALARM_OK_CHIP_Y);
+  fixLabelBox(alarmOkChip, ALARM_CONTENT_W, LV_TEXT_ALIGN_CENTER);
+  lv_obj_set_style_pad_ver(alarmOkChip, ALARM_CHIP_PAD_V, 0);
+  lv_obj_set_style_radius(alarmOkChip, RADIUS_TRACK, 0);
+  lv_obj_set_style_bg_opa(alarmOkChip, LV_OPA_COVER, 0);
+  // Fill colour is set per variant by drawAlarm(); accent for a live OK,
+  // colourDisabled while the reset pulse is in flight and OK does nothing.
+  lv_obj_set_style_bg_color(alarmOkChip, m_palette->accent, 0);
 }
 
 void showWifi(const char* ssid, const char* password, IPAddress ip) {
@@ -3044,6 +3350,13 @@ void Display::drawOverlay() {
   case UiFocus::About:
     screen = aboutPanel;
     break;
+  case UiFocus::Alarm:
+    // The stepper-alarm modal. A full panel like the two above rather than an
+    // overlay group, because it has to cover the status bar and the state bar
+    // as well - every number on them describes a machine that has stopped
+    // being described by them.
+    screen = alarmPanel;
+    break;
   case UiFocus::Jog:
   default:
     break;
@@ -3061,6 +3374,7 @@ void Display::drawOverlay() {
     lv_obj_add_flag(overlayDatumGroup, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(diagPanel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(aboutPanel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(alarmPanel, LV_OBJ_FLAG_HIDDEN);
     if (group != nullptr) {
       lv_label_set_text(overlayTitle, title);
       lv_obj_remove_flag(group, LV_OBJ_FLAG_HIDDEN);
@@ -3081,6 +3395,10 @@ void Display::drawOverlay() {
   }
   if (screen == aboutPanel && screen != nullptr) {
     drawAbout();
+    return;
+  }
+  if (screen == alarmPanel && screen != nullptr) {
+    drawAlarm();
     return;
   }
 
@@ -3366,6 +3684,66 @@ void Display::drawAbout() {
 // At the ends of the list the outer label is simply blank (formatPitch() writes
 // an empty string for an out-of-range index) rather than wrapping, because the
 // underlying next/prevFeedPitch() saturate rather than wrapping too.
+
+// The stepper-alarm modal (UiFocus::Alarm). Two objects to push and one cache
+// to gate them, because the four states this dialog can be in are named by a
+// single enum (AlarmVariant) rather than by three independent tests.
+//
+// The state is read from GlobalState and not from the AlarmMonitor: the monitor
+// lives in the alarm task in src/, which lib/display cannot reach and should
+// not - GlobalState is the coordination bus between the two cores, exactly as
+// it is for OTA progress. All three values are published in one call
+// (setAlarmState), so what is rendered here is always one consistent sample.
+void Display::drawAlarm() {
+  if (alarmStatus == nullptr) {
+    return;
+  }
+  const GlobalAlarmState state = m_globalState->getAlarmState();
+  AlarmVariant variant;
+  if (state == AS_CLEARING) {
+    variant = AV_CLEARING;
+  } else if (m_globalState->getAlarmClearFailed()) {
+    // Checked BEFORE the fault-present test, though the two normally agree: a
+    // failed reset is the more specific thing to say, and it is the one the
+    // operator needs, because it means the last press did not work rather than
+    // that they have not pressed yet.
+    variant = AV_FAILED;
+  } else if (!m_globalState->getAlarmFaultPresent()) {
+    variant = AV_RELEASED;
+  } else {
+    variant = AV_FAULT;
+  }
+
+  if ((int)variant == m_lastAlarmVariant) {
+    return;
+  }
+  m_lastAlarmVariant = (int)variant;
+
+  lv_label_set_text(alarmStatus, alarmStatusText(variant));
+  // The status line is the one place on this dialog that carries the machine's
+  // opinion, so it takes a colour: caution while there is still a fault to
+  // clear or a reset that did not take, textDim once the fault has gone and
+  // the dialog is only waiting to be acknowledged. Text and not a chip, unlike
+  // the sync warning: it sits directly under a 36 px title on the panel's own
+  // surface, where a second filled block would read as a button.
+  lv_obj_set_style_text_color(alarmStatus,
+                              (variant == AV_RELEASED) ? m_palette->textDim
+                                                       : m_palette->colourCaution,
+                              0);
+
+  lv_label_set_text(alarmBody, alarmBodyText(variant));
+
+  lv_label_set_text(alarmOkChip, alarmOkText(variant));
+  // Greyed out for the second the reset pulse takes, because OK genuinely does
+  // nothing during it - AlarmMonitor drops a clear request that arrives while
+  // one is already in flight, rather than queueing a second reset to fire later
+  // with no dialog on screen to account for it.
+  lv_obj_set_style_bg_color(alarmOkChip,
+                            (variant == AV_CLEARING) ? m_palette->colourDisabled
+                                                     : m_palette->accent,
+                            0);
+}
+
 void Display::drawOverlayTicker(bool jogSpeed) {
   int index = 0;
   const PitchTable table = tickerTable(m_globalState, jogSpeed, index);

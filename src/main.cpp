@@ -11,6 +11,7 @@
 #include "ESPCommsManager.h"
 #include <WiFi.h>
 
+#include "alarm.h"
 #include "buttonpad.h"
 #include "config.h"
 #include "DebugSink.h"
@@ -285,8 +286,14 @@ void setup() {
 #endif
 #endif
 
-    pinMode(ELS_STEPPER_ENA, OUTPUT);
-    digitalWrite(ELS_STEPPER_ENA, 0);
+    // The stepper driver's ENABLE and ALARM lines, and the task that owns them
+    // (src/alarm.cpp). This is where the bare pinMode/digitalWrite of
+    // ELS_STEPPER_ENA used to be: that pin now has exactly one writer, because
+    // a second one would fight the reset pulse that clears a driver fault.
+    //
+    // Started here, well above the SpindleTask creation at the end of setup(),
+    // like everything else that must actually run (see the note down there).
+    alarmInit();
 
     // The discrete-button #else branch that used to sit here has been deleted.
     // It configured nine GPIOs from ELS_*_BUTTON names that no longer exist,

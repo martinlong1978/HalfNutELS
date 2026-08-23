@@ -239,6 +239,24 @@ private:
   lv_obj_t* aboutIpValue;
   lv_obj_t* aboutUptimeValue;
 
+  // --- The stepper-alarm modal (UiFocus::Alarm) -----------------------------
+  // A near-full-screen dialog on hazard stripes, raised whenever the stepper
+  // driver has a latched fault (lib/alarm/alarmmonitor.h). Like Diagnostics and
+  // About it is a panel of its own rather than an overlay group, and it is
+  // built LAST so it sits above every one of them - an alarm must be able to
+  // cover whatever happened to be on screen when the driver faulted.
+  //
+  // Three objects change: the status line (which of the four things has
+  // happened), the second body line (what to do about it) and the OK chip (what
+  // OK will do, or that it is busy). Everything else - title, the first body
+  // line, the sync-lost chip, the two hazard bands - is static furniture set
+  // once in init(), because none of it depends on anything. Both are driven off the variant cache below, not per-tick text
+  // comparisons, exactly like the overlay hint row.
+  lv_obj_t* alarmPanel;
+  lv_obj_t* alarmStatus;
+  lv_obj_t* alarmBody;
+  lv_obj_t* alarmOkChip;
+
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
   lv_obj_t* updateLabel;
@@ -344,6 +362,10 @@ private:
   int m_lastDiagErrX;
   bool m_lastDiagErrPegged;
   int m_lastDiagSyncState;
+  // The alarm modal: the last AlarmVariant rendered (-1 = nothing yet). One
+  // int gates both mutable objects, since a variant names the status string,
+  // the chip string AND the chip fill together - see drawAlarm().
+  int m_lastAlarmVariant;
   // About: -1 = never drawn, else 0/1 connected state driving the IP colour.
   int m_lastAboutConnected;
 
@@ -422,6 +444,9 @@ protected:
   // (diagPanel / aboutPanel), not on overlayPanel.
   void drawDiagnostics();
   void drawAbout();
+  // The stepper-alarm modal. Routed through drawOverlay()'s focus switch like
+  // the two read-only screens, and on its own full panel like them.
+  void drawAlarm();
   // Takes the two machine facts rather than a per-tile verdict: the carousel
   // shows THREE tiles and has to state the availability of each, and running
   // them all through the one menuTileBlock() is what keeps the card, the two
