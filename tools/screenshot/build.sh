@@ -48,7 +48,8 @@ DEFS="-DPIO_UNIT_TESTING=1 -DLV_CONF_INCLUDE_SIMPLE -DTFT_WIDTH=240 -DTFT_HEIGHT
 INCS="-I$HERE/shim -I$ROOT/test/stubs -I$ROOT/test/test_leadscrew \
  -I$ROOT/include -I$LVGL \
  -I$ROOT/lib/config -I$ROOT/lib/axis -I$ROOT/lib/spindle -I$ROOT/lib/leadscrew \
- -I$ROOT/lib/global_state -I$ROOT/lib/ui -I$ROOT/lib/dro -I$ROOT/lib/display"
+ -I$ROOT/lib/global_state -I$ROOT/lib/ui -I$ROOT/lib/dro -I$ROOT/lib/display \
+ -I$ROOT/lib/ota"
 
 CFLAGS="-O1 -w $DEFS $INCS"
 CXXFLAGS="-O1 -w -std=gnu++17 $DEFS $INCS"
@@ -75,6 +76,10 @@ PROJ_SRCS=(
   "$ROOT/lib/leadscrew/leadscrew.cpp"
   "$ROOT/lib/ui/uistate.cpp"
   "$ROOT/lib/dro/dro.cpp"
+  # The OTA screen's wording is rendered by OtaOutcome, and the ota-* scenes
+  # drive a real one rather than copying its strings (see scenes.cpp). Pure
+  # C++, no ESP headers, exactly like lib/ui and lib/dro.
+  "$ROOT/lib/ota/otaoutcome.cpp"
   "$ROOT/lib/display/ST7789_320_240displaylvgl.cpp"
   "$HERE/shim/lv_tft_espi_host.cpp"
   "$HERE/src/framebuffer.cpp"

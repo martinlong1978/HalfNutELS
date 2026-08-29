@@ -863,6 +863,11 @@ static const int TEXT26_WIFI_VALUE_W = 137;  // worst realistic credential/IP
 // left of the screen after the ink, so the widest string drawOTA() can push is
 // the bound. "No update available" is 267; "Checking updates..." is 262 (its
 // previous form, "Checking for updates...", was 306 -- flush to both edges).
+//
+// This is no longer only documentation: the wording now comes from OtaOutcome
+// (lib/ota), which renders detail lines of up to 47 characters, and drawOTA()
+// MEASURES each one against this number at runtime to decide whether it can
+// show the detail or must fall back to the headline. See otaFittedLine().
 static const int TEXT26_OTA_STATUS_W = 267;
 static const int TEXT36_CONN_TITLE_W = 214;  // "Connected!"
 static const int TEXT14_CONN_MSG_W = 256;    // "A device joined the setup
@@ -2838,39 +2843,86 @@ void Display::update() {
   writeLed();
 }
 
+// Choose which of the OtaOutcome's two strings goes into the ONE label the OTA
+// screen has.
+//
+// The outcome renders a HEADLINE ("UPDATE FAILED") and a DETAIL naming the
+// operator's next move ("No Wi-Fi - check network settings"). The detail is the
+// half that carries the information; the headline is the half that always fits.
+// Two labels would show both, and the OTA screen -- unlike the dashboard -- has
+// the LVGL heap for one, because initialiseOta() builds it from lv_obj_clean()
+// and its whole tree is two objects. It is not built, deliberately: the scope
+// of this change was trimmed to the decision logic, and an OTA screen redesign
+// is a separate piece of work with its own screenshot pass.
+//
+// So the rule is: show the detail when it fits, the headline when it does not.
+// That is not a compromise on the two cases that matter most -- "Now running
+// v1.4.3" and "Already on v1.4.3" are 250-odd px and fit, so the VERSION NUMBER,
+// which is the only thing that proves which firmware is running, is on screen.
+// The long failure details are the ones that fall back to "UPDATE FAILED", and
+// they are also the ones that reach the Serial log in full.
+//
+// Measured rather than guessed, at the real font, because the budget is tight:
+// the label is auto-width and centred, so anything over TEXT26_OTA_STATUS_W has
+// nowhere to go but off both edges of the panel.
+static const char* otaFittedLine(const char* headline, const char* detail) {
+  if (detail == nullptr || detail[0] == '\0') {
+    return headline;
+  }
+  lv_point_t size;
+  lv_text_get_size(&size, detail, &lv_font_montserrat_26, 0, 0, LV_COORD_MAX,
+                   LV_TEXT_FLAG_NONE);
+  if (size.x <= TEXT26_OTA_STATUS_W) {
+    return detail;
+  }
+  return (headline != nullptr && headline[0] != '\0') ? headline : detail;
+}
+
 void Display::drawOTA() {
   GlobalState* state = GlobalState::getInstance();
-  switch (state->getOtaStatus()) {
-  case OTA_CHECKING:
-  case OTA_IDLE:
-    // OTA_IDLE is the brief window before the OTA task sets CHECKING.
-    // "Checking updates...", not "Checking for updates...": at Montserrat 26
-    // the longer form measured 306 of the 320 px -- flush to both edges,
-    // unlike anything else on the panel. See TEXT26_OTA_STATUS_W.
-    lv_label_set_text(updateLabel, "Checking updates...");
-    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
-    break;
-  case OTA_NO_UPDATE:
-    lv_label_set_text(updateLabel, "No update available");
-    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
-    break;
-  case OTA_FAILED:
-    lv_label_set_text(updateLabel, "Update failed");
-    lv_slider_set_value(updateSlider, 0, LV_ANIM_OFF);
-    break;
-  case OTA_DOWNLOADING: {
-    int bytes = state->getOTABytes();
-    int length = state->getOTALength();
-    int percent = length > 0 ? (int)(((float)(bytes * 100)) / ((float)length)) : 0;
-    lv_slider_set_value(updateSlider, bytes > 0 ? percent : 0, LV_ANIM_OFF);
-    if (percent > 99 && bytes > 0) {
-      lv_label_set_text(updateLabel, "Rebooting...");
-    } else {
-      lv_label_set_text(updateLabel, "Updating...");
+  const GlobalOtaStatus status = state->getOtaStatus();
+
+  // Every word on this screen comes from OtaOutcome (lib/ota) by way of
+  // GlobalState, so the panel and the `OTA:` Serial lines are rendered from one
+  // object and cannot drift. The switch that used to be here held its own copy
+  // of the wording, which is how "Update failed" ended up being all a failure
+  // ever said.
+  const char* headline = state->getOtaHeadline();
+  const char* detail = state->getOtaDetail();
+  if (headline[0] == '\0' && detail[0] == '\0') {
+    // The window between ButtonPad calling setOTA() and the OTA task's first
+    // publish -- a few hundred ms in practice. One string, owned here, that
+    // deliberately does not duplicate anything OtaOutcome says.
+    lv_label_set_text(updateLabel, "Starting update...");
+  } else {
+    lv_label_set_text(updateLabel, otaFittedLine(headline, detail));
+  }
+
+  // A failure is now the one state on this screen that does not end in a
+  // reboot, so it has to look different rather than merely read differently:
+  // the fault colour is the same one the dashboard uses for HALT.
+  lv_obj_set_style_text_color(
+      updateLabel,
+      status == OTA_FAILED ? m_palette->colourFault : m_palette->textPrimary, 0);
+
+  // The bar tracks bytes while the transfer is live, is pinned full the moment
+  // the image is verified, and is emptied for everything else -- a part-filled
+  // bar sitting under "UPDATE FAILED" is exactly the mixed message the old
+  // screen sent.
+  int percent = 0;
+  if (status == OTA_SUCCESS) {
+    percent = 100;
+  } else if (status == OTA_DOWNLOADING) {
+    const int bytes = state->getOTABytes();
+    const int length = state->getOTALength();
+    if (bytes > 0 && length > 0) {
+      percent = (int)(((int64_t)bytes * 100) / (int64_t)length);
+      if (percent > 100) {
+        percent = 100;
+      }
     }
-    break;
   }
-  }
+  lv_slider_set_value(updateSlider, percent, LV_ANIM_OFF);
 }
 
 // Band 1. Feed mode as text, the unit mode, and the sync indicator. The mode

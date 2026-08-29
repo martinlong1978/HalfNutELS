@@ -314,6 +314,41 @@ void setup() {
     display->showSplash();
     delay(SPLASH_HOLD_MS);
 
+    // The other half of the OTA failure-visibility work, and the only part of
+    // it the operator can actually trust: a banner, drawn by the image that has
+    // just booted, saying which version is now running.
+    //
+    // A successful update ends in ESP.restart(), and a reboot is also what a
+    // failure, a crash and a power blip look like from the far side of the
+    // lathe. So the OTA task blits its outcome into RTC_NOINIT memory before
+    // restarting and this picks it up; "UPDATED - now running v1.4.3" exists in
+    // the new firmware and nowhere else, which is exactly what makes it proof.
+    // Nothing at all happens on an ordinary boot - beginBootNotice() returns
+    // false and this whole block costs one magic-word compare.
+    //
+    // It borrows the existing OTA screen rather than adding anything to the
+    // dashboard: the LVGL heap is at ~85% and a "last update" banner would be
+    // new objects on the screen that has none to spare (CLAUDE.md).
+    //
+    // Blocking here is safe for precisely the reason the splash delay above is
+    // safe, and for no other: the priority-24 SpindleTask that owns core 1 is
+    // not created until the end of setup(), so nothing is moving and no
+    // watchdog is armed. DO NOT MOVE THIS BELOW THAT CALL - it would never run.
+    // The hold is OtaOutcome::kSuccessHoldMs (2 s), deliberately brisk.
+    //
+    // The guard count is a boot-time safety net, not a timeout anyone should
+    // rely on: only a SUCCESS is ever stored, and its hold is 2 s, but a stored
+    // FAILURE would hold for kFailureHoldMs (30 s) and freeze the boot here.
+    // Five seconds of pumping is generous for the former and survivable for the
+    // latter; the notice is dropped rather than the lathe being held hostage.
+    if (commsManager.beginBootNotice()) {
+      for (int guard = 0; guard < 100 && !commsManager.bootNoticeDone(); guard++) {
+        display->update();
+        delay(50);
+      }
+      globalState->clearOTA();
+    }
+
     display->init();
 
     leadscrew->setTargetPitchMM(globalState->getCurrentFeedPitch());

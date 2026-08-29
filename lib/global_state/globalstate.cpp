@@ -211,7 +211,19 @@ GlobalThreadSyncState GlobalState::getThreadSyncState() {
 }
 
 bool  GlobalState::hasOTA() { return OTA; };
-void GlobalState::setOTA() { OTA = true; };
+// Raising the OTA screen also WIPES the last attempt's wording. A failed update
+// no longer reboots the device, so the operator can now retry from the menu
+// while "UPDATE FAILED" is still the last thing this bus was told - and without
+// this, the retry's first display frames would render the previous failure over
+// the new attempt's progress bar. The OTA task republishes within a tick.
+void GlobalState::setOTA() {
+  m_otaHeadline[0] = '\0';
+  m_otaDetail[0] = '\0';
+  m_otaStatus = OTA_IDLE;
+  OTAbytes = 0;
+  OTAlength = 0;
+  OTA = true;
+};
 void  GlobalState::clearOTA() { OTA = false; };
 
 void  GlobalState::setOTABytes(int bytes) { OTAbytes = bytes; }
@@ -221,6 +233,28 @@ void  GlobalState::setOTAContentLength(int length) { OTAlength = length; }
 
 void  GlobalState::setOtaStatus(GlobalOtaStatus status) { m_otaStatus = status; }
 GlobalOtaStatus  GlobalState::getOtaStatus() { return m_otaStatus; }
+
+// Copy, truncate, terminate. Hand-rolled rather than strncpy because strncpy's
+// contract on a too-long source is to leave the buffer UNTERMINATED, and the
+// only consumer of these is lv_label_set_text(), which would then run off the
+// end of the object and into the rest of GlobalState.
+static void copyOtaText(char* dst, int cap, const char* src) {
+  int i = 0;
+  if (src != nullptr) {
+    for (; i < cap - 1 && src[i] != '\0'; ++i) {
+      dst[i] = src[i];
+    }
+  }
+  dst[i] = '\0';
+}
+
+void GlobalState::setOtaText(const char* headline, const char* detail) {
+  copyOtaText(m_otaHeadline, (int)sizeof(m_otaHeadline), headline);
+  copyOtaText(m_otaDetail, (int)sizeof(m_otaDetail), detail);
+}
+
+const char* GlobalState::getOtaHeadline() { return m_otaHeadline; }
+const char* GlobalState::getOtaDetail() { return m_otaDetail; }
 
 
 void  GlobalState::setDisplayReset() { m_displayReset = true; }

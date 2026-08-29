@@ -13,8 +13,10 @@
 #include <globalstate.h>
 #include <latheconfig.h>
 #include <leadscrew.h>
+#include <otaoutcome.h>
 #include <spindle.h>
 #include <uistate.h>
+#include <version.h>
 
 #include <lvgl.h>
 
@@ -537,24 +539,99 @@ void sc_alarmFailed(Rig& r) {
   alarmState(r, AS_ALARM, /*faultPresent=*/true, /*clearFailed=*/true);
 }
 
+// --- OTA screen ---------------------------------------------------------------
+// The wording on this screen comes from OtaOutcome (lib/ota), so the scenes
+// drive a REAL one rather than pushing literal strings at GlobalState: a change
+// to a message shows up here without anyone remembering to copy it.
+//
+// This mirrors ESPCommsManager::publishOutcome(), which lives in src/ and is not
+// in the renderer's source list. It is the one duplicated thing in these scenes;
+// keep the two in step.
+void publishOutcome(Rig& r, const OtaOutcome& o) {
+  // setOTA() FIRST: it wipes the bus's OTA text and byte counts so a retry
+  // cannot inherit the last attempt's words. ESPCommsManager orders it the same
+  // way, and anything a scene wants in the byte counters has to be set after.
+  r.gs->setOTA();
+  r.gs->setOtaText(o.headline(), o.detail());
+  switch (o.result()) {
+  case OtaResult::InProgress:
+    r.gs->setOtaStatus((o.phase() == OtaPhase::Downloading ||
+                        o.phase() == OtaPhase::Finishing)
+                           ? OTA_DOWNLOADING
+                           : OTA_CHECKING);
+    break;
+  case OtaResult::Success:  r.gs->setOtaStatus(OTA_SUCCESS);   break;
+  case OtaResult::UpToDate: r.gs->setOtaStatus(OTA_NO_UPDATE); break;
+  default:                  r.gs->setOtaStatus(OTA_FAILED);    break;
+  }
+}
+
 void sc_otaDownloading(Rig& r) {
   baseState(r);
-  r.gs->setOTA();
-  r.gs->setOtaStatus(OTA_DOWNLOADING);
+  OtaOutcome o;
+  o.begin(0);
+  o.notePhase(OtaPhase::Downloading, 0);
+  o.noteProgress(861000, 1400000, 10);
+  publishOutcome(r, o);
   r.gs->setOTAContentLength(1400000);
   r.gs->setOTABytes(861000);
 }
 
 void sc_otaChecking(Rig& r) {
   baseState(r);
-  r.gs->setOTA();
-  r.gs->setOtaStatus(OTA_CHECKING);
+  OtaOutcome o;
+  o.begin(0);
+  o.notePhase(OtaPhase::Checking, 0);
+  publishOutcome(r, o);
 }
 
 void sc_otaNoUpdate(Rig& r) {
   baseState(r);
-  r.gs->setOTA();
-  r.gs->setOtaStatus(OTA_NO_UPDATE);
+  OtaOutcome o;
+  o.begin(0);
+  o.notePhase(OtaPhase::Checking, 0);
+  o.noteVersion(FIRMWARE_VERSION);
+  o.upToDate(10);
+  publishOutcome(r, o);
+}
+
+// The whole reason this work exists: a failure that cannot be mistaken for a
+// success. Fault-coloured, empty bar, and it holds for 30 s instead of three.
+void sc_otaFailed(Rig& r) {
+  baseState(r);
+  OtaOutcome o;
+  o.begin(0);
+  o.fail(OtaResult::NoNetwork, 10);
+  publishOutcome(r, o);
+}
+
+// The stall this project has actually measured (modem sleep left on, ~18%). Its
+// detail line is too wide for the one label the OTA screen has, so this is the
+// scene that shows what the headline fallback looks like.
+void sc_otaStalled(Rig& r) {
+  baseState(r);
+  OtaOutcome o;
+  o.begin(0);
+  o.notePhase(OtaPhase::Downloading, 0);
+  o.noteProgress(283000, 1572864, 10);
+  o.fail(OtaResult::DownloadStalled, 30010);
+  publishOutcome(r, o);
+  r.gs->setOTAContentLength(1572864);
+  r.gs->setOTABytes(283000);
+}
+
+// The post-reboot confirmation, restored from RTC memory by
+// ESPCommsManager::beginBootNotice(). The version number IS the message.
+void sc_otaUpdated(Rig& r) {
+  baseState(r);
+  OtaOutcome o;
+  o.begin(0);
+  o.noteVersion(FIRMWARE_VERSION);
+  o.succeed(10);
+  OtaNotice n = o.snapshot();
+  OtaOutcome restored;
+  restored.restore(n, 0);
+  publishOutcome(r, restored);
 }
 
 const SceneDef kScenes[] = {
@@ -616,6 +693,11 @@ const SceneDef kScenes[] = {
   { "ota-downloading",        sc_otaDownloading,      THEME_DARK,  false, 0 },
   { "ota-checking",           sc_otaChecking,         THEME_DARK,  false, 0 },
   { "ota-no-update",          sc_otaNoUpdate,         THEME_DARK,  false, 0 },
+  // The three the old screen could not tell apart from each other, or from a
+  // success: a failure, the measured 18% stall, and the post-reboot proof.
+  { "ota-failed",             sc_otaFailed,           THEME_DARK,  false, 0 },
+  { "ota-stalled",            sc_otaStalled,          THEME_DARK,  false, 0 },
+  { "ota-updated",            sc_otaUpdated,          THEME_DARK,  false, 0 },
   // Wi-Fi setup path: the parameterless Display, no dashboard at all.
   { "wifi-setup",             nullptr,                THEME_DARK,  true,  0 },
   { "wifi-connected",         nullptr,                THEME_DARK,  true,  1 },

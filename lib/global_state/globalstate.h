@@ -45,13 +45,26 @@ enum GlobalThreadSyncState { SS_UNSET, SS_SYNC, SS_UNSYNC };
  * DisplayTask so the OTA screen can show the right message. The two tasks
  * coordinate only through this (volatile) value; no display method is ever
  * called from the OTA task.
+ *
+ * This is now only the SHAPE of the screen - which chrome to show, and in what
+ * colour. The WORDS come from setOtaText() below, rendered by OtaOutcome
+ * (lib/ota), so the screen and the Serial log cannot say different things about
+ * the same attempt. Do not add a status value in order to add a message.
  *  OTA_IDLE        - no update in progress
  *  OTA_CHECKING    - connecting / checking the latest release version
  *  OTA_NO_UPDATE   - already on the latest version, nothing to do
  *  OTA_DOWNLOADING - downloading + flashing the new image (progress bar active)
- *  OTA_FAILED      - the update failed (device will reboot)
+ *  OTA_FAILED      - the update failed. NOTE: the device NO LONGER REBOOTS on
+ *                    this - a failed OTA has not touched the running image, so
+ *                    a restart hides the failure instead of fixing it. The
+ *                    screen holds (OtaOutcome::kFailureHoldMs) and then the
+ *                    machine screen comes back.
+ *  OTA_SUCCESS     - the image is written and verified; the bar is full and the
+ *                    device is about to restart INTO THE NEW FIRMWARE. Distinct
+ *                    from OTA_DOWNLOADING at 100% because that is exactly the
+ *                    ambiguity this whole change exists to remove.
  */
-enum GlobalOtaStatus { OTA_IDLE, OTA_CHECKING, OTA_NO_UPDATE, OTA_DOWNLOADING, OTA_FAILED };
+enum GlobalOtaStatus { OTA_IDLE, OTA_CHECKING, OTA_NO_UPDATE, OTA_DOWNLOADING, OTA_FAILED, OTA_SUCCESS };
 
 /**
  * The stepper driver's alarm, published by the alarm task (src/alarm.cpp) and
@@ -77,6 +90,31 @@ private:
   volatile int OTAbytes = 0;
   volatile int OTAlength = 0;
   volatile GlobalOtaStatus m_otaStatus = OTA_IDLE;
+
+  // The OTA screen's wording, rendered by OtaOutcome (lib/ota) on the OTA task
+  // and read by the DisplayTask. Copies, not pointers: OtaOutcome lives inside
+  // ESPCommsManager and rewrites its own buffers in place, so handing the
+  // display a pointer into them would let a re-render tear a string the display
+  // is mid-way through measuring.
+  //
+  // Sized to hold OtaOutcome::kHeadlineLen / kDetailLen. Deliberately NOT
+  // `#include <otaoutcome.h>` for the two constants: GlobalState is the one
+  // header nearly everything else pulls in (including the screenshot harness,
+  // which compiles its own hand-listed source set), and a dependency edge from
+  // the bus to a leaf library is not worth two integers. setOtaText() truncates
+  // rather than overflows if those ever grow.
+  //
+  // NOT `volatile`, and that is deliberate rather than an oversight of the
+  // no-locks rule: `volatile` is only meaningful for the 32-bit aligned SCALARS
+  // above, where it buys atomicity plus no stale caching. A char array has
+  // neither property whatever it is qualified with, and marking it volatile
+  // would only defeat the strncpy/memcpy the copy below wants to be. The race
+  // it leaves is bounded and cosmetic: both tasks are on core 0, the writes
+  // happen a handful of times per attempt, and the worst outcome is one 100 ms
+  // display frame showing a half-updated string. The terminator is written
+  // last, so it is never an unterminated one.
+  char m_otaHeadline[16];
+  char m_otaDetail[48];
 
 
 
@@ -202,6 +240,11 @@ private:
     // leave m_jogSpeed indexing past the end until the first incJogSpeed()
     // call clamped it. Same value as before for today's 6-entry table.
     m_jogSpeed = (int)ARRAY_SIZE(jogSpeeds) - 1;
+    // Empty, not garbage: GlobalState is `new`ed and the heap is not zeroed,
+    // and these two are handed straight to lv_label_set_text(), which walks
+    // them until it finds a NUL.
+    m_otaHeadline[0] = '\0';
+    m_otaDetail[0] = '\0';
     // m_debug is the last member, and it initialises itself: DebugCapture's
     // constructor sets every one of its own fields (debugcapture.cpp). It has
     // to, for the same reason everything above is set explicitly - GlobalState
@@ -299,6 +342,15 @@ public:
 
   void setOtaStatus(GlobalOtaStatus status);
   GlobalOtaStatus getOtaStatus();
+
+  // The words on the OTA screen, straight off OtaOutcome::headline() /
+  // ::detail(). Written ONLY by the OTA task; read by the DisplayTask. Both
+  // are always NUL-terminated and are "" until the OTA task publishes, which
+  // is the display's cue that an update has been asked for but has not said
+  // anything yet.
+  void setOtaText(const char* headline, const char* detail);
+  const char* getOtaHeadline();
+  const char* getOtaDetail();
 
   void setDisplayReset();
   bool getDisplayReset();
