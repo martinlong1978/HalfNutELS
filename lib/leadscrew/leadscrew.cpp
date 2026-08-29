@@ -381,8 +381,73 @@ void Leadscrew::update() {
       // left stop for a normal (right-hand) thread, the right stop for a reverse
       // (left-hand) thread. Guard by direction so starting at the opposite stop
       // does not immediately disable.
-      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitLeftEndstop && m_currentDirection == LeadscrewDirection::LEFT)
-      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitRightEndstop && m_currentDirection == LeadscrewDirection::RIGHT)) {
+      //
+      // THE DIRECTION LATCH ALONE IS NOT ENOUGH, and the hole it leaves is the
+      // one gesture every thread pass ends in. m_currentDirection is released to
+      // UNKNOWN by the MM_DISABLED/MM_DECELLERATE re-pin just below, the moment
+      // the ramp reaches zero, and it is only ever ASSIGNED inside the two
+      // stepping branches further down - which are themselves gated on
+      // `!hitEndstop`. So once a pass has arrested on its stop and settled,
+      // pressing ENABLE while still parked there produces a state nothing can
+      // leave: the latch says UNKNOWN so this arrest cannot fire, the stepping
+      // branch that would re-acquire the latch is blocked by the stop, and the
+      // spindle goes on feeding m_expectedPosition into a following error that
+      // nothing consumes (measured: 0 pulses of travel against 472 pulses of
+      // banked error). That is worse than a merely stuck axis, because
+      // MM_ENABLED is exactly what the panel prints as CUTTING and what
+      // UiState::underPower() gates the knob, the stop edits and the menu tiles
+      // on - so the machine locks the operator out of the very keys they would
+      // use to recover from it.
+      //
+      // The second arm of each test therefore asks the question the latch was
+      // only ever standing in for: is anything actually ASKING the carriage to
+      // move further into the stop it is already touching? That is a demand
+      // rather than a history, so it is true on the very first iteration of a
+      // re-engagement and does not need a step to have been taken first. The
+      // +/-1 deadband is the same one the stepping branches below apply, so the
+      // arrest fires on exactly the amount of demand that would otherwise have
+      // produced a step into the stop.
+      //
+      // IT MUST BE positionErrorRaw, NOT positionError. positionError is
+      // positionErrorRaw + pulsesToTargetSpeed, and that second term is
+      // feed-forward derived entirely from the spindle's VELOCITY ESTIMATE -
+      // which at the instant of re-engagement is STALE, at full magnitude, and
+      // pointing the way the pass that just finished was going (measured -1200
+      // PPS immediately after the axis settled; Spindle only zeroes its estimate
+      // after a whole second with no encoder pulses, and the settle finishes long
+      // before that). So for the first fraction of a second of a pass fed AWAY
+      // from a stop, positionError points INTO it - purely as pre-acceleration
+      // for a rotation that has already stopped. An arrest keyed on it fires
+      // there and kills the ordinary next pass: back the tool out, wind on a few
+      // thou, re-engage on the stop you finished on and cut away from it. The raw
+      // error carries no such term, and the separation is total rather than
+      // marginal - sampled only on iterations where the carriage is touching the
+      // stop, fed AWAY the worst raw error toward the stop is 0.00 pulses; fed
+      // INTO it, -78.74. Pinned by
+      // AFinishedPassReEngagedAndFedAwayFromItsStopStillRuns in
+      // test/test_endstop_deadlock.
+      //
+      // TWO NEARBY FIXES ARE BOTH WRONG, and both are fenced by two-second dwell
+      // tests rather than by narrow windows:
+      //   - "arrest whenever the latch is UNKNOWN" - the latch is UNKNOWN every
+      //     time the machine is at rest, which includes the perfectly good pass
+      //     that is about to start;
+      //   - "arrest whenever engaged, on a stop and unable to step" - an engaged
+      //     axis waiting for the operator to reach for the spindle switch cannot
+      //     step either, and has been asked for nothing.
+      // Neither the latch nor the stop distinguishes a stall from either of
+      // those. Only the demand does, which is why that is what this keys on.
+      //
+      // The MM_INTERACTIVE_JOG_* modes stay deliberately absent from all of this,
+      // as they are from the `!hitEndstop` gating below: the dead-man jog drives
+      // straight through a stop (measured: -38000 past a stop set at -400), and
+      // it is the operator's only way to move the carriage off a stop that was
+      // set in the wrong place. Adding them here is a one-line change that looks
+      // like tidying and is not.
+      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitLeftEndstop
+        && (m_currentDirection == LeadscrewDirection::LEFT || positionErrorRaw < -1))
+      || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitRightEndstop
+        && (m_currentDirection == LeadscrewDirection::RIGHT || positionErrorRaw > 1))) {
       m_motionMode = GlobalMotionMode::MM_DISABLED;
       m_globalState->setMotionMode(GlobalMotionMode::MM_DISABLED);
       m_globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
