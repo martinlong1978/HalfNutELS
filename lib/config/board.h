@@ -19,6 +19,14 @@
 #ifdef ELS_UI_ENCODER
 #define ELS_UI_ENCODER_A 39  
 #define ELS_UI_ENCODER_B 36  
+// Raw PCNT counts per detent under a FULL QUADRATURE decode (both edges of
+// both channels). E1 completes one quadrature cycle per detent, so four.
+// Full quad is not about resolution here - it is what makes contact bounce
+// cancel itself in hardware; lib/keyscan/encoderdetents.h has the reasoning.
+// A/B are pulled up by R11/R12 (10K to +3.3V) on the board: GPIO34-39 are
+// input-only and have NO internal pull-ups, so those externals are required,
+// and ESP32Encoder must be told not to ask for internal ones.
+#define ELS_UI_ENCODER_COUNTS_PER_DETENT 4
 #define ELS_IND_RED 22   
 #define ELS_IND_GREEN 21  
 #define ELS_IND_BLUE 12   

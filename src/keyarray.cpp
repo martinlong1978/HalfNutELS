@@ -22,7 +22,13 @@ static_assert((int)KS_CLICKED == (int)BS_CLICKED, "keyscan/ButtonState drift");
 static_assert((int)KS_HELD == (int)BS_HELD, "keyscan/ButtonState drift");
 static_assert((int)KS_RELEASED == (int)BS_RELEASED, "keyscan/ButtonState drift");
 
-KeyArray::KeyArray(Leadscrew* leadscrew) {
+KeyArray::KeyArray(Leadscrew* leadscrew)
+#ifdef ELS_UI_ENCODER
+    // EncoderDetents has no default constructor on purpose - the counts per
+    // detent is a property of the board (board.h), not a thing to forget.
+    : m_detents(ELS_UI_ENCODER_COUNTS_PER_DETENT)
+#endif
+{
     (void)leadscrew;
     // EVERY member. KeyArray is heap-allocated (main.cpp `new KeyArray`), so
     // members are NOT zero-initialised the way the previous static instance
@@ -33,11 +39,25 @@ KeyArray::KeyArray(Leadscrew* leadscrew) {
     writeindex = 0;
     m_ringDrops = 0;
 #ifdef ELS_UI_ENCODER
+    // No internal pull-ups: GPIO34-39 are input-only and do not have any. A
+    // and B are held up by R11/R12 (10K to +3.3V) on the board instead.
     ESP32Encoder::useInternalWeakPullResistors = puType::none;
-    m_encoder.attachSingleEdge(ELS_UI_ENCODER_A, ELS_UI_ENCODER_B);
+
+    // FULL QUADRATURE, not single edge. Both edges of both channels, so a
+    // contact bounce nets to zero in the counter instead of accumulating as
+    // real motion - that is what stopped the knob skipping items and stepping
+    // backwards. The full account is in lib/keyscan/encoderdetents.h; do not
+    // revert this to attachSingleEdge to "save" the divide by four, which is
+    // the only thing it costs.
+    m_encoder.attachFullQuad(ELS_UI_ENCODER_A, ELS_UI_ENCODER_B);
+
+    // 1023 APB cycles - 12.79 us at 80 MHz, and the hardware maximum, which
+    // the library clamps to. Too short to touch mechanical bounce by two to
+    // three orders of magnitude (see encoderdetents.h); kept because it is
+    // exactly right for EMI and for the ~80 ns GPIO36/39 SAR-ADC glitch.
     m_encoder.setFilter(1023);
-    encoderPos = m_encoder.getCount();
-    m_encoderDetents = 0;
+
+    m_detents.reset(m_encoder.getCount());
 #endif
 }
 
@@ -123,21 +143,11 @@ int KeyArray::consumeEncoderDelta() {
     // Sample the hardware here rather than in consumeButton(): the encoder is
     // not part of the key ring buffer, and ButtonPad drains that buffer in a
     // loop but asks for detents exactly once per pass.
-    const int64_t val = m_encoder.getCount();
-    if (val != encoderPos) {
-        // The difference is bounded by how far a thumb can turn a knob in one
-        // display period (100 ms), so the int cast cannot lose anything real;
-        // it is clamped only so a garbage count from a glitching encoder cannot
-        // hand ButtonPad an absurd replay length.
-        int64_t delta = val - encoderPos;
-        if (delta > 64) delta = 64;
-        if (delta < -64) delta = -64;
-        m_encoderDetents += (int)delta;
-        encoderPos = val;
-    }
-    const int out = m_encoderDetents;
-    m_encoderDetents = 0;
-    return out;
+    //
+    // Everything else - the divide by the counts per detent, the sub-detent
+    // residue, the glitch drop and the bound ButtonPad's replay loop relies on
+    // - is in EncoderDetents, where the host tests can reach it.
+    return m_detents.update(m_encoder.getCount());
 #else
     return 0;
 #endif

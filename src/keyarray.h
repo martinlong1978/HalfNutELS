@@ -7,6 +7,7 @@
 #include <leadscrew.h>
 #include <spindle.h>
 #include <ESP32Encoder.h>
+#include <encoderdetents.h>
 
 enum ButtonState { BS_NONE = 0, BS_PRESSED = 1, BS_CLICKED = 2, BS_HELD = 3, BS_RELEASED = 4, BS_DOUBLE_CLICKED = 5 };
 
@@ -62,10 +63,10 @@ private:
     void emitButton(int code, int state);
 #ifdef ELS_UI_ENCODER
     ESP32Encoder m_encoder;
-    int64_t encoderPos;
-    // Detents seen since the last consumeEncoderDelta(), signed: + clockwise.
-    // Accumulated here and nowhere else - see consumeEncoderDelta().
-    int m_encoderDetents;
+    // Raw counts -> detents. All of the arithmetic lives in this pure-C++
+    // object (lib/keyscan/encoderdetents.h) so it is host-tested; this class
+    // keeps only the PCNT unit it reads from.
+    EncoderDetents m_detents;
 #endif
 public:
     // Ring capacity. Public because ButtonPad bounds its drain loop on it - a
@@ -105,6 +106,12 @@ public:
     // motion, and ButtonPad feeds it to UiState as UiKey::EncoderCw/Ccw so the
     // knob goes through exactly the same path as every key.
     int consumeEncoderDelta();
+
+#ifdef ELS_UI_ENCODER
+    // Counter artefacts discarded by the detent decoder, alongside
+    // bounceRejects()/ringDrops(). Should stay at zero.
+    unsigned long encoderGlitchDrops() const { return m_detents.glitchDrops(); }
+#endif
 
     KeyArray(Leadscrew* leadscrew);
 };

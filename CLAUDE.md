@@ -239,6 +239,47 @@ post-mortem in `docs/keypad-audit.md`.
 `bounceRejects()` / `ringDrops()` exist so the debounce threshold can be judged from the machine
 rather than assumed. Both should stay at zero in normal use.
 
+### The UI knob: FULL QUADRATURE, and the filter is a red herring
+
+The knob (E1, A/B on IO39/IO36) is decoded with `attachFullQuad` and divided by
+`ELS_UI_ENCODER_COUNTS_PER_DETENT` (4) in `EncoderDetents`
+(`lib/keyscan/encoderdetents.h`, host-tested in `test/test_encoderdetents`).
+**Do not put `attachSingleEdge` back.** It was the cause of the knob skipping
+items, sometimes several, and sometimes stepping backwards:
+
+- Single edge counts only A's falling edge and never decrements, so **contact
+  bounce accumulates as real motion** - a five-bounce burst is five detents.
+- Its direction comes from **one sample of B's level at the instant A falls**,
+  unconfirmed, so a detent taken while B is bouncing counts the wrong way.
+- A detent resting near A's threshold chatters while the knob is STILL, which
+  is both symptoms at once.
+
+Full quad counts both edges of both channels with reversal, so **a bounce burst
+cancels itself in the counter**. This also turns ButtonPad's 100 ms poll into an
+advantage: the count self-heals during the bounce, so a poll landing afterwards
+only ever sees settled positions.
+
+**`setFilter(1023)` cannot help with any of this and is not the knob to turn.**
+The value is in APB clock cycles and the library clamps it at 1023, so at 80 MHz
+the maximum possible filter is **12.79 us** - mechanical bounce runs 0.1-5 ms,
+one to three orders of magnitude longer. It stays at the ceiling because it is
+right for EMI and for the ~80 ns GPIO36/39 SAR-ADC glitch erratum, but it was
+never the answer. Nothing in the firmware calls `analogRead`, so that erratum is
+not firing anyway.
+
+Hardware, checked against the schematic so nobody re-measures it: A/B have 10K
+pull-ups to +3.3V (R11/R12), common to GND, no caps. GPIO34-39 are input-only
+with **no internal pull-ups**, which is why `useInternalWeakPullResistors` must
+stay `none`. The RGB LED lines share the connector but are driven statically by
+`digitalWrite`, never PWM'd, so they are not a crosstalk source. If bounce ever
+needs attacking in hardware too, the addition is 10 nF to GND on each line
+(100 us with the 10K) plus a ~1K series resistor to keep the discharge damped.
+
+`EncoderDetents` also **drops** a wild delta rather than clamping it, matching
+`Spindle::update()`. The old code clamped to +/-64, which would have turned the
+ESP32Encoder +/-INT16 wrap artefact into 64 real menu steps. `glitchDrops()`
+counts them and should stay at zero.
+
 ## Motion gotchas that cost a whole evening (Aug 2026)
 
 - **`rmtWrite`'s third argument is an ITEM COUNT, not a byte count.** `sizeof(rmt_data)` made it 96,
