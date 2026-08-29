@@ -874,66 +874,95 @@ TEST(UiStateSelectors, AreLiveAgainOnceTheCarriageIsAtRest) {
 // ===========================================================================
 
 TEST(UiStateStops, LeftClickWithLeftStopUnsetSetsIt) {
+  // GitHub issue #10: setting a stop now dismisses the widget too. After
+  // setting, the operator's next move is almost always to jog or engage, so
+  // the natural expectation is that the screen has already gone - the same
+  // destination every other dismiss path uses (OK, HALT, ENABLE, the idle
+  // timeout). This used to assert UiFocus::Stops (the widget stayed up); that
+  // was the bug the issue is about, not a contract worth keeping.
   Rig r;
   r.click(UiKey::Stops);
   ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::SetLeftStop, r.click(UiKey::Left, kNoStops));
-  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
 TEST(UiStateStops, LeftClickWithLeftStopSetDoesNothing) {
-  // "Flash 'hold to clear' - no action."
+  // "Flash 'hold to clear' - no action." Also (issue #10): a refused/no-op
+  // click is NOT "a stop was set", so it must not auto-close the widget either
+  // - only an actual SetLeftStop/SetRightStop does that.
   Rig r;
   r.click(UiKey::Stops, kLeftOnly);
   ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, kLeftOnly));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, LeftHoldWithLeftStopSetClearsIt) {
+  // Issue #10: clearing is not setting, so this must NOT auto-close - the
+  // widget stays up over the result exactly as it always has.
   Rig r;
   r.click(UiKey::Stops, kLeftOnly);
   ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::ClearLeftStop, r.hold(UiKey::Left, kLeftOnly));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, LeftHoldWithLeftStopUnsetDoesNothing) {
   // Decision: hold means "clear"; with nothing to clear it is inert rather
   // than falling back to set (a hold must never set a stop by accident).
+  // Issue #10: an inert gesture is not "a stop was set" either, so it must not
+  // auto-close.
   Rig r;
   r.click(UiKey::Stops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::None, r.hold(UiKey::Left, kNoStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, RightClickWithRightStopUnsetSetsIt) {
+  // Issue #10: setting the right stop closes the widget too, same as left.
   Rig r;
   r.click(UiKey::Stops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::SetRightStop, r.click(UiKey::Right, kNoStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
 TEST(UiStateStops, RightClickWithRightStopSetDoesNothing) {
   Rig r;
   r.click(UiKey::Stops, kRightOnly);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Right, kRightOnly));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, RightHoldWithRightStopSetClearsIt) {
   Rig r;
   r.click(UiKey::Stops, kRightOnly);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::ClearRightStop, r.hold(UiKey::Right, kRightOnly));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, RightHoldWithRightStopUnsetDoesNothing) {
   Rig r;
   r.click(UiKey::Stops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::None, r.hold(UiKey::Right, kNoStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
 TEST(UiStateStops, EachArrowOnlySeesItsOwnStop) {
-  // Left stop set, right unset: left click is inert, right click sets.
+  // Left stop set, right unset: left click is inert (stays open, issue #10),
+  // right click sets and closes.
   Rig r;
   r.click(UiKey::Stops, kLeftOnly);
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, kLeftOnly));
+  ASSERT_EQ(UiFocus::Stops, r.focus())
+      << "an inert click on an already-set stop must not auto-close";
   EXPECT_EQ(UiIntent::SetRightStop, r.click(UiKey::Right, kLeftOnly));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
 // ---------------------------------------------------------------------------
@@ -2430,6 +2459,132 @@ TEST(UiStateStopsToggle, TheMarkerDoesNotSurviveCloseOnMotion) {
   // ...and the next one must close it, which a stale marker would prevent.
   r.key(UiKey::Stops, UiKeyEvent::Click, kBothStops);
   EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
+// ---------------------------------------------------------------------------
+// AUTO-CLOSE ON SETTING A STOP (GitHub issue #10).
+//
+// "Setting a stop should dismiss the STOPS widget automatically. Today it
+// stays up and needs a separate press to close. After setting a stop the
+// operator almost always wants to jog or engage next, so the natural
+// expectation is that the screen has already gone."
+//
+// The trigger is narrow and deliberate: ONLY an actual SetLeftStop /
+// SetRightStop closes the widget. Every other gesture reachable from
+// UiFocus::Stops - an inert click on an already-set stop, a hold that clears,
+// a hold that finds nothing to clear, a blocked edit under power - is NOT "a
+// stop was set" and must leave the widget exactly as it was. Those are pinned
+// alongside each gesture above (LeftClickWithLeftStopSetDoesNothing etc.);
+// this block covers the cross-cutting concerns: the destination (Jog, the
+// same one every other dismiss path uses), the two pieces of STOPS-local
+// latched state (m_stopsConfirming, m_stopsOpenedByPress - see the notes on
+// both in uistate.h), and that the close is a REAL return to the rest screen
+// and not a display-only illusion.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateStopsAutoClose, ABlockedEditUnderPowerDoesNotCloseTheWidget) {
+  // Stop edits are inert under power (stopEditsInhibited() -> underPower()),
+  // per §4 and the motion lockout. A blocked edit is certainly not "a stop was
+  // set", so it must not close the widget either - refusing the edit and then
+  // dismissing the screen out from under the operator would be a confusing
+  // double failure, on top of throwing away the "stop the carriage first"
+  // hint the display has nowhere else to show.
+  const bool flags[] = {false, true};
+  for (bool enabled : flags) {
+    for (bool active : flags) {
+      if (!enabled && !active) {
+        continue;  // at rest - the setting tests above cover this
+      }
+      Rig r;
+      UiContext c = ctx(false, false, enabled, active);
+      r.click(UiKey::Stops, kNoStops);  // opened at rest - see the setup note
+      ASSERT_EQ(UiFocus::Stops, r.focus());
+      EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, c))
+          << "motionEnabled=" << enabled << " motionActive=" << active;
+      EXPECT_EQ(UiFocus::Stops, r.focus())
+          << "a blocked edit must not close the widget either "
+          << "(motionEnabled=" << enabled << " motionActive=" << active << ")";
+    }
+  }
+}
+
+TEST(UiStateStopsAutoClose, TheOpeningPressMarkerDoesNotSurviveTheAutoClose) {
+  // The STOPS Press that opened the widget can still be "physically down" -
+  // its own Click/Hold/Release not yet delivered - at the instant an arrow's
+  // Click sets the other stop and the widget auto-closes. handleKey()'s
+  // top-of-function self-heal (any event on a key other than Stops clears
+  // m_stopsConfirming and m_stopsOpenedByPress - see uistate.cpp) already runs
+  // for that arrow event, so by the time STOPS's own tardy Release (or a
+  // dropped one, per the KeyArray hazards documented in buttonpad.cpp) shows
+  // up there must be nothing left of the old press to resurrect: the Release
+  // has to be inert, must not reopen Stops focus, and must not leave the
+  // confirm bar armed.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kNoStops);  // opens; nothing to arm
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::SetLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Click, kNoStops));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  // The original STOPS gesture's own trailing Release, arriving late.
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Release, kNoStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus())
+      << "a stray Release from the press that opened the widget must not "
+         "resurrect it";
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()))
+      << "and must not leave the confirm bar armed either";
+}
+
+TEST(UiStateStopsAutoClose, FreshStopsPressAfterTheAutoCloseOpensCleanly) {
+  // Guards against a naive fix that leaves m_stopsOpenedByPress or
+  // m_stopsConfirming stuck from the closed gesture: either would corrupt the
+  // very next STOPS press - a bogus immediate close (this test), or a confirm
+  // bar that starts already primed (the next test).
+  Rig r;
+  r.click(UiKey::Stops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::SetLeftStop, r.click(UiKey::Left, kNoStops));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  // A fresh press must open normally - exactly case one of the selector
+  // toggle (UiStateStopsToggle.CaseOneTapFromJogOpensAndStaysOpen): the Click
+  // of the SAME press that opened it must not immediately close it again.
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Click, kNoStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus())
+      << "the Click of this fresh press must not immediately close it";
+}
+
+TEST(UiStateStopsAutoClose, TheConfirmBarStartsCleanOnTheNextStopsPress) {
+  // The other half of the guard above: if the auto-close left m_stopsConfirming
+  // stuck true, the NEXT press's own arming logic (which only ever sets it,
+  // never clears it first - see the STOPS Press branch in uistate.cpp) could
+  // read as already-armed for a gesture that has not earned it. Here the next
+  // press opens with no stop set at all, so a correctly-behaved widget must
+  // report a flat bar throughout.
+  Rig r;
+  r.click(UiKey::Stops, kLeftOnly);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::SetRightStop, r.click(UiKey::Right, kLeftOnly));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  // Both stops are now set (left from setup, right just now), so a fresh
+  // press's own Hold really would clear both - the point here is only that no
+  // STALE arming survives from before the close.
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops));
+  EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
+}
+
+TEST(UiStateStopsAutoClose, TheRestScreenIsFullyFunctionalAfterTheAutoClose) {
+  // Not just "focus() reads Jog" - the arrows must actually drive the carriage
+  // again afterwards, proving the close is a real return to Jog and not a
+  // stray value that happens to compare equal.
+  Rig r;
+  r.click(UiKey::Stops);
+  ASSERT_EQ(UiIntent::SetLeftStop, r.click(UiKey::Left, kNoStops));
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::JogRightStart,
+            r.key(UiKey::Right, UiKeyEvent::Press, kNoStops));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Right, UiKeyEvent::Release, kNoStops));
 }
 
 // --- The confirm bar itself (rendered by lib/display, not here) -------------
