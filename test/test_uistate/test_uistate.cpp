@@ -2173,6 +2173,89 @@ TEST(UiStateEncoder, ResetsTheIdleTimeout) {
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
+// ---------------------------------------------------------------------------
+// GitHub issue #5(b): "un-emitted detents carry forward indefinitely" also
+// claims every replayed detent refreshes the idle clock even while the
+// encoder is inhibited, so that once a backlog starts draining under power a
+// picker "stays on screen indefinitely".
+//
+// That literal claim does not survive contact with tick()'s close-on-motion
+// (OWNER RULING, above the tick() implementation): ButtonPad::handle() calls
+// tick() with the SAME context on every single 100 ms pass, right after
+// draining the encoder (src/buttonpad.cpp), and tick() forces any widget
+// straight back to Jog the instant underPower(ctx) is true -
+// UNCONDITIONALLY, not gated on the idle clock at all (see
+// UiStateStopsToggle.TheMarkerDoesNotSurviveCloseOnMotion above, which closes
+// a widget with ZERO elapsed time). A flood of inert, under-power detents
+// cannot keep a widget open past the very next tick() call - there is no
+// window for "indefinitely" to open up in. FloodOfInhibitedDetentsDoes-
+// NotStallCloseOnMotionIssue5 below is the disproof, and is NOT expected to
+// fail.
+//
+// The SAME root cause - handleKey() sets m_lastActivityMs unconditionally,
+// even for a Click that resolves to UiIntent::None (uistate.cpp:163, above
+// every early return) - is nonetheless real, reachable, and worse than the
+// issue's own framing: UiFocus::Stops is inert to the knob ALWAYS, not only
+// under power (UiStateEncoderStops.IsInertInTheStopsWidget runs entirely at
+// rest). That inertness has nothing to do with underPower(), so close-on-
+// motion never fires to rescue it - a knob that is dead in STOPS is just as
+// dead sitting still. AnInertKnobDetentMustNotResetTheIdleTimeoutIssue5 below
+// pins the fix and IS expected to fail today.
+//
+// The design question this raises: is an inhibited encoder Click "a key
+// event, even an inert one" in the sense the comment at uistate.cpp:161-163
+// means? For a real KEY that answer is yes on purpose
+// (UiStateTimeout.AnInertKeyEventAlsoResetsTheTimeout) - KeyScanner only ever
+// reports a Press after its 8 ms debounce integration, so the event itself is
+// proof a finger touched the panel, whatever it then turns out to do. The
+// knob has no equivalent guarantee: it is raw PCNT quadrature counts with no
+// debounce beyond a 12.79 us glitch filter that cannot reach mechanical
+// bounce, let alone electrical noise, on a timescale of milliseconds
+// (CLAUDE.md, "the filter is a red herring"). An EncoderCw/Ccw Click is not
+// proof that anyone touched anything. Treating a detent UiState has already
+// declared permanently inert as equal-weight activity to a real keypress is
+// the wrong side of that asymmetry: it lets ordinary line noise hold the
+// STOPS widget open past kFocusTimeoutMs for as long as the trickle
+// continues - no burst required, no motion required, nothing but the odd
+// stray count every few seconds.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateEncoderInhibit,
+     FloodOfInhibitedDetentsDoesNotStallCloseOnMotionIssue5) {
+  // CHARACTERIZATION - disproves the literal (b) claim. Not expected to fail.
+  Rig r;
+  r.click(UiKey::Rate);
+  ASSERT_EQ(UiFocus::Rate, r.focus());
+
+  const UiContext moving = ctx(false, false, /*motionEnabled=*/false,
+                               /*motionActive=*/true);
+  for (int i = 0; i < 200; i++) {
+    ASSERT_EQ(UiIntent::None, turn(r, true, moving)) << "detent " << i;
+  }
+  EXPECT_TRUE(r.tick(moving));
+  EXPECT_EQ(UiFocus::Jog, r.focus())
+      << "close-on-motion must not wait for the idle clock";
+}
+
+TEST(UiStateEncoderStops, AnInertKnobDetentMustNotResetTheIdleTimeoutIssue5) {
+  // EXPECTED TO FAIL today: handleKey() refreshes m_lastActivityMs before it
+  // even looks at the key, so this inert detent restarts the clock exactly as
+  // a real keypress would, and the widget never expires while the trickle
+  // continues.
+  Rig r;
+  r.click(UiKey::Stops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  r.advance(kTimeout - 1);
+  ASSERT_EQ(UiIntent::None, turn(r, true))
+      << "STOPS is inert to the knob, always "
+         "(UiStateEncoderStops.IsInertInTheStopsWidget)";
+  r.advance(kTimeout - 1);
+  EXPECT_TRUE(r.tick())
+      << "an inert knob detent is not proof of a touch and must not have "
+         "restarted the idle clock the way a real key event does";
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+}
+
 // ===========================================================================
 // 11. STOPS held: clear BOTH stops, behind a 1 s confirm bar (spec §4)
 //

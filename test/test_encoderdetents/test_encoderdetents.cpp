@@ -211,6 +211,93 @@ TEST(EncoderDetents, TheBoundWorksInBothDirections) {
   EXPECT_EQ(-3, r.poll());
 }
 
+// --- GitHub issue #5: the backlog a bound-and-carry m_pending can leave -----
+//
+// update() itself has no notion of "the encoder is inhibited" - it is
+// deliberately pure, with no Arduino, no UiContext, no idea the carriage
+// exists (see the class comment at the top of this header). What issue #5
+// actually reports is a PROPERTY of that purity: once a single 100 ms pass
+// sees more whole detents than kMaxPerCall, the excess sits in m_pending and
+// comes back kMaxPerCall at a time on every SUBSEQUENT call - moving or not,
+// noise or a real spin, because update() cannot tell the difference and is
+// called every pass regardless of motion state (src/keyarray.cpp:141-150:
+// "consumeEncoderDelta() is called unconditionally every pass").
+//
+// These tests CHARACTERISE that mechanism rather than assert a fix.
+// EncoderDetents is doing exactly what OneCallIsBoundedButNothingIsLost above
+// says it should; whether a STALE backlog is worth discarding is a judgement
+// this class deliberately has no context to make (see ResetClearsAny-
+// PendingBacklogCharacterization below for the one relevant thing it already
+// exposes). None of these are expected to fail.
+TEST(EncoderDetentsBacklogFlood,
+     BacklogOnlyBeginsStrictlyAboveKMaxPerCallDetentsInASinglePass) {
+  // The exact reachability boundary: a single 100 ms pass has to see MORE
+  // than kMaxPerCall (64) whole detents - more than
+  // kMaxPerCall * kCountsPerDetent = 256 raw counts - before anything is left
+  // behind at all. Landing exactly on the bound leaves nothing.
+  Rig r;
+  EXPECT_EQ(EncoderDetents::kMaxPerCall,
+            r.move(EncoderDetents::kMaxPerCall * kCountsPerDetent));
+  EXPECT_EQ(0, r.dec().pending())
+      << "exactly kMaxPerCall detents in one pass must not start a backlog";
+
+  Rig r2;
+  EXPECT_EQ(EncoderDetents::kMaxPerCall,
+            r2.move((EncoderDetents::kMaxPerCall + 1) * kCountsPerDetent));
+  EXPECT_EQ(1, r2.dec().pending())
+      << "one detent past the bound is the first to survive into m_pending";
+}
+
+TEST(EncoderDetentsBacklogFlood, TheGlitchLimitItselfIsAcceptedNotDropped) {
+  // kGlitchLimit is checked with a strict '>', so a delta of EXACTLY 16384
+  // raw counts is accepted as real motion, not dropped as a glitch - this is
+  // the single largest backlog one pass can ever create: 4096 whole detents,
+  // of which kMaxPerCall (64) return immediately and the remaining 4032 sit
+  // in m_pending. At 64/pass that is ceil(4032/64) = 63 more 100 ms passes -
+  // 6.3 seconds - of reported motion after whatever produced the burst is
+  // long over.
+  Rig r;
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.move(16384));
+  EXPECT_EQ(4096 - EncoderDetents::kMaxPerCall, r.dec().pending());
+}
+
+TEST(EncoderDetentsBacklogFlood,
+     ABacklogDrainsAtKMaxPerCallPerPollRegardlessOfFurtherMovement) {
+  // The mechanism the issue calls "floods... until it drains": once a burst
+  // has left N detents in m_pending, poll() alone - no further raw movement
+  // required - pays it out kMaxPerCall at a time. Illustrative N=200: three
+  // full passes of 64 and a last one of 8, i.e. 400 ms of reported motion
+  // after the knob (or the noise that turned it) has gone completely quiet.
+  Rig r;
+  const int N = 200;
+  ASSERT_GT(N, EncoderDetents::kMaxPerCall);
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.move(N * kCountsPerDetent));
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.poll());
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.poll());
+  EXPECT_EQ(N - 3 * EncoderDetents::kMaxPerCall, r.poll())
+      << "the last, partial pass";
+  EXPECT_EQ(0, r.poll());
+}
+
+TEST(EncoderDetentsBacklogFlood, ResetClearsAnyPendingBacklogCharacterization) {
+  // NOT a new behaviour - reset() already zeroes m_pending (and m_residue),
+  // rebasing m_lastRaw to the position handed in. It exists today for
+  // KeyArray's construction-time seed, but nothing about its signature or
+  // effect is specific to that use: calling reset(currentRawCount) at any
+  // later time discards a backlog exactly as cleanly. A caller that already
+  // knows the encoder is inhibited (ButtonPad has UiContext; this class
+  // deliberately does not, see the class comment) can use this EXISTING
+  // public method to drop a stale backlog without EncoderDetents needing to
+  // learn anything about motion state. Recorded here so a future change does
+  // not have to rediscover it.
+  Rig r;
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.move(500 * kCountsPerDetent));
+  ASSERT_GT(r.dec().pending(), 0);
+  r.dec().reset(r.raw());
+  EXPECT_EQ(0, r.dec().pending());
+  EXPECT_EQ(0, r.poll());
+}
+
 // --- Construction -----------------------------------------------------------
 
 TEST(EncoderDetents, ResetAdoptsThePositionWithoutReportingIt) {
