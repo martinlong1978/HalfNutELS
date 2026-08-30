@@ -1,0 +1,73 @@
+# Line endings. See GitHub issue #9.
+#
+# THE CONVENTION IS LF, IN THE REPOSITORY AND IN THE WORKING TREE.
+#
+# Chosen deliberately rather than by freezing what was on disk. The claim in
+# CLAUDE.md that "lib/ sources are CRLF; src/ and README are LF" was only half
+# true - measured before writing this, lib/ was 19 CRLF against 16 LF, mixed
+# within itself, so the CRLF really was historical accident and not a
+# convention worth preserving. Everywhere else was already overwhelmingly LF
+# (test/ 28-0, tools/ 14-0, src/ 13-1), so LF is both the standard choice for a
+# cross-platform C++ project and the one that moves the fewest files.
+#
+# `eol=lf` rather than a bare `text=auto` on purpose: it pins the WORKING TREE
+# to LF as well, so a checked-out file is byte-identical to its blob. That is
+# what actually stops the churn the issue describes - PlatformIO and the IDE
+# rewriting files with nothing but line-ending changes - because after this
+# there is no representation for them to rewrite it INTO. A bare `text=auto`
+# would leave Windows checkouts as CRLF and keep that door open.
+*               text=auto eol=lf
+
+# Shell scripts break outright if they reach a shell with CRLF, so this one is
+# not a style preference. scripts/release.sh is the OTA publish path.
+*.sh            text eol=lf
+
+# Windows batch is the opposite case: cmd.exe wants CRLF. None are tracked
+# today (publish.cmd is gitignored) but the rule belongs here before one is.
+*.cmd           text eol=crlf
+*.bat           text eol=crlf
+
+# Binary - never converted, never diffed as text.
+*.png           binary
+*.zip           binary
+*.bin           binary
+
+# CAD exports are stored EXACTLY as the tool wrote them, and are the one place
+# this file deliberately does nothing.
+#
+# STEP is ASCII (AP214), so `text=auto` would happily rewrite it - and the
+# three tracked files disagree with each other about line endings already:
+# cad/EnclosureOnly.step is stored LF, cad/Enclosure.step and cad/Keycaps.step
+# are stored CRLF. Normalising them is a 191,405-line diff across two files
+# that nobody will ever read a diff of, to fix a problem they do not have:
+# issue #9 is about PlatformIO and the IDE rewriting SOURCE, and neither
+# touches cad/. `binary` would be wrong for the opposite reason - it freezes
+# the working-tree copy rather than the stored one, which silently rewrites
+# EnclosureOnly.step's blob 303900 -> 310894 bytes.
+#
+# So: no conversion in either direction, and whatever a CAD tool emits next is
+# what gets committed. If these ever want normalising it should be its own
+# commit, on purpose, not a side effect of a line-endings policy.
+cad/**          -text
+
+# Fabrication output must stay byte-stable. The README tells people to order
+# the board from kicad/LVGL/jlcpcb/production_files/, so these files are
+# committed deliberately (see .gitignore); Gerber and drill files are
+# technically ASCII, but nothing good comes of git rewriting the bytes of
+# something a board house will read.
+kicad/LVGL/gerbers/**   -text
+kicad/LVGL/production/**  -text
+*.gbr           -text
+*.gbrjob        -text
+*.drl           -text
+*.gtl           -text
+*.gto           -text
+*.gtp           -text
+*.gts           -text
+*.gbs           -text
+*.gm1           -text
+*.ipc           -text
+
+# KiCad's own project files are text and diff usefully, but they are written by
+# the tool rather than by hand - let them normalise like everything else and do
+# not hand-edit them to fix a line ending.
