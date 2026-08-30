@@ -107,16 +107,6 @@ public:
     // knob goes through exactly the same path as every key.
     int consumeEncoderDelta();
 
-    // Re-sync the decoder to the live raw count and drop whatever it was
-    // holding, WITHOUT reporting it as detents. ButtonPad calls this instead
-    // of consumeEncoderDelta() for as long as the knob is inhibited
-    // (uistate.h's underPower()) - issue #5, Part 2: EncoderDetents has no
-    // idea the carriage exists, so left alone it keeps a raw noise backlog
-    // that would otherwise drain out as real Clicks once the carriage stops
-    // and the knob wakes back up, up to several seconds after whatever
-    // produced it. A no-op when ELS_UI_ENCODER is not built.
-    void resetEncoderBacklog();
-
 #ifdef ELS_UI_ENCODER
     // Counter artefacts discarded by the detent decoder, alongside
     // bounceRejects()/ringDrops(). Should stay at zero.

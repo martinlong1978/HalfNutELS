@@ -241,28 +241,6 @@ struct UiContext {
                        // this yet (test-author scaffolding, see UiFocus::Ota).
 };
 
-// "The carriage is under power, in any form." Both flags, not motionActive
-// alone, even though UiContext documents it as a superset - the OR is what
-// makes the predicate correct for any caller, and it costs nothing. This is
-// THE SAME PREDICATE uistate.cpp's motion lockout, stopEditsInhibited() and
-// encoderInhibited() are all built on; it is declared here, rather than left
-// private to that file, so a second caller can ask the identical question
-// without holding a second copy of the OR.
-//
-// The second caller is ButtonPad (issue #5, Part 2): EncoderDetents
-// deliberately has no idea the carriage exists (lib/keyscan/
-// encoderdetents.h), so it keeps accumulating a raw detent backlog from a
-// directionally-biased noise burst even while the knob is provably inert to
-// the operator. Left alone, that backlog drains out as real Clicks once the
-// carriage stops and the knob wakes back up - which can land anywhere up to
-// several seconds after whatever produced the burst is over. ButtonPad calls
-// this to decide when to reset() the decoder instead of draining it, so the
-// backlog cannot outlive the inhibited period it was born in. See the call
-// site in src/buttonpad.cpp.
-inline bool underPower(const UiContext& ctx) {
-  return ctx.motionEnabled || ctx.motionActive;
-}
-
 class UiState {
  public:
   UiState();

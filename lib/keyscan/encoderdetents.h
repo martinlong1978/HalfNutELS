@@ -102,10 +102,28 @@ class EncoderDetents {
   // Detents held back by the per-call bound, waiting for the next call.
   int pending() const { return m_pending; }
 
-  // The most one call can return. ButtonPad replays one UiState::handleKey()
-  // per detent in a `while` loop, so that loop needs a bound; the excess is
-  // KEPT and handed over next pass rather than dropped, so a bound cannot cost
-  // the operator a step. At a 100 ms poll a thumb cannot reach this anyway.
+  // The most one call can return, AND the most that may still be owed once it
+  // has returned (GitHub issue #5, Part 2, revised). ButtonPad replays one
+  // UiState::handleKey() per detent in a `while` loop, so the return value
+  // needs a bound - that half is unchanged. What changed is the residual:
+  // it used to be kept in full and handed over next pass regardless of size,
+  // so a directionally-biased noise burst could leave thousands of detents
+  // to drain out kMaxPerCall at a time, for seconds, long after whatever
+  // produced it was over - moving or not, because update() has no idea the
+  // carriage exists and is called every pass regardless of motion state.
+  //
+  // The residual is now ALSO clamped to this bound: at most one further
+  // pass of backlog may survive a call. This can cost a step - a burst
+  // large enough to exceed 2*kMaxPerCall in one 100 ms pass loses the
+  // excess rather than draining it out later - but that is the trade this
+  // bound is FOR: at a 100 ms poll a human thumb cannot produce anywhere
+  // near kMaxPerCall detents in one pass, let alone two, so anything beyond
+  // that bound was never a real step to begin with (see kGlitchLimit's own
+  // note: half the 16-bit range is 4096 detents in one pass). Discarding it
+  // needs no context about WHY the detents arrived - alarm, UiFocus::Stops,
+  // OTA, or genuine motion - which is exactly the question this class is
+  // deliberately unable to ask. See test/test_encoderdetents for the
+  // reasoning this replaced (grep "issue #5").
   static constexpr int kMaxPerCall = 64;
 
  private:
@@ -114,6 +132,11 @@ class EncoderDetents {
     if (out > kMaxPerCall) out = kMaxPerCall;
     if (out < -kMaxPerCall) out = -kMaxPerCall;
     m_pending -= out;
+    // Cap what remains, not just what left. A residual larger than one more
+    // pass' worth is discarded outright rather than carried forward - see
+    // kMaxPerCall's comment for why that is safe.
+    if (m_pending > kMaxPerCall) m_pending = kMaxPerCall;
+    if (m_pending < -kMaxPerCall) m_pending = -kMaxPerCall;
     return out;
   }
 

@@ -177,38 +177,27 @@ void ButtonPad::handle() {
   // would, and so each step is gated by a fresh context. The loop is bounded:
   // consumeEncoderDelta() clamps what one pass can return.
   //
-  // ISSUE #5, PART 2 - reset instead of drain while inhibited. EncoderDetents
-  // is deliberately pure (lib/keyscan/encoderdetents.h): it has no idea the
-  // carriage exists, so left to consumeEncoderDelta() as usual it keeps
-  // totting up whole detents from a directionally-biased noise burst even
-  // while the knob is provably inert to every Click UiState will return for
-  // it (uistate.cpp's motion lockout returns None for the encoder in every
-  // focus under power). That backlog does not vanish with the burst - it
-  // drains out at EncoderDetents::kMaxPerCall a pass, moving or not, for as
-  // long as it takes, which can be several seconds after the carriage stops
-  // and the knob wakes back up. RESETTING every inhibited pass - not merely
-  // once on the transition - re-syncs the decoder's raw baseline to "now" and
-  // zeroes m_pending each time, so a backlog can never accumulate across the
-  // powered period in the first place: there is nothing left for the knob to
-  // hand the operator when it goes live again.
-  //
-  // underPower() lives in uistate.h rather than being re-derived here, so
-  // this can never drift from the identical question uistate.cpp's own
-  // lockout and encoderInhibited() ask - see the note on that function.
-  if (underPower(buildContext())) {
-    m_pad->resetEncoderBacklog();
-  } else {
-    int detents = m_pad->consumeEncoderDelta();
-    while (detents > 0) {
-      applyIntent(m_ui.handleKey(UiKey::EncoderCw, UiKeyEvent::Click,
-                                 buildContext(), now));
-      detents--;
-    }
-    while (detents < 0) {
-      applyIntent(m_ui.handleKey(UiKey::EncoderCcw, UiKeyEvent::Click,
-                                 buildContext(), now));
-      detents++;
-    }
+  // Drained unconditionally, moving or not - no motion-gating needed here.
+  // GitHub issue #5, Part 2 first tried resetting the decoder's backlog on
+  // every pass the knob was underPower(), but that gate is not the same
+  // condition as "the encoder is inert": the stepper alarm and UiFocus::Stops
+  // both leave the knob dead to every Click UiState will return while
+  // underPower() is false, so the gap the reset was meant to close would
+  // still be open. The bound now lives in EncoderDetents itself
+  // (lib/keyscan/encoderdetents.h, kMaxPerCall) - it caps the residual left
+  // after a call rather than the caller's knowledge of why the encoder is
+  // inert, so ButtonPad needs no opinion on the machine's state to drain it
+  // safely.
+  int detents = m_pad->consumeEncoderDelta();
+  while (detents > 0) {
+    applyIntent(m_ui.handleKey(UiKey::EncoderCw, UiKeyEvent::Click,
+                               buildContext(), now));
+    detents--;
+  }
+  while (detents < 0) {
+    applyIntent(m_ui.handleKey(UiKey::EncoderCcw, UiKeyEvent::Click,
+                               buildContext(), now));
+    detents++;
   }
 
   // Must run every pass, not only when a key arrived: this is what expires the

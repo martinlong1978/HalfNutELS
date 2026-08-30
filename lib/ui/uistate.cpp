@@ -75,11 +75,7 @@ inline bool isEncoder(UiKey k) {
 
 // "The carriage is under power, in any form." The one place the two motion
 // flags are combined, so every rule that depends on the machine being at rest
-// asks the same question and they can never drift apart. NOW DECLARED IN
-// uistate.h (issue #5, Part 2) rather than here, so ButtonPad can ask the
-// same question when deciding whether to reset the encoder's backlog instead
-// of draining it - see the note there for why. This file still gets it from
-// the header include; nothing below needed to change.
+// asks the same question and they can never drift apart.
 //
 // Both flags, not just motionActive, even though UiContext documents the latter
 // as a superset: the OR is what makes the rule correct for any caller, and it
@@ -87,6 +83,9 @@ inline bool isEncoder(UiKey k) {
 // motionEnabled alone is NOT enough - it misses the powered run to a stop,
 // during which clearing the stop being travelled towards deletes that run's
 // only arrest.
+inline bool underPower(const UiContext& ctx) {
+  return ctx.motionEnabled || ctx.motionActive;
+}
 
 // No stop may be edited while the carriage is under power - §4's rule, so the
 // per-arrow edits and the clear-both gesture can never drift apart.
