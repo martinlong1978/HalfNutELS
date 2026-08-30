@@ -75,7 +75,11 @@ inline bool isEncoder(UiKey k) {
 
 // "The carriage is under power, in any form." The one place the two motion
 // flags are combined, so every rule that depends on the machine being at rest
-// asks the same question and they can never drift apart.
+// asks the same question and they can never drift apart. NOW DECLARED IN
+// uistate.h (issue #5, Part 2) rather than here, so ButtonPad can ask the
+// same question when deciding whether to reset the encoder's backlog instead
+// of draining it - see the note there for why. This file still gets it from
+// the header include; nothing below needed to change.
 //
 // Both flags, not just motionActive, even though UiContext documents the latter
 // as a superset: the OR is what makes the rule correct for any caller, and it
@@ -83,9 +87,6 @@ inline bool isEncoder(UiKey k) {
 // motionEnabled alone is NOT enough - it misses the powered run to a stop,
 // during which clearing the stop being travelled towards deletes that run's
 // only arrest.
-inline bool underPower(const UiContext& ctx) {
-  return ctx.motionEnabled || ctx.motionActive;
-}
 
 // No stop may be edited while the carriage is under power - §4's rule, so the
 // per-arrow edits and the clear-both gesture can never drift apart.
@@ -156,10 +157,43 @@ bool UiState::menuOpen() const { return m_menuOpen; }
 
 int UiState::menuIndex() const { return m_menuIndex; }
 
+// THE ENCODER CARVE-OUT (issue #5): a key event is proof someone touched the
+// panel because KeyScanner only ever reports one after 8 ms of debounce
+// integration (see uistate.h's UiKey note); "even an inert one counts as
+// activity" is deliberate for that case. An EncoderCw/Ccw Click carries no
+// such guarantee - it is a raw PCNT quadrature count behind a glitch filter
+// that tops out at 12.79 us, one to three orders of magnitude short of
+// mechanical bounce, let alone electrical noise, on a millisecond timescale
+// (CLAUDE.md, "the filter is a red herring"). A detent this function has
+// already decided is inert (power-inhibited, under the alarm or OTA focus,
+// UiFocus::Stops always, or any event that is not a Click) proves nothing,
+// and must not be equal-weight activity to a real keypress: line noise on
+// the encoder lines would otherwise hold a widget open past kFocusTimeoutMs
+// forever, no burst or motion required.
+//
+// This wraps handleKeyImpl() rather than editing every encoder return, which
+// would mean finding and annotating each one and re-finding them on every
+// future edit to that switch. Restoring the timestamp AFTER the real body
+// ran is equivalent to skipping the update in the first place, because
+// nothing in between reads m_lastActivityMs - and it lets one line at the
+// call site state the rule for every current and future inert encoder
+// return, uniformly, rather than special-casing UiFocus::Stops alone.
 UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
                             unsigned long nowMs) {
+  const unsigned long savedActivity = m_lastActivityMs;
+  const UiIntent out = handleKeyImpl(key, ev, ctx, nowMs);
+  if (isEncoder(key) && out == UiIntent::None) {
+    m_lastActivityMs = savedActivity;  // an inert detent is not proof of a touch
+  }
+  return out;
+}
+
+UiIntent UiState::handleKeyImpl(UiKey key, UiKeyEvent ev, const UiContext& ctx,
+                                 unsigned long nowMs) {
   // Any key event - even an inert one - counts as activity and restarts the
-  // idle clock (§1).
+  // idle clock (§1). NOT true for the encoder's inert Clicks - see
+  // handleKey()'s wrapper above, which undoes this write for exactly that
+  // case rather than this line trying to know about it.
   m_lastActivityMs = nowMs;
 
   // Any event on any OTHER key ends an in-progress clear-both confirm. The

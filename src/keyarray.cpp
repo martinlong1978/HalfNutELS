@@ -153,6 +153,15 @@ int KeyArray::consumeEncoderDelta() {
 #endif
 }
 
+void KeyArray::resetEncoderBacklog() {
+#ifdef ELS_UI_ENCODER
+    // reset() rebases m_lastRaw to the live count and zeroes m_pending (and
+    // m_residue) - see encoderdetents.h. Same call the constructor makes to
+    // seed the decoder; here it discards a backlog on the way past instead.
+    m_detents.reset(m_encoder.getCount());
+#endif
+}
+
 // One complete matrix read, in task context.
 //
 // Two phases: drive the columns and read the rows to find WHICH row is active,
