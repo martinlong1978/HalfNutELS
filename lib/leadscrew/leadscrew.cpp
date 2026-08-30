@@ -476,9 +476,15 @@ void Leadscrew::update() {
   }
 
 
-  if (m_motionMode == MM_DISABLED || m_motionMode == MM_DECELLERATE) {
-    // consume position but don't move  
+  if (m_motionMode == MM_DISABLED || m_motionMode == MM_DECELLERATE || m_motionMode == MM_UNSET) {
+    // consume position but don't move
     // actually it will decellerate if necessary
+    // MM_UNSET joins MM_DISABLED here for the same reason it already does at
+    // the six !=-MM_DISABLED-and-!=-MM_UNSET call sites elsewhere (buttonpad,
+    // DebugSink, WebSettings, the display state bar, the screenshot scenes):
+    // MM_UNSET is not an unknown value, it's the named "nothing commanded"
+    // state, and this is where that meaning gets enforced for real rather
+    // than just read.
     if (m_leadscrewSpeed == 0) {
       m_expectedPosition = (m_currentPosition);
       m_spindle->consumePosition();
@@ -726,6 +732,17 @@ void Leadscrew::update() {
         nextDirection != m_currentDirection ||
         goingToHitLeftEndstop || goingToHitRightEndstop;
       break;
+    // MM_UNSET falls through to the same rule as MM_DISABLED, not as a
+    // defensive default for a value the switch doesn't recognise: it's a
+    // named state meaning "nothing commanded", and six sites elsewhere in
+    // the codebase (buttonpad.cpp x2, DebugSink.cpp, WebSettings.cpp,
+    // ST7789_320_240displaylvgl.cpp, tools/screenshot/src/scenes.cpp) already
+    // treat MM_UNSET and MM_DISABLED as equivalent. An explicit case (not
+    // `default:`) keeps -Wswitch checking this list against the enum.
+    // Paired with the MM_UNSET addition to the rest/re-pin block above: this
+    // switch brings a mode entered at speed down to zero, and the re-pin
+    // then pins it there, the same two-step MM_DECELLERATE already relies on.
+    case MM_UNSET:
     case MM_DISABLED:
     case MM_DECELLERATE:
       shouldStop = true;
