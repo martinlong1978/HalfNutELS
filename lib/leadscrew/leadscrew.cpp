@@ -377,6 +377,18 @@ void Leadscrew::update() {
   if (hitLeftEndstop || hitRightEndstop) {
     if ((m_motionMode == GlobalMotionMode::MM_JOG_LEFT && hitLeftEndstop)
       || (m_motionMode == GlobalMotionMode::MM_JOG_RIGHT && hitRightEndstop)
+      // The hold-jog (issue #11) arrests here on exactly the same terms as the
+      // powered run above, and deliberately by the same spelled-out equality
+      // rather than an MMF_ mask: a stop being SET on that side is the ONLY
+      // reason holding the arrow means this mode instead of the dead-man
+      // MM_INTERACTIVE_JOG_* below, so arresting on it is the whole point of
+      // the mode rather than an incidental property of the jog family.
+      //
+      // Direction-matched for the same reason MM_JOG_* is: the operator must
+      // still be able to hold the arrow and drive OFF the stop the carriage is
+      // already parked on. Only travel INTO a stop arrests.
+      || (m_motionMode == GlobalMotionMode::MM_HOLD_JOG_LEFT && hitLeftEndstop)
+      || (m_motionMode == GlobalMotionMode::MM_HOLD_JOG_RIGHT && hitRightEndstop)
       // A synced thread arrests at whichever endstop it is travelling into: the
       // left stop for a normal (right-hand) thread, the right stop for a reverse
       // (left-hand) thread. Guard by direction so starting at the opposite stop
@@ -444,6 +456,15 @@ void Leadscrew::update() {
       // it is the operator's only way to move the carriage off a stop that was
       // set in the wrong place. Adding them here is a one-line change that looks
       // like tidying and is not.
+      //
+      // MM_HOLD_JOG_* above is the deliberate counterpart, and the difference
+      // between the two is the entire safety distinction: the hold-jog is only
+      // ever reached on a side whose stop is SET, where the operator is asking
+      // to approach a limit they chose, so it arrests; the interactive jog is
+      // only ever reached on a side with NO stop, or as the escape from one in
+      // the wrong place, so it does not. Since issue #11 that escape is no
+      // longer available on a side that HAS a stop - unsetting the stop first
+      // is the route, and that is permitted at rest (docs/ux-redesign.md Sec. 3).
       || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitLeftEndstop
         && (m_currentDirection == LeadscrewDirection::LEFT || positionErrorRaw < -1))
       || (m_motionMode == GlobalMotionMode::MM_ENABLED && hitRightEndstop
@@ -479,8 +500,22 @@ void Leadscrew::update() {
    *
    * If the next direction is different from the current direction, we
    * should start decelerating to move in the intended direction
+   *
+   * WHERE A MODE SITS RELATIVE TO `&& !hitEndstop` IS THE WHOLE DIFFERENCE
+   * BETWEEN THE TWO JOGS, and it is not a formatting choice. A mode named
+   * INSIDE the bracket is gated by the stop: once hitRightEndstop is true this
+   * branch stops selecting RIGHT, no direction is latched, no step is emitted,
+   * and the arrest above finishes the job. A mode OR'd in OUTSIDE the bracket -
+   * MM_INTERACTIVE_JOG_* alone - keeps selecting its direction with the stop
+   * standing on it, which is exactly how the dead-man jog drives through a
+   * misplaced stop.
+   *
+   * MM_HOLD_JOG_* (issue #11) therefore goes INSIDE, alongside MM_JOG_*: it is
+   * the hold gesture on a side whose stop is SET, and it must arrest there. It
+   * differs from MM_JOG_* only in speed, which is settled in the shouldStop
+   * switch below, not here.
    */
-  if ((((positionError > 1 && !jogMode) || m_motionMode == MM_JOG_RIGHT) && !hitRightEndstop) || m_motionMode == MM_INTERACTIVE_JOG_RIGHT) {
+  if ((((positionError > 1 && !jogMode) || m_motionMode == MM_JOG_RIGHT || m_motionMode == MM_HOLD_JOG_RIGHT) && !hitRightEndstop) || m_motionMode == MM_INTERACTIVE_JOG_RIGHT) {
     nextDirection = LeadscrewDirection::RIGHT;
     if (m_currentDirection == LeadscrewDirection::LEFT && m_leadscrewSpeed == 0) {
       m_currentDirection = LeadscrewDirection::UNKNOWN;
@@ -489,7 +524,7 @@ void Leadscrew::update() {
       m_io->writeDirPin(config->dirRight());
       m_currentDirection = LeadscrewDirection::RIGHT;
     }
-  } else if ((((positionError < -1 && !jogMode) || m_motionMode == MM_JOG_LEFT) && !hitLeftEndstop) || m_motionMode == MM_INTERACTIVE_JOG_LEFT) {
+  } else if ((((positionError < -1 && !jogMode) || m_motionMode == MM_JOG_LEFT || m_motionMode == MM_HOLD_JOG_LEFT) && !hitLeftEndstop) || m_motionMode == MM_INTERACTIVE_JOG_LEFT) {
     nextDirection = LeadscrewDirection::LEFT;
     if (m_currentDirection == LeadscrewDirection::RIGHT && m_leadscrewSpeed == 0) {
       m_currentDirection = LeadscrewDirection::UNKNOWN;
@@ -705,6 +740,27 @@ void Leadscrew::update() {
     case MM_INTERACTIVE_JOG_RIGHT:
       shouldStop = m_leadscrewSpeed > ( ((config->jogSpeedPps()) *  m_globalState->getJogSpeed())) ||
         nextDirection != m_currentDirection;
+      break;
+    // The hold-jog is the one mode that takes half its rule from each of the
+    // two above, which is why it needed a mode of its own rather than reusing
+    // one: the SPEED CAP is the interactive jog's, because the jog-speed
+    // multiplier is the control the operator has for how fast a held jog
+    // moves and a jog that ignores it is not the feature (issue #11); the
+    // ENDSTOP TERMS are the powered run's, because this gesture only exists on
+    // a side whose stop is SET and must plan its deceleration to land on it
+    // rather than arrive at speed. MM_INTERACTIVE_JOG_* omits those two terms
+    // deliberately - it is allowed through a stop - and MM_JOG_* omits the
+    // multiplier deliberately, since the click-run is a return-to-stop at the
+    // configured jog speed rather than something the operator is steering.
+    //
+    // Cost is one float multiply and one GlobalState read, identical to the
+    // MM_INTERACTIVE_JOG_* case, and only on an iteration that actually
+    // emitted a pulse. No divide is introduced.
+    case MM_HOLD_JOG_LEFT:
+    case MM_HOLD_JOG_RIGHT:
+      shouldStop = m_leadscrewSpeed > (config->jogSpeedPps() * m_globalState->getJogSpeed()) ||
+        nextDirection != m_currentDirection ||
+        goingToHitLeftEndstop || goingToHitRightEndstop;
       break;
     }
 

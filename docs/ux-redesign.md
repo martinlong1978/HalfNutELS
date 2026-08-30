@@ -135,11 +135,21 @@ With focus on JOG, the arrows are context-sensitive on whether that side has a s
 | ◀ pressed | Left stop `SET` | Left stop `UNSET` |
 |---|---|---|
 | Click | Run under power to the left stop, then hold position | — |
-| Hold | (same as click) | Continuous jog while held; decelerate on release |
+| Hold | Jog while held at the selected manual jog speed, arresting at the left stop; decelerate in place on release | Continuous jog while held; decelerate on release |
 
 ▶ is the mirror. This unifies the two jog behaviours that today are split across a mode
 (`FM_JOG` hold-to-move vs. non-jog click-to-stop) — the machine already knows which one you
 mean, because it knows whether the stop exists.
+
+The two gestures cannot collide: the keypad never emits a `Click` after a `Hold`
+(`lib/keyscan`), so one press is either a run or a jog and never both.
+
+Hold on a side with a stop is a **jog**, not a shorter way to say click. Releasing the arrow
+decelerates the carriage where it is rather than letting it carry on to the stop, and the
+speed is the operator's — `jogSpeedPps() * getJogSpeed()`, the same speed the stop-free jog
+in the right-hand column runs at, not the click-run's fixed `jogSpeedPps()`. The multiplier
+is the control the operator has for how fast a held jog moves; a jog that ignored it would
+not be the feature.
 
 Consequences:
 
@@ -149,6 +159,13 @@ Consequences:
   `MM_DECELLERATE` behaviour, kept).
 - Arrows are **inhibited while `MM_ENABLED`**. The state bar says why rather than silently
   ignoring the press.
+- **Holding an arrow is no longer the escape from a misplaced stop on that side.** The
+  dead-man jog (`MM_INTERACTIVE_JOG_*`) drives straight through a stop, and on a side with a
+  stop set the hold now reaches `MM_HOLD_JOG_*` instead, which arrests at it. The remaining
+  route off a stop that is in the wrong place is to **unset it first** — a hold on that arrow
+  with `STOPS` open (§4) — which is permitted at rest, since stop edits are inhibited only
+  under power. A real behaviour change, and arguably the safer one: the gesture it replaces
+  drove a carriage through a limit towards the chuck.
 - **Jog speed moves onto `OK`.** Today it rides on `next/prevFeedPitch()`, which dispatch to
   `inc/decJogSpeed()` only when the mode is `FM_JOG` (`globalstate.cpp:158-176`). With that
   mode gone it needs an explicit home: tap `OK` at rest, arrows step the speed, `OK` again

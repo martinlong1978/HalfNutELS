@@ -288,6 +288,28 @@ void ButtonPad::applyIntent(UiIntent intent) {
     globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
     break;
 
+  // --- Hold-jog on a side whose stop is SET (Sec. 3, issue #11) ------------
+  // Distinct from the click-run above only in speed: MM_HOLD_JOG_* arrests at
+  // the stop exactly as MM_JOG_* does, but cruises at
+  // jogSpeedPps() * getJogSpeed() - the operator's selected manual jog speed -
+  // because this is a jog the operator is steering, not a return to a stop.
+  // That is why the intent had to be distinct: routing both gestures to
+  // MM_JOG_* left nothing downstream able to tell them apart.
+  //
+  // Ended by the Release, which UiState's dead-man terminator turns into
+  // JogStop -> MM_DECELLERATE above. It is NOT routed to MM_INTERACTIVE_JOG_*:
+  // that mode is deliberately exempt from the endstop arrest
+  // (lib/leadscrew/leadscrew.cpp), which is the behaviour this issue removes
+  // from a side that has a stop.
+  case UiIntent::JogToLeftStop:
+    globalState->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_LEFT);
+    globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
+    break;
+  case UiIntent::JogToRightStop:
+    globalState->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+    globalState->setThreadSyncState(GlobalThreadSyncState::SS_UNSYNC);
+    break;
+
   // --- RATE widget ---------------------------------------------------------
   // setTargetPitchMM() unconditionally, not only when the index moved:
   // next/prevFeedPitch() saturate at the ends of the table, and the leadscrew's

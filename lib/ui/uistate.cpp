@@ -1104,10 +1104,33 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   const bool stopSet = (dir < 0) ? ctx.leftStopSet : ctx.rightStopSet;
 
   if (stopSet) {
-    // Click-to-run. Hold behaves identically (§3 table) and is safe because no
-    // Click follows a Hold. Press/Release must be inert: a Release must never
-    // abort the powered run its own Click just started.
-    if (ev == UiKeyEvent::Click || ev == UiKeyEvent::Hold) {
+    // Hold is NOT the click-run any more (issue #11, owner ruling option 4).
+    // It is a jog that runs while held at the operator's selected manual jog
+    // speed, arrests at this side's stop, and DECELERATES IN PLACE when the
+    // arrow is let go rather than carrying on to the stop. Safe to sit
+    // alongside the click-run because the keypad's gesture vocabulary never
+    // emits a Click after a Hold (lib/keyscan), so one gesture can only ever
+    // be one of the two.
+    //
+    // It is checked BEFORE the Click branch because that branch used to take
+    // both events, and it records in m_jogDir rather than m_runPhase. That
+    // choice is the whole implementation of "release stops it": the dead-man
+    // terminator at the top of handleKey() is the sole reader of m_jogDir and
+    // already answers JogStop on the Release of either arrow whatever else
+    // changed in between, so nothing new is needed here for the release. The
+    // click-run keeps m_runPhase precisely because it must SURVIVE its own
+    // Release and be cancelled later by a deliberate gesture instead.
+    //
+    // The two latches must never both be live - a run in flight has already
+    // returned CancelMotion above, and this path is only reached with
+    // m_runPhase == None.
+    if (ev == UiKeyEvent::Hold) {
+      m_jogDir = dir;
+      return (dir < 0) ? UiIntent::JogToLeftStop : UiIntent::JogToRightStop;
+    }
+    // Click-to-run, unchanged. Press/Release must be inert: a Release must
+    // never abort the powered run its own Click just started.
+    if (ev == UiKeyEvent::Click) {
       // Commanded, not yet confirmed: the caller has not had a chance to move
       // the machine, let alone report it. The reconciliation above promotes
       // this to Confirmed on the first context that says motionActive.

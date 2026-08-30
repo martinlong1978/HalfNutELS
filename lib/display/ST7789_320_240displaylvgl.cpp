@@ -3284,11 +3284,20 @@ void Display::drawStateBar() {
     word = "CUTTING";
     colour = m_palette->colourRun;
     break;
+  // The hold-jog on a side whose stop is SET (MM_HOLD_JOG_*, issue #11) shares
+  // this word with the dead-man jog rather than getting one of its own: to the
+  // operator both are "I am holding the arrow and the carriage is moving", and
+  // the difference between them - whether a stop will arrest it - is already
+  // on screen as the stop marker they set. Without a case here it would fall
+  // to the default and print IDLE while the carriage moves, which is the one
+  // thing this band must never do.
   case MM_INTERACTIVE_JOG_LEFT:
+  case MM_HOLD_JOG_LEFT:
     word = "JOG " LV_SYMBOL_LEFT;
     colour = m_palette->colourCaution;
     break;
   case MM_INTERACTIVE_JOG_RIGHT:
+  case MM_HOLD_JOG_RIGHT:
     word = "JOG " LV_SYMBOL_RIGHT;
     colour = m_palette->colourCaution;
     break;
