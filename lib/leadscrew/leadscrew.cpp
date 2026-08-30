@@ -738,10 +738,32 @@ void Leadscrew::update() {
     // the codebase (buttonpad.cpp x2, DebugSink.cpp, WebSettings.cpp,
     // ST7789_320_240displaylvgl.cpp, tools/screenshot/src/scenes.cpp) already
     // treat MM_UNSET and MM_DISABLED as equivalent. An explicit case (not
-    // `default:`) keeps -Wswitch checking this list against the enum.
+    // `default:`) would let -Wswitch flag the next enum value someone adds -
+    // IF -Wall were enabled here. It isn't (platformio.ini's build_flags for
+    // esp32dev_usb/esp32dev_publish are empty; native passes -Wp,-w). So this
+    // is future-proofing for a warning that isn't currently armed, not a
+    // check running today.
     // Paired with the MM_UNSET addition to the rest/re-pin block above: this
     // switch brings a mode entered at speed down to zero, and the re-pin
     // then pins it there, the same two-step MM_DECELLERATE already relies on.
+    //
+    // THIS ARM CARRIES NO goingToHit*Endstop TERM AND DOES NOT NEED ONE. That
+    // looks like an omission next to the MM_ENABLED and jog arms above, and it
+    // was very nearly "fixed" as one during review. Those terms exist to start
+    // braking EARLY so the axis lands on the stop instead of arriving at speed -
+    // they turn shouldStop true before it otherwise would be. Here it is already
+    // unconditionally true, and decelerationStep() ramps down at m_leadscrewAccel,
+    // the single rate getStoppingDistanceInPulses() itself assumes (v^2/2a). The
+    // axis is therefore already stopping as fast as it physically can, and a
+    // lookahead term could only set a flag that is set.
+    //
+    // Entering any of these three modes AT SPEED with a stop closer than the
+    // stopping distance will overshoot it, and no arrangement of this switch can
+    // prevent that - it is a property of the deceleration rate, not of the
+    // decision. The sync bookkeeping still happens: the re-pin block publishes
+    // SS_UNSYNC on reaching zero, so an overshoot cannot be mistaken for a valid
+    // position. This is also why the endstop-arrest block (~377-471) has no
+    // clause for these modes and must not be given one.
     case MM_UNSET:
     case MM_DISABLED:
     case MM_DECELLERATE:
