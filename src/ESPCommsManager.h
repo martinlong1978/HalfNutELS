@@ -95,6 +95,24 @@ public:
     // delay is (see main.cpp). Both are no-ops on an ordinary boot.
     bool beginBootNotice();
     bool bootNoticeDone();
+
+    // OK on the OTA screen (UiIntent::AckOta, src/buttonpad.cpp). Forwards to
+    // OtaOutcome::acknowledge() - documented safe to call at any phase of the
+    // attempt, including before it has settled, which is why applyIntent()
+    // does not need to ask requiresAck() first. m_outcome is private so this
+    // is the one crossing point; acknowledge() itself is the volatile
+    // single-writer (DisplayTask) / single-reader (OTA task) flag, the same
+    // no-locks bargain as AlarmMonitor::requestClear().
+    void acknowledgeOutcome() { m_outcome.acknowledge(); }
 };
+
+// The one ESPCommsManager, built by main.cpp (main.cpp:39). Reached by extern
+// rather than injected for the same reason `extern Display* display;` is in
+// src/buttonpad.cpp: ButtonPad is constructed before commsManager exists, so
+// there is no ordering in which it could arrive through a constructor
+// argument. Safe to call acknowledgeOutcome() through this from the
+// DisplayTask regardless of what commsManager.loop() is doing on its own
+// task - see the method's own comment.
+extern ESPCommsManager commsManager;
 
 #endif

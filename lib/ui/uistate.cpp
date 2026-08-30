@@ -237,6 +237,55 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
   }
 
   // -------------------------------------------------------------------------
+  // THE OTA SCREEN (UiFocus::Ota), on the alarm pattern immediately above and
+  // for the same reason: the panel's whole job while GlobalState::hasOTA() is
+  // true is to show that screen and take the acknowledgement, so focus is
+  // FORCED and every key but OK is inert - HALT included. See
+  // test/test_uistate/test_uistate.cpp, "UiStateOta", for the full design
+  // rationale (why this needs a UiFocus rather than a route in ButtonPad, why
+  // HALT is inert here for a DIFFERENT mechanism than Alarm's, why the whole
+  // hasOTA() span is gated rather than only a settled failure).
+  //
+  // PRECEDENCE, decided deliberately rather than left to fall out of being
+  // written second: THE ALARM WINS. If ctx.alarm was true above, this code is
+  // never reached at all - the alarm branch already returned. A stepper fault
+  // is a machine-safety condition: the axis is stopped and HELD stopped, and
+  // the operator has a crash to clear before anything else matters. An OTA
+  // outcome is a notice, not a hazard - acknowledging it a tick late costs
+  // nothing. The two should never actually coincide (menuTileBlock() already
+  // refuses MENU_SOFTWARE_UPDATE while motionActive, so an update cannot even
+  // start with the machine unsafe to leave), but "should never coincide" is
+  // exactly the kind of claim a safety ordering must not be left to depend on,
+  // so the ordering is fixed here rather than accidental.
+  //
+  // OK emits AckOta unconditionally, on every click, regardless of phase:
+  // OtaOutcome::acknowledge() is documented safe to call at any point in the
+  // attempt, so UiState needs no visibility into OtaOutcome::requiresAck() to
+  // decide whether to ask.
+  // -------------------------------------------------------------------------
+  if (ctx.ota) {
+    m_menuOpen = false;
+    m_focus = UiFocus::Ota;
+    m_runPhase = RunPhase::None;
+    m_jogDir = 0;
+    m_stopsConfirming = false;
+    m_stopsOpenedByPress = false;
+    if (key == UiKey::Ok && ev == UiKeyEvent::Click) {
+      return UiIntent::AckOta;
+    }
+    return UiIntent::None;
+  }
+
+  // Leaving the OTA screen behind - same reasoning as leaving the alarm above:
+  // a key event can arrive before the next tick() observes hasOTA() going
+  // false, and it must be judged against a focus this file actually
+  // recognises rather than falling through every branch below to whatever the
+  // per-focus arrow switch's default happens to do with UiFocus::Ota.
+  if (m_focus == UiFocus::Ota) {
+    m_focus = UiFocus::Jog;
+  }
+
+  // -------------------------------------------------------------------------
   // HALT: checked before focus, before overlays, before anything (§5).
   // Safety-critical, so it fires on the earliest event of the gesture (Press)
   // as well as on Click and Hold. CancelMotion is idempotent, so a short press
@@ -1142,6 +1191,47 @@ bool UiState::tick(const UiContext& ctx, unsigned long nowMs) {
   if (m_focus == UiFocus::Alarm) {
     // The fault has cleared. Back to the rest screen - see the matching note
     // in handleKey() for why Jog and not wherever the operator had been.
+    m_focus = UiFocus::Jog;
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // THE OTA SCREEN, above close-on-motion for the same reason the alarm is:
+  // it overrides everything, and - unlike a widget or the carousel - it can be
+  // ENTERED with no key event at all, since GlobalState::hasOTA() becomes true
+  // from a menu activation that already closed the carousel on its own (see
+  // the handleKey() note on precedence for why the alarm check above already
+  // covers the case where both were somehow true at once).
+  //
+  // This is also what RELEASES the screen: OK only acknowledges, it does not
+  // dismiss, so the screen comes down only once hasOTA() itself goes false -
+  // the OTA task's own exitAction() - and this is where the panel finds out.
+  //
+  // No idle timeout in either direction, for the same reason as the alarm: an
+  // update the operator has walked away from must still be on screen when
+  // they come back.
+  // -------------------------------------------------------------------------
+  if (ctx.ota) {
+    m_stopsConfirming = false;
+    m_stopsOpenedByPress = false;
+    // The jog direction and run latch go too, exactly as they do on the alarm
+    // path and for the same reason: an OTA attempt starting with no key event
+    // in sight (defensive today, see the block comment above kOta/kOtaMoving)
+    // must not leave a stale jog or run latch for a Release that arrives after
+    // the screen is already up.
+    m_runPhase = RunPhase::None;
+    m_jogDir = 0;
+    if (m_focus == UiFocus::Ota && !m_menuOpen) {
+      return false;  // already up: no transition, nothing to redraw
+    }
+    m_menuOpen = false;
+    m_focus = UiFocus::Ota;
+    return true;
+  }
+  if (m_focus == UiFocus::Ota) {
+    // hasOTA() has gone false. Back to the rest screen, same reasoning as
+    // leaving the alarm: whatever was open before the update started belongs
+    // to a machine state the operator has not seen for the whole attempt.
     m_focus = UiFocus::Jog;
     return true;
   }

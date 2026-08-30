@@ -14,6 +14,8 @@
 #include "alarm.h"
 #include "WebSettings.h"
 #include "setupmode.h"
+// commsManager, for UiIntent::AckOta -> ESPCommsManager::acknowledgeOutcome().
+#include "ESPCommsManager.h"
 
 // The one Display, built by main.cpp's setup(). Reached by extern rather than
 // injected because ButtonPad is constructed FIRST there (Display's constructor
@@ -122,6 +124,13 @@ UiContext ButtonPad::buildContext() {
   // where the alarm task publishes it; ButtonPad never touches the AlarmMonitor
   // except to ask for a clear.
   ctx.alarm = globalState->alarmActive();
+  // The OTA screen. True for the whole of GlobalState::hasOTA()'s span -
+  // connecting/checking/downloading/settled, not only a settled failure - see
+  // the long comment on UiContext::ota in lib/ui/uistate.h and the UiStateOta
+  // block in test/test_uistate/test_uistate.cpp for why. ButtonPad never talks
+  // to ESPCommsManager to READ this; GlobalState is the one bus both tasks
+  // already use (see the "Cross-task state" note in CLAUDE.md).
+  ctx.ota = globalState->hasOTA();
   return ctx;
 }
 
@@ -247,6 +256,18 @@ void ButtonPad::applyIntent(UiIntent intent) {
     // state stays SS_UNSYNC, so the operator jogs and re-syncs deliberately,
     // which is the whole reason the dialog says so.
     alarmRequestClear();
+    break;
+
+  // --- The OTA screen -------------------------------------------------------
+  case UiIntent::AckOta:
+    // OK on the OTA screen. Like ClearAlarm, this does NOT dismiss anything:
+    // it only reaches OtaOutcome::acknowledge() through commsManager, which
+    // lets the OTA task's own exitAction() release the modal early instead of
+    // waiting out kAckTimeoutMs (lib/ota/otaoutcome.h). UiState emits this
+    // unconditionally on every OK click while ctx.ota is true, regardless of
+    // phase - acknowledge() is documented safe to call before the outcome has
+    // even settled.
+    commsManager.acknowledgeOutcome();
     break;
 
   case UiIntent::JogStop:

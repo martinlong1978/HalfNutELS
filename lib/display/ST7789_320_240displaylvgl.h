@@ -260,6 +260,12 @@ private:
   // OTA screen (separate screen, unchanged by the redesign)
   lv_obj_t* updateSlider;
   lv_obj_t* updateLabel;
+  // The one addition to this screen: a smaller second line, below the bar,
+  // that carries the detail string ONLY when otaFittedLine() had to fall back
+  // to the headline because the detail did not fit at Montserrat 26. Left
+  // empty otherwise, so it is never a visible label with nothing useful in
+  // it. See drawOTA() and otaFittedLine().
+  lv_obj_t* updateDetailLabel;
 
   // --- Redraw suppression ---------------------------------------------------
   // Display::update() re-runs every draw*() at 10 Hz, and LVGL's setters for

@@ -148,6 +148,11 @@ UiContext ctxOf(Rig& r) {
   const GlobalFeedMode fm = r.gs->getFeedMode();
   c.threadMode = (fm == FM_THREAD || fm == FM_THREAD_REVERSE);
   c.alarm = r.gs->alarmActive();
+  // Same reasoning as threadMode above: leaving this UNSET fed garbage into
+  // the new UiFocus::Ota gate the moment it existed, since UiContext is a
+  // bare struct with no member-wise default. Built off the same GlobalState
+  // ButtonPad::buildContext() reads.
+  c.ota = r.gs->hasOTA();
   return c;
 }
 

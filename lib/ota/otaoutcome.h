@@ -44,17 +44,44 @@
 //
 //   * ASYMMETRIC HOLDS. Success clears in kSuccessHoldMs (2 s): it is going to
 //     prove itself after the reboot anyway, so dwelling on it just makes the
-//     update feel slow. A failure holds kFailureHoldMs (30 s) - long enough
-//     that someone in the room will see it, and ten times the old window.
+//     update feel slow. A failure holds kFailureHoldMs.
 //   * ACKNOWLEDGEMENT SHORT-CIRCUITS THE HOLD. The hold exists only to stop the
 //     outcome being missed; a keypress is proof it was not, so acknowledge()
 //     releases immediately. Waiting out a timer someone is actively standing in
 //     front of teaches them to ignore the screen.
 //   * THE ACK IS BOUNDED, BUT THE EVIDENCE IS NOT. If nobody acknowledges a
-//     failure within kAckTimeoutMs (2 min) the modal releases on its own, so the
+//     failure within kAckTimeoutMs the modal releases on its own, so the
 //     machine is never trapped - but noticePending() stays true, so the normal
 //     screen keeps a "LAST UPDATE FAILED" banner until somebody clears it. The
 //     dialog is transient; the fact is not.
+//
+// kFailureHoldMs (10 s) AND kAckTimeoutMs (300 s) ANSWER DIFFERENT QUESTIONS,
+// even though nothing on screen distinguishes them - the modal looks identical
+// whether it is 3 s past the floor or 3 s from the timeout, and that is exactly
+// what makes the two easy to conflate.
+//
+//   * kFailureHoldMs is an UN-DISMISSABLE FLOOR. Its only job is to stop a
+//     stray keypress clearing the notice before it has been readable at all.
+//     Once the OK key was wired to acknowledge() (see UiFocus::Ota), an
+//     operator standing right there who has already read "UPDATE FAILED -
+//     <reason>" is not made to wait any longer than this for OK to do
+//     something.
+//   * kAckTimeoutMs is the OPERATOR-FACING UNATTENDED DWELL - the time the
+//     machine sits parked on the modal if nobody presses anything at all. The
+//     owner's own reasoning for 300 s: "I don't want to miss it if I'm away in
+//     the workshop looking at something else." This is the number that was
+//     ever the unattended wait; kFailureHoldMs never was one on its own, it is
+//     only a lower bound on it.
+//
+// WHAT 300 S COSTS, spelled out rather than left to be rediscovered: while
+// GlobalState::hasOTA() is true, timerCallback() (src/main.cpp) runs
+// commsManager.loop() instead of spindle->update() + leadscrew->update(), so
+// an unattended, unacknowledged failure leaves the motion loop idle for up to
+// five minutes. Accepted, not overlooked - the operator just asked for the
+// update themselves, so the machine is idle for that reason already, and the
+// wired ack key means an attended operator is never actually waiting that
+// long - but "the lathe was dead for five minutes" is exactly the kind of
+// thing that reads as a hang to whoever meets it next without this context.
 //
 // AND NOTHING THAT FAILED REBOOTS. An ESP32 OTA writes the *inactive* partition,
 // so a failed download has not touched the running image: there is nothing a
@@ -255,12 +282,17 @@ class OtaOutcome {
   // "Already up to date" is not a failure but it IS a result people miss, and
   // it is the one case where nothing else will ever tell them.
   static const unsigned long kInfoHoldMs = 6000;
-  // Ten times the old 3 s. Chosen to survive someone stepping away to fetch a
-  // tool mid-download, which is exactly when an update fails unwatched.
-  static const unsigned long kFailureHoldMs = 30000;
-  // After this the modal releases itself, unacknowledged, and the banner takes
-  // over. The machine is never left parked on a dialog nobody is coming to.
-  static const unsigned long kAckTimeoutMs = 120000;
+  // THE UN-DISMISSABLE FLOOR, not the unattended dwell - see the header
+  // comment ("kFailureHoldMs AND kAckTimeoutMs ANSWER DIFFERENT QUESTIONS").
+  // Stops a stray keypress clearing the notice before it has been readable;
+  // an attended operator's OK is honoured almost immediately above this.
+  static const unsigned long kFailureHoldMs = 10000;
+  // THE UNATTENDED SELF-RELEASE. After this the modal releases itself,
+  // unacknowledged, and the banner takes over. The machine is never left
+  // parked on a dialog nobody is coming to. 300 s (owner: "I don't want to
+  // miss it if I'm away in the workshop looking at something else") - see the
+  // header comment for what this costs the motion loop while it runs out.
+  static const unsigned long kAckTimeoutMs = 300000;
   // How long a restored SUCCESS banner shows on the new firmware's first screen.
   static const unsigned long kNoticeMs = 10000;
   // No byte in this long during a download = stalled. Longer than the HTTPClient

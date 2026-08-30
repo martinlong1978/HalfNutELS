@@ -1819,6 +1819,7 @@ void Display::resetObjectTree() {
   alarmOkChip = nullptr;
   updateSlider = nullptr;
   updateLabel = nullptr;
+  updateDetailLabel = nullptr;
 
   for (int i = 0; i < TS_COUNT; i++) {
     m_textCache[i][0] = '\0';
@@ -2155,6 +2156,27 @@ void Display::initialiseOta() {
 
   lv_slider_set_range(updateSlider, 0, 100);
   lv_obj_set_style_pad_all(updateSlider, 0, 0);
+
+  // The one addition: a smaller second line below the bar, carrying the
+  // detail string on the rare attempt where otaFittedLine() has to fall back
+  // to the headline (see that function's comment, and drawOTA() below). Empty
+  // at creation, like updateLabel's "Updating..." placeholder gets overwritten
+  // on the first drawOTA() -- this stays empty until there is genuinely
+  // something for it to say, so it is never a visible label with nothing in
+  // it. Montserrat 14, the same size the state bar and the alarm modal already
+  // use, so no new font is linked (LV_MEM_SIZE is tight -- see CLAUDE.md).
+  // textDim, not textPrimary: this is the secondary line, and it must not
+  // compete with updateLabel for attention.
+  updateDetailLabel = lv_label_create(lv_screen_active());
+  lv_label_set_text(updateDetailLabel, "");
+  lv_obj_set_style_text_font(updateDetailLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(updateDetailLabel, m_palette->textDim, 0);
+  lv_obj_set_width(updateDetailLabel, 280);
+  lv_obj_set_style_text_align(updateDetailLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(updateDetailLabel, LV_LABEL_LONG_WRAP);
+  // Below the bar (bar is y 150..160) with a clear 10 px gap, so a two-line
+  // wrap never touches it; well clear of the bottom edge too.
+  lv_obj_align(updateDetailLabel, LV_ALIGN_TOP_MID, 0, 170);
 }
 
 // Builds the whole main screen ONCE. Nothing here may be repeated per tick: the
@@ -2894,8 +2916,17 @@ void Display::drawOTA() {
     // publish -- a few hundred ms in practice. One string, owned here, that
     // deliberately does not duplicate anything OtaOutcome says.
     lv_label_set_text(updateLabel, "Starting update...");
+    lv_label_set_text(updateDetailLabel, "");
   } else {
-    lv_label_set_text(updateLabel, otaFittedLine(headline, detail));
+    const char* fitted = otaFittedLine(headline, detail);
+    lv_label_set_text(updateLabel, fitted);
+    // The second line carries the detail ONLY when it is not what just went
+    // into updateLabel -- i.e. only when otaFittedLine() had to fall back to
+    // the headline because the detail did not fit at Montserrat 26. When the
+    // detail itself fit (or there is none), this stays empty rather than
+    // repeating what updateLabel already shows.
+    lv_label_set_text(updateDetailLabel,
+                       (fitted == detail) ? "" : detail);
   }
 
   // A failure is now the one state on this screen that does not end in a
