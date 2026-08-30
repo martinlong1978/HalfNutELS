@@ -215,20 +215,32 @@ TEST(EncoderDetents, TheBoundWorksInBothDirections) {
 //
 // update() itself has no notion of "the encoder is inhibited" - it is
 // deliberately pure, with no Arduino, no UiContext, no idea the carriage
-// exists (see the class comment at the top of this header). What issue #5
-// actually reports is a PROPERTY of that purity: once a single 100 ms pass
-// sees more whole detents than kMaxPerCall, the excess sits in m_pending and
-// comes back kMaxPerCall at a time on every SUBSEQUENT call - moving or not,
-// noise or a real spin, because update() cannot tell the difference and is
-// called every pass regardless of motion state (src/keyarray.cpp:141-150:
-// "consumeEncoderDelta() is called unconditionally every pass").
+// exists (see the class comment at the top of this header), and that has not
+// changed. What HAS changed is which layer is trusted to bound the backlog a
+// directionally-biased noise burst can leave behind.
 //
-// These tests CHARACTERISE that mechanism rather than assert a fix.
-// EncoderDetents is doing exactly what OneCallIsBoundedButNothingIsLost above
-// says it should; whether a STALE backlog is worth discarding is a judgement
-// this class deliberately has no context to make (see ResetClearsAny-
-// PendingBacklogCharacterization below for the one relevant thing it already
-// exposes). None of these are expected to fail.
+// The first attempt at issue #5 gated on the CALLER's knowledge of motion
+// state (ButtonPad resetting the decoder while underPower()) and left this
+// class's own carry-forward untouched - which is why the tests below used to
+// pin `m_pending` growing arbitrarily large and draining kMaxPerCall a pass
+// for as long as it took, "characterising" rather than fixing anything. That
+// approach had a gap: the encoder is just as inert - and a biased burst just
+// as possible - during the stepper alarm and in UiFocus::Stops, neither of
+// which is "under power", so the backlog it was meant to prevent could still
+// form.
+//
+// The fix instead caps the RESIDUAL left in m_pending once update() has taken
+// its per-call share, to at most kMaxPerCall - see the class comment on
+// kMaxPerCall. This needs no notion of "inhibited" at all: it does not ask
+// why a detent went unclaimed, only how much can still be owed after one call
+// returns. That is safe specifically because kMaxPerCall itself is already a
+// bound no thumb can reach in a single 100 ms pass (kGlitchLimit's own
+// comment: half the 16-bit range is 4096 detents, and a human is nowhere
+// near even kMaxPerCall = 64) - so anything the cap discards was never a real
+// step to begin with, and the discarding needs no context about the machine.
+//
+// The tests below now assert THAT invariant directly, and update the two that
+// used to pin the old uncapped drain.
 TEST(EncoderDetentsBacklogFlood,
      BacklogOnlyBeginsStrictlyAboveKMaxPerCallDetentsInASinglePass) {
   // The exact reachability boundary: a single 100 ms pass has to see MORE
@@ -251,32 +263,51 @@ TEST(EncoderDetentsBacklogFlood,
 TEST(EncoderDetentsBacklogFlood, TheGlitchLimitItselfIsAcceptedNotDropped) {
   // kGlitchLimit is checked with a strict '>', so a delta of EXACTLY 16384
   // raw counts is accepted as real motion, not dropped as a glitch - this is
-  // the single largest backlog one pass can ever create: 4096 whole detents,
-  // of which kMaxPerCall (64) return immediately and the remaining 4032 sit
-  // in m_pending. At 64/pass that is ceil(4032/64) = 63 more 100 ms passes -
-  // 6.3 seconds - of reported motion after whatever produced the burst is
-  // long over.
+  // the single largest backlog one pass can ever create: 4096 whole detents.
+  // kMaxPerCall (64) return immediately, as before; what changes is what is
+  // left owing. Under the residual cap the other 4032 are not all kept - only
+  // one further pass' worth (kMaxPerCall = 64) survives into m_pending, and
+  // the rest is discarded on the spot. So the drain this burst can ever
+  // produce is bounded at 128 detents total (64 now, 64 on the next poll) -
+  // about 200 ms - not the 6.3 seconds an uncapped carry-forward would have
+  // produced.
   Rig r;
   EXPECT_EQ(EncoderDetents::kMaxPerCall, r.move(16384));
-  EXPECT_EQ(4096 - EncoderDetents::kMaxPerCall, r.dec().pending());
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.dec().pending());
 }
 
 TEST(EncoderDetentsBacklogFlood,
-     ABacklogDrainsAtKMaxPerCallPerPollRegardlessOfFurtherMovement) {
-  // The mechanism the issue calls "floods... until it drains": once a burst
-  // has left N detents in m_pending, poll() alone - no further raw movement
-  // required - pays it out kMaxPerCall at a time. Illustrative N=200: three
-  // full passes of 64 and a last one of 8, i.e. 400 ms of reported motion
-  // after the knob (or the noise that turned it) has gone completely quiet.
+     ABacklogDrainsAtMostOneFurtherKMaxPerCallPollRegardlessOfSize) {
+  // The mechanism the issue called "floods... until it drains" is now bounded
+  // to at most one further pass. N=200 whole detents in one burst: the first
+  // call still returns kMaxPerCall (64, unchanged from before - see
+  // OneCallIsBoundedButNothingIsLost) and used to leave 136 owing; the
+  // residual cap knocks that down to kMaxPerCall (64) on the spot, so the
+  // very next poll - with no further movement - pays out the rest in full and
+  // the one after that is empty. Two passes end it, not four.
   Rig r;
   const int N = 200;
   ASSERT_GT(N, EncoderDetents::kMaxPerCall);
   EXPECT_EQ(EncoderDetents::kMaxPerCall, r.move(N * kCountsPerDetent));
+  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.dec().pending())
+      << "the residual is capped, not the raw excess (136)";
   EXPECT_EQ(EncoderDetents::kMaxPerCall, r.poll());
-  EXPECT_EQ(EncoderDetents::kMaxPerCall, r.poll());
-  EXPECT_EQ(N - 3 * EncoderDetents::kMaxPerCall, r.poll())
-      << "the last, partial pass";
   EXPECT_EQ(0, r.poll());
+}
+
+TEST(EncoderDetentsBacklogFlood,
+     PendingNeverExceedsKMaxPerCallHoweverLargeTheAcceptedDelta) {
+  // The invariant itself, named directly: whatever a single call accepts as
+  // real motion, at most one further pass' worth may survive into m_pending.
+  // Exercised at the largest delta update() will ever accept without dropping
+  // it as a glitch (kGlitchLimit, exactly - see the test above) and again
+  // after a second such burst stacked on top, so this is not merely true of
+  // one call in isolation.
+  Rig r;
+  r.move(16384);
+  EXPECT_LE(r.dec().pending(), EncoderDetents::kMaxPerCall);
+  r.move(16384);
+  EXPECT_LE(r.dec().pending(), EncoderDetents::kMaxPerCall);
 }
 
 TEST(EncoderDetentsBacklogFlood, ResetClearsAnyPendingBacklogCharacterization) {
