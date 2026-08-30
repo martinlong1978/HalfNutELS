@@ -37,6 +37,7 @@ std::ostream& operator<<(std::ostream& os, UiFocus f) {
     case UiFocus::Diagnostics: return os << "Focus::Diagnostics";
     case UiFocus::About: return os << "Focus::About";
     case UiFocus::Alarm: return os << "Focus::Alarm";
+    case UiFocus::Ota: return os << "Focus::Ota";
   }
   return os << "Focus::<?>";
 }
@@ -63,6 +64,7 @@ std::ostream& operator<<(std::ostream& os, UiIntent i) {
     case UiIntent::ClearBothStops: return os << "ClearBothStops";
     case UiIntent::ToggleEngage: return os << "ToggleEngage";
     case UiIntent::ClearAlarm: return os << "ClearAlarm";
+    case UiIntent::AckOta: return os << "AckOta";
     case UiIntent::ZeroDro: return os << "ZeroDro";
     case UiIntent::DroDatumLeft: return os << "DroDatumLeft";
     case UiIntent::DroDatumRight: return os << "DroDatumRight";
@@ -112,7 +114,7 @@ const int kMenuItems = UiState::kMenuItemCount;
 // unaffected by the default; the ones that are pass it explicitly.
 UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false,
               bool motionActive = false, bool threadMode = false,
-              bool alarm = false) {
+              bool alarm = false, bool ota = false) {
   UiContext c;
   c.leftStopSet = leftStopSet;
   c.rightStopSet = rightStopSet;
@@ -120,6 +122,7 @@ UiContext ctx(bool leftStopSet, bool rightStopSet, bool motionEnabled = false,
   c.motionActive = motionActive;
   c.threadMode = threadMode;
   c.alarm = alarm;
+  c.ota = ota;
   return c;
 }
 
@@ -204,6 +207,9 @@ class Rig {
       // forced by the machine, never chosen. Its tests drive it with a context
       // instead, which is the only way it can arise on the device either.
       case UiFocus::Alarm: break;
+      // Same story for the OTA screen: GlobalState::hasOTA() forces it, no key
+      // asks for it directly. See the UiStateOta section.
+      case UiFocus::Ota: break;
     }
   }
 
@@ -4263,6 +4269,243 @@ TEST(UiStateAlarm, HasNoIdleTimeout) {
   r.advance(kTimeout * 10);
   EXPECT_FALSE(r.tick(kAlarm));
   EXPECT_EQ(UiFocus::Alarm, r.focus());
+}
+
+// ---------------------------------------------------------------------------
+// THE OTA SCREEN (UiFocus::Ota) - deferred piece #1 of the OTA follow-up.
+//
+// THE DESIGN QUESTION THIS SECTION ANSWERS: does OK-on-the-OTA-screen need a
+// UiFocus forced the way UiFocus::Alarm is, or can ButtonPad route it without
+// touching UiState at all (the OTA screen is selected by GlobalState::
+// hasOTA()/GlobalOtaStatus today, NOT by a UiFocus - see the destination note
+// on menuTileDestination() in uistate.h)?
+//
+// ANSWER: it needs the UiFocus, for a reason that has nothing to do with
+// mirroring Alarm for its own sake: src/buttonpad.h says outright "Nothing in
+// src/ is host-testable, so no new decision logic belongs here." OK's
+// behaviour on this screen - which keys are inert, whether HALT is one of
+// them, that the routing releases the instant hasOTA() goes false - is
+// exactly the kind of decision this project insists on host-testing (the
+// same argument that put ClearAlarm here instead of in ButtonPad). Routing it
+// in ButtonPad would make it both untested and inconsistent with every other
+// panel decision in this codebase.
+//
+// WHERE IT DIFFERS FROM ALARM, and why - both differences trace back to one
+// fact: an alarm is ASYNCHRONOUS (a hardware fault, on its own schedule, that
+// can land mid-widget or mid-jog) and OTA is not. OTA can only begin through
+// MENU_SOFTWARE_UPDATE, which menuTileBlock() already refuses while
+// motionActive, and menuTileDestination() sends every tile including this one
+// to UiFocus::Jog before GlobalState::hasOTA() is ever set (src/
+// buttonpad.cpp's applyIntent() calls setOTA() synchronously in the same
+// keypress that closed the menu). So by the time ctx.ota can ever be true,
+// UiState is already sitting at Jog with the menu closed, nothing in flight -
+// unlike an alarm, which has to be able to preempt literally anything.
+//   * HALT is inert here too, but for a DIFFERENT reason than Alarm's. Alarm
+//     inerts it because the alarm task is actively re-publishing MM_DISABLED
+//     every cycle, so a CancelMotion would be overwritten or worse. OTA has no
+//     such re-publisher - timerCallback() (src/main.cpp) simply stops calling
+//     leadscrew->update() at all while hasOTA() is true. But the effect is the
+//     same: nothing can make ctx.motionActive true while ctx.ota is true
+//     (motion cannot begin while ctx.ota gates every motion-starting key
+//     inert, and it could not begin in the first place - menuTileBlock()
+//     already refused the tile otherwise), so a CancelMotion has nothing to
+//     ask for either. "The machine is already stopped and held stopped" (the
+//     Alarm comment's phrase) transfers on that basis, not by mere analogy.
+//   * ctx.ota is asserted for the WHOLE hasOTA() span - connecting, checking,
+//     downloading, settled - not only a settled failure. The display shows
+//     nothing else for any of those phases (Display::update() skips
+//     drawOverlay() entirely whenever hasOTA() is true), so a key that changed
+//     focus or a setting behind any of them would be exactly the invisible-
+//     mutation hazard the Alarm modal exists to prevent, whether or not the
+//     outcome has settled yet.
+//   * OK always emits AckOta, unconditionally - UiState has no visibility
+//     into OtaOutcome::requiresAck() (only the ota bool crosses into
+//     UiContext), and it does not need any: OtaOutcome::acknowledge() is
+//     documented as harmless before the outcome settles, so there is no
+//     "wrong phase" for the intent to arrive in.
+//   * No test here claims OTA can start mid-jog or mid-run the way an alarm
+//     can trip mid-jog - it cannot, by the menuTileBlock()/menuTileDestination()
+//     argument above. The equivalents below (AJogInFlightIsForgottenIfOtaSets
+//     InAnyway, etc.) are DEFENSIVE: they pin that the same cleanup fires if a
+//     future caller ever violates that invariant, not a claim that the panel
+//     can reach that state today.
+// ---------------------------------------------------------------------------
+
+// The steady state of an update attempt: hasOTA() true, the machine reported
+// at rest (which is the only way it can have started - see the block comment
+// above).
+const UiContext kOta = ctx(false, false, /*motionEnabled=*/false,
+                           /*motionActive=*/false, /*threadMode=*/false,
+                           /*alarm=*/false, /*ota=*/true);
+// DEFENSIVE ONLY (see the block comment): ota true with the context still
+// reporting motion. Not a state the panel can reach - menuTileBlock() refuses
+// Software update while motionActive - but the cleanup this exercises (the
+// jog direction and run latch not surviving) must hold regardless of how
+// ctx.ota became true, on the same "erring towards stop is always safe"
+// principle the rest of this file uses for the real motion lockout.
+const UiContext kOtaMoving = ctx(false, false, /*motionEnabled=*/true,
+                                 /*motionActive=*/true, /*threadMode=*/false,
+                                 /*alarm=*/false, /*ota=*/true);
+
+TEST(UiStateOta, TakesFocusOnTheTick) {
+  Rig r;
+  EXPECT_TRUE(r.tick(kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  // Only on the transition, exactly like Alarm - not a redraw trigger for the
+  // whole span of the update.
+  EXPECT_FALSE(r.tick(kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+}
+
+TEST(UiStateOta, ClosesAnOpenWidget) {
+  // Should not be reachable in practice (Software update can only be reached
+  // via the menu, and every tile closes the menu to Jog on activation) but the
+  // gate must not assume that - a widget could in principle still be expiring
+  // out from under it.
+  Rig r;
+  r.click(UiKey::Mode);
+  ASSERT_EQ(UiFocus::Mode, r.focus());
+  EXPECT_TRUE(r.tick(kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+}
+
+TEST(UiStateOta, ClosesTheCarousel) {
+  Rig r;
+  r.click(UiKey::Menu);
+  ASSERT_TRUE(r.ui().menuOpen());
+  EXPECT_TRUE(r.tick(kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  EXPECT_FALSE(r.ui().menuOpen());
+}
+
+TEST(UiStateOta, AKeyEventTakesFocusToo) {
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Mode, UiKeyEvent::Click, kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+}
+
+// The whole point: nothing the operator does behind the OTA screen may take
+// effect invisibly, for the entire span hasOTA() is up - not only once a
+// failure has settled and wants an acknowledgement.
+TEST(UiStateOta, EveryKeyButOkIsInert) {
+  Rig r;
+  r.tick(kOta);
+  const UiKey keys[] = {UiKey::Mode,  UiKey::Rate,   UiKey::Stops,
+                        UiKey::Left,  UiKey::Right,  UiKey::Halt,
+                        UiKey::Menu,  UiKey::Enable, UiKey::EncoderCw,
+                        UiKey::EncoderCcw};
+  const UiKeyEvent evs[] = {UiKeyEvent::Press, UiKeyEvent::Click,
+                            UiKeyEvent::Hold, UiKeyEvent::Release};
+  for (UiKey k : keys) {
+    for (UiKeyEvent e : evs) {
+      EXPECT_EQ(UiIntent::None, r.key(k, e, kOta))
+          << k << " " << e << " acted during an OTA attempt";
+      EXPECT_EQ(UiFocus::Ota, r.focus());
+    }
+  }
+}
+
+// HALT gets its own test for the same reason it does under Alarm: this file's
+// oldest rule is "HALT is checked first, unconditionally", and this is a
+// second, independent place that rule is deliberately NOT honoured to the
+// letter. See the block comment above for why the "nothing left to stop"
+// reasoning transfers from Alarm even though the mechanism differs.
+TEST(UiStateOta, HaltIsInert) {
+  Rig r;
+  r.tick(kOtaMoving);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Halt, UiKeyEvent::Press, kOtaMoving));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Halt, UiKeyEvent::Click, kOtaMoving));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+}
+
+TEST(UiStateOta, OkAsksForTheAcknowledgementOnTheClickOnly) {
+  Rig r;
+  r.tick(kOta);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Press, kOta));
+  EXPECT_EQ(UiIntent::AckOta, r.key(UiKey::Ok, UiKeyEvent::Click, kOta));
+  // Release must not fire a second acknowledgement off one tap.
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Ok, UiKeyEvent::Release, kOta));
+}
+
+// OK acknowledges; it does not dismiss. The screen comes down only when
+// GlobalState::hasOTA() itself goes false (the OTA task's own exitAction()),
+// so pressing OK again before that still asks again - harmless, since
+// OtaOutcome::acknowledge() is idempotent (m_acked latches true).
+TEST(UiStateOta, OkDoesNotDismissTheScreenWhileOtaRemains) {
+  Rig r;
+  r.tick(kOta);
+  ASSERT_EQ(UiIntent::AckOta, r.key(UiKey::Ok, UiKeyEvent::Click, kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  r.tick(kOta);
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  EXPECT_EQ(UiIntent::AckOta, r.key(UiKey::Ok, UiKeyEvent::Click, kOta));
+}
+
+TEST(UiStateOta, TheScreenComesDownWhenOtaEnds) {
+  Rig r;
+  r.tick(kOta);
+  ASSERT_EQ(UiFocus::Ota, r.focus());
+  EXPECT_TRUE(r.tick(kNoStops));
+  EXPECT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_FALSE(r.tick(kNoStops));
+}
+
+TEST(UiStateOta, AKeyAfterOtaEndsFindsTheRestScreen) {
+  Rig r;
+  r.tick(kOta);
+  ASSERT_EQ(UiFocus::Ota, r.focus());
+  r.click(UiKey::Mode, kNoStops);
+  EXPECT_EQ(UiFocus::Mode, r.focus());
+}
+
+// DEFENSIVE (see the block comment): not reachable through the panel today,
+// since Software update cannot be activated while a jog is in flight, but the
+// cleanup must hold regardless.
+TEST(UiStateOta, AJogInFlightIsForgottenIfOtaStartsAnyway) {
+  Rig r;
+  ASSERT_EQ(UiIntent::JogRightStart,
+            r.key(UiKey::Right, UiKeyEvent::Press, kNoStops));
+  r.tick(kOtaMoving);
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Right, UiKeyEvent::Release, kOtaMoving));
+  r.tick(kNoStops);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, UiKeyEvent::Release, kNoStops));
+}
+
+// DEFENSIVE, same basis as the jog case above.
+TEST(UiStateOta, APoweredRunLatchDoesNotSurviveItEitherIfOtaStartsAnyway) {
+  Rig r;
+  const UiContext idle = ctx(true, false);
+  const UiContext running = ctx(true, false, /*motionEnabled=*/false,
+                                /*motionActive=*/true);
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.startRun(UiKey::Left, idle, running));
+  r.tick(kOtaMoving);
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  r.tick(idle);
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
+}
+
+// OK must not be swallowed by the motion lockout in the same window an alarm
+// has to survive it - defensive, on the same basis as the two tests above.
+TEST(UiStateOta, OkStillWorksWhileTheContextStillReportsMotion) {
+  Rig r;
+  r.tick(kOtaMoving);
+  EXPECT_EQ(UiFocus::Ota, r.focus());
+  EXPECT_EQ(UiIntent::AckOta, r.key(UiKey::Ok, UiKeyEvent::Click, kOtaMoving));
+}
+
+// The screen does not expire on the 4 s widget timeout. An update the
+// operator has walked away from - to fetch a tool, per the OtaOutcome header
+// comment - must still be on screen when they come back, for as long as
+// hasOTA() says so.
+TEST(UiStateOta, HasNoIdleTimeout) {
+  Rig r;
+  r.tick(kOta);
+  r.advance(kTimeout * 10);
+  EXPECT_FALSE(r.tick(kOta));
+  EXPECT_EQ(UiFocus::Ota, r.focus());
 }
 
 }  // namespace

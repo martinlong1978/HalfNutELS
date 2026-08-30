@@ -54,8 +54,19 @@ enum class UiFocus {
   JogSpeed, Rate, Mode, Stops, DroDatum,  // the widgets: OK commits, 4 s expiry
   Menu,
   Diagnostics, About,                     // read-only screens: no expiry
-  Alarm                                   // the stepper-alarm modal. NOT chosen
+  Alarm,                                  // the stepper-alarm modal. NOT chosen
                                           // by the operator - see below.
+  // The OTA screen (GlobalState::hasOTA()). FORCED, on the ClearAlarm/
+  // UiFocus::Alarm pattern, for exactly as long as ctx.ota is true - see the
+  // note there. DECLARED HERE BY THE TEST AUTHOR (test/test_uistate/
+  // test_uistate.cpp, "UiStateOta") as the interface the new tests compile
+  // against; uistate.cpp does not yet branch on it, which is deliberate - the
+  // gating behaviour is the implementer's job, and the failing UiStateOta
+  // cases are the spec for it. See that test file for the full design
+  // rationale (why this is a UiFocus rather than routed in ButtonPad, why
+  // HALT is inert, why the whole hasOTA() span is gated and not only a
+  // settled failure).
+  Ota
 };
 
 // UiFocus::Alarm is the one focus nothing on the panel can ask for. The stepper
@@ -162,6 +173,10 @@ enum class UiIntent {
   // when the alarm does, and if the fault is still present at the driver the
   // clear fails and the modal stays up saying so.
   ClearAlarm,
+  // OK on the OTA screen: acknowledges the outcome (OtaOutcome::acknowledge(),
+  // safe to call at any phase - see its header comment). Declared alongside
+  // UiFocus::Ota and UiContext::ota for the same reason - see the note there.
+  AckOta,
 };
 
 // Machine state the decision depends on. Supplied fresh by the caller on every
@@ -202,6 +217,17 @@ struct UiContext {
                        //
                        // Read BEFORE anything else in handleKey() and tick(),
                        // above even HALT. See the ruling on UiFocus::Alarm.
+  bool ota;            // GlobalState::hasOTA() - the OTA screen owns the whole
+                       // display for as long as this is true, exactly as the
+                       // alarm modal does, and for the same reason nothing on
+                       // the panel may act invisibly behind it: forces
+                       // UiFocus::Ota (see the enum). True for the WHOLE
+                       // attempt (connecting/checking/downloading/settled),
+                       // not only a settled failure, because the display
+                       // shows nothing else for any of those phases either.
+                       // See test/test_uistate/test_uistate.cpp, "UiStateOta",
+                       // for the full rationale; uistate.cpp does not act on
+                       // this yet (test-author scaffolding, see UiFocus::Ota).
 };
 
 class UiState {

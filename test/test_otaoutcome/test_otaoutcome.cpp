@@ -293,6 +293,12 @@ TEST(OtaOutcome, NoFailureEverReachesAReboot) {
   // THE test. Every failure, every instant from settling to well past every
   // timeout in the class: the answer is never RebootNow. A reboot on failure is
   // exactly what made a broken update look like a working one.
+  //
+  // 4 * kAckTimeoutMs is now 20 minutes of virtual time (kAckTimeoutMs having
+  // grown from 120 s to 300 s) - still ~1228 steps per reason/acked
+  // combination at 977 ms, i.e. under 10k exitAction() calls total. Cheap on
+  // the host regardless; widen the step rather than shortening the walk if
+  // that ever stops being true.
   const OtaResult reasons[] = {OtaResult::NoNetwork, OtaResult::NoServer,
                                OtaResult::DownloadStalled, OtaResult::BadImage};
   for (OtaResult r : reasons) {
@@ -311,8 +317,51 @@ TEST(OtaOutcome, NoFailureEverReachesAReboot) {
   }
 }
 
-TEST(OtaOutcome, AFailureHoldsTenTimesLongerThanTheOldThreeSeconds) {
-  EXPECT_GE(kFailHold, 30000u);
+// --- The floor vs. the unattended dwell: two DIFFERENT numbers -------------
+//
+// Owner-settled (Aug 2026), after the ack key was wired and the question
+// became "what should the UNATTENDED backstop be, now that an attended
+// operator can release it with OK immediately":
+//
+//   kFailureHoldMs (10 s)  - the UN-DISMISSABLE FLOOR. Its only job is to stop
+//                            a stray keypress clearing the notice before it
+//                            has been readable at all. An operator standing
+//                            right there, who has already read "UPDATE
+//                            FAILED - <reason>", is not made to wait any
+//                            longer than that for OK to do something.
+//   kAckTimeoutMs (300 s)  - the UNATTENDED SELF-RELEASE. This is the number
+//                            that matters when nobody is watching, and the
+//                            owner's own words on it: "I don't want to miss
+//                            it if I'm away in the workshop looking at
+//                            something else." It is NOT a second, longer
+//                            "please dismiss this" floor - see the note below.
+//
+// The two are easy to conflate because NOTHING ON SCREEN DISTINGUISHES THEM -
+// the modal looks identical whether it is 3 s past the floor or 3 s from the
+// timeout. Do not let a future edit narrow the gap by "rounding them together
+// for simplicity"; they answer different questions.
+//
+// The cost of the 300 s dwell is real and DELIBERATE: while hasOTA() is true,
+// timerCallback() (src/main.cpp) runs commsManager.loop() instead of
+// spindle->update() + leadscrew->update(), so an unattended, unacknowledged
+// failure leaves the motion loop idle for up to five minutes. That is judged
+// acceptable because the operator just asked for the update themselves (the
+// machine is idle for that reason already) and because the wired ack key
+// means an attended operator is never actually waiting that long - but it is
+// worth stating plainly here, because "the lathe was dead for five minutes"
+// is exactly the kind of thing that reads as a hang to whoever meets it next
+// without this context.
+TEST(OtaOutcome, TheFloorAndTheUnattendedDwellAreDeliberatelyFarApart) {
+  EXPECT_EQ(kFailHold, 10000u);
+  EXPECT_EQ(kAckTimeout, 300000u);
+  EXPECT_GT(kAckTimeout, kFailHold);
+}
+
+TEST(OtaOutcome, AFailureHoldsLongEnoughNotToBeDismissedInstantly) {
+  // The floor (10 s) is about PREMATURE dismissal only - it says nothing
+  // about how long the modal stays up when nobody presses anything, which is
+  // kAckTimeoutMs's job (see TheFloorAndTheUnattendedDwellAreDeliberatelyFarApart).
+  EXPECT_EQ(kFailHold, 10000u);
   EXPECT_GT(kFailHold, kSuccessHold);
   EXPECT_GT(kFailHold, kInfoHold);
 
@@ -321,12 +370,14 @@ TEST(OtaOutcome, AFailureHoldsTenTimesLongerThanTheOldThreeSeconds) {
   o.fail(OtaResult::DownloadStalled, kT0 + 5000);
   EXPECT_EQ(o.holdMs(), kFailHold);
   EXPECT_TRUE(o.requiresAck());
-  // Still on screen long after the old code had rebooted and forgotten.
+  // Still on screen long after the old code had rebooted and forgotten (3 s).
   EXPECT_EQ(o.exitAction(kT0 + 5000 + 3000), OtaExit::Waiting);
   EXPECT_EQ(o.exitAction(kT0 + 5000 + kFailHold - 1), OtaExit::Waiting);
 }
 
 TEST(OtaOutcome, AnUnacknowledgedFailureKeepsAskingUntilTheAckTimeout) {
+  // Five minutes of virtual time, 500 ms steps - 600 exitAction() calls, cheap
+  // on the host regardless of how large kAckTimeoutMs is.
   OtaOutcome o;
   downloading(o, kT0);
   o.fail(OtaResult::NoServer, kT0, 500);
@@ -339,6 +390,9 @@ TEST(OtaOutcome, AnUnacknowledgedFailureKeepsAskingUntilTheAckTimeout) {
 }
 
 TEST(OtaOutcome, AcknowledgingAFailureReleasesItImmediately) {
+  // Even though the unattended dwell is now five minutes, a keypress at 10 ms
+  // still releases at once - the whole point of wiring the ack key is that an
+  // attended operator never has to wait for kAckTimeoutMs at all.
   OtaOutcome o;
   downloading(o, kT0);
   o.fail(OtaResult::NoNetwork, kT0);
@@ -350,7 +404,9 @@ TEST(OtaOutcome, AcknowledgingAFailureReleasesItImmediately) {
 
 TEST(OtaOutcome, TheAckTimeoutIsLongerThanTheFailureHoldSoBothWindowsExist) {
   // If these were the other way round the hold would be unreachable and the
-  // acknowledgement request would never actually be made.
+  // acknowledgement request would never actually be made. 300 s vs 10 s is a
+  // 30x gap - comfortably ordered, not a near thing that a future rounding
+  // could accidentally invert.
   EXPECT_GT(kAckTimeout, kFailHold);
 }
 
@@ -713,9 +769,12 @@ TEST(OtaOutcome, ScenarioTheFilmingSessionFailureIsNowVisible) {
   EXPECT_THAT(detailOf(o), testing::HasSubstr("Stalled at 17%"));
   // 3. It does not reboot into the old firmware pretending to be new.
   EXPECT_NE(o.exitAction(kT0 + 100000), OtaExit::RebootNow);
-  // 4. It stays up for half a minute...
+  // 4. It clears the 10 s floor (so OK is live) but, unattended, it keeps
+  //    asking for the full five minutes - 25 s in is still well inside that
+  //    window...
   EXPECT_EQ(o.exitAction(kT0 + 9000 + kStall + 25000), OtaExit::Waiting);
-  // 5. ...and when nobody comes, the machine is still usable and still says so.
+  // 5. ...and when nobody comes inside kAckTimeoutMs (5 min), the machine is
+  //    still usable and still says so.
   const unsigned long later = kT0 + 9000 + kStall + kAckTimeout;
   EXPECT_EQ(o.exitAction(later), OtaExit::ReturnToMachine);
   EXPECT_TRUE(o.noticePending(later));
