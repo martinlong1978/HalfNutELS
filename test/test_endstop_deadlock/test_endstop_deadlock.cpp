@@ -1386,6 +1386,230 @@ TEST_F(EndstopDeadlockTest, UnsetMotionModeDoesNotRunThroughASetStop) {
       << ls->getCurrentPosition();
 }
 
+// ---------------------------------------------------------------------------
+// ISSUE #14: "A held jog is throttled by the stop behind it."
+//
+// goingToHitLeftEndstop/goingToHitRightEndstop (leadscrew_stopsync.h) are
+// direction-agnostic, and shouldStop's MM_JOG_*/MM_HOLD_JOG_* arms OR both
+// terms in regardless of which way the axis is travelling, so a stop BEHIND
+// the carriage can throttle acceleration the same as the one ahead. The
+// mechanism is real; see leadscrew.cpp's shouldStop switch (~ line 728) and
+// the predicates themselves.
+//
+// MEASURED MAGNITUDE. The controlled comparison below is: arrest for real
+// (runPassAndArrestOn(), which asserts exact rest and direction UNKNOWN
+// before the jog starts) and then jog away, once with the stop just
+// arrested on left in place, once with unsetStopPosition() removing ONLY
+// that stop immediately before the jog. That is the minimal change between
+// the two legs - same residual leadscrew state, same clock history, only
+// difference is whether the rear predicate has anything to fire on.
+//
+// (An ad-hoc control that never arrests - just drives the spindle and calls
+// settle() - was tried first and discarded: settle() only waits for the
+// INTEGER POSITION to stop changing for 1000 iterations, not for
+// m_leadscrewSpeed to reach zero, and without a real arrest nothing forces
+// it there. That left 142.5 pps of undecayed leftover velocity in the
+// control leg and produced a spurious "faster WITH the stop present"
+// result with the sign backwards. A second control, a freshly-constructed
+// Leadscrew against a freshly-reset mock clock, was also discarded: its
+// m_lastPulseTimestamp starts at the same instant as the clock reset, so it
+// fails the pulse-interval gate for longer than a rig that has actually
+// been running, which is a clock artefact and not this bug. The matched
+// "arrest, then remove one stop" control has neither problem.)
+//
+// Held jog RIGHT, away from a LEFT stop just arrested on, jogSpeedPps() =
+// 12598.4 pps (default config: 40 mm/s jog speed, 400 ppr * 2:1 gearbox /
+// 2.54 mm pitch), which an unobstructed ramp reaches in ~2670 update()
+// calls at this accel:
+//
+//   updates    pps WITH the stop   pps stop removed   ratio
+//      500          2461.0              2499.0        0.985
+//      800          3705.3              3743.3        0.990
+//     1200          5193.6              5238.8        0.991
+//     3000         11142.0             11184.2        0.996
+//    5000+         12598.4             12598.4        1.000  (fully converged)
+//
+// MM_JOG_RIGHT (Click-run) measures IDENTICALLY (2461.0/2499.0 at 500,
+// 3705.3/3743.3 at 800, ...) - expected, since it shares the same
+// m_leadscrewAccel and the same goingToHit* terms.
+//
+// The two-stops-closer-than-the-stopping-distance case (gap=800, inside the
+// ~1679-pulse full-speed stopping distance) shows the SAME order of
+// magnitude, not a sustained crawl: peak speed crossing the gap is
+// 6144.4 pps with both stops set vs 6151.98 pps with only the forward one
+// (0.12% low), and it takes 2845 updates to cross vs 2839 without the rear
+// stop (6 updates, 0.6 ms, longer).
+//
+// VERDICT ON SEVERITY: the mechanism in the issue is confirmed, and the fix
+// is worth making, but "will crawl rather than reach the selected jog
+// speed" and "would stay slow for the whole travel" overstate it. Measured
+// here the effect is a ~1-1.5% transient that clears within about 0.3 s
+// (3000 * 100us updates) of holding the key, converging to EXACT parity
+// once the axis has covered its own stopping distance - not a sustained
+// crawl, and not something an operator is likely to feel as a stall. The
+// smallness has a structural reason: shouldStop's acceleration branch and
+// getStoppingDistanceInPulses() both scale on the SAME m_leadscrewAccel, so
+// a rear stop planted exactly where a jog departs from rest asks for
+// almost exactly the deceleration budget the ordinary ramp already needs -
+// they very nearly cancel. That symmetry would not hold if accel and decel
+// ever used different rates.
+// ---------------------------------------------------------------------------
+
+TEST_F(EndstopDeadlockTest, HoldJogAwayFromARearStopReachesTheSameSpeedAsWithNoStop) {
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, 1000000);
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  pump(800);
+  const float withStop = ls->getLeadscrewSpeedPulsesPerSecond();
+
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, 1000000);
+  ls->unsetStopPosition(LeadscrewStopPosition::LEFT);  // the only difference
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  pump(800);
+  const float withoutStop = ls->getLeadscrewSpeedPulsesPerSecond();
+
+  EXPECT_NEAR(withStop, withoutStop, 5.0f)
+      << "a held jog moving AWAY from the stop it just arrested on must "
+         "reach the same speed a jog with no stop at all would, after the "
+         "same 800 updates - measured " << withStop << " vs " << withoutStop
+      << " pps (issue #14): the rear stop's direction-agnostic predicate is "
+         "still throttling the ramp";
+}
+
+TEST_F(EndstopDeadlockTest, ClickJogAwayFromARearStopReachesTheSameSpeedAsWithNoStop) {
+  // Same measurement, MM_JOG_RIGHT (Click-run) rather than the hold-jog -
+  // per the issue, "inherited from MM_JOG_* ... copied into MM_HOLD_JOG_*",
+  // so the plain jog is throttled the same way and just as reachable.
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, 1000000);
+  gs->setMotionMode(GlobalMotionMode::MM_JOG_RIGHT);
+  pump(800);
+  const float withStop = ls->getLeadscrewSpeedPulsesPerSecond();
+
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, 1000000);
+  ls->unsetStopPosition(LeadscrewStopPosition::LEFT);
+  gs->setMotionMode(GlobalMotionMode::MM_JOG_RIGHT);
+  pump(800);
+  const float withoutStop = ls->getLeadscrewSpeedPulsesPerSecond();
+
+  EXPECT_NEAR(withStop, withoutStop, 5.0f)
+      << "the Click-run must reach the same speed with or without the rear "
+         "stop - measured " << withStop << " vs " << withoutStop << " pps";
+}
+
+TEST_F(EndstopDeadlockTest,
+       HoldJogBetweenTwoCloseStopsCrossesAtTheForwardStopsPaceNotSlower) {
+  // Both stops set closer together than the ~1679-pulse full-speed stopping
+  // distance: LEFT at 0 (just arrested on), RIGHT at 800. The forward
+  // (RIGHT) stop legitimately governs the crossing - it must decelerate to
+  // land there rather than reaching full jog speed, and that part is
+  // correct behaviour, pinned below. The question issue #14 point 2 asks is
+  // whether the REAR predicate adds anything on top of what the forward one
+  // already requires; the "far stop only" leg answers it by removing just
+  // the rear predicate's opportunity to fire.
+  const int gap = 800;
+
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, gap);
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  float peakBoth = 0.0f;
+  int updatesBoth = 0;
+  while (gs->getMotionMode() == GlobalMotionMode::MM_HOLD_JOG_RIGHT &&
+         updatesBoth < 40000) {
+    advanceMockMicros(kDt);
+    ls->update();
+    const float v = ls->getLeadscrewSpeedPulsesPerSecond();
+    if (v > peakBoth) peakBoth = v;
+    ++updatesBoth;
+  }
+  EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED)
+      << "must still arrest at the forward stop - CORRECT BEHAVIOUR, pinned "
+         "so the fix cannot remove the forward check along with the rear one";
+  EXPECT_NEAR(ls->getCurrentPosition(), gap, 5)
+      << "and land on it - CORRECT BEHAVIOUR, pinned";
+
+  buildRig();
+  runPassAndArrestOn(LeadscrewStopPosition::LEFT, 0.25f, +1, gap);
+  ls->unsetStopPosition(LeadscrewStopPosition::LEFT);  // rear stop removed
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  float peakFarOnly = 0.0f;
+  int updatesFarOnly = 0;
+  while (gs->getMotionMode() == GlobalMotionMode::MM_HOLD_JOG_RIGHT &&
+         updatesFarOnly < 40000) {
+    advanceMockMicros(kDt);
+    ls->update();
+    const float v = ls->getLeadscrewSpeedPulsesPerSecond();
+    if (v > peakFarOnly) peakFarOnly = v;
+    ++updatesFarOnly;
+  }
+
+  EXPECT_NEAR(peakBoth, peakFarOnly, 5.0f)
+      << "with both stops closer together than the stopping distance, the "
+         "crossing must be governed by the FORWARD stop alone - measured "
+         "peak " << peakBoth << " vs " << peakFarOnly
+      << " pps with the rear stop removed (issue #14 point 2)";
+  EXPECT_NEAR(updatesBoth, updatesFarOnly, 10)
+      << "and must not take measurably longer to cross the gap - "
+      << updatesBoth << " vs " << updatesFarOnly << " updates";
+}
+
+// THE MOST IMPORTANT TEST IN THIS BLOCK.
+//
+// A held jog started from a dead stop (m_currentDirection == UNKNOWN, the
+// ordinary state the instant the operator presses the key) with a stop
+// CLOSE AHEAD must still plan its deceleration and land on it - it must NOT
+// overshoot. This must ALREADY pass on today's code (the predicate being
+// direction-agnostic is exactly why it still catches the forward stop
+// regardless of latch state) - it is not a symptom of issue #14, it is the
+// fence a well-intentioned FIX for issue #14 could break.
+//
+// Specifically: fix (a) (direction-match the endstop terms at the
+// shouldStop call sites) is only safe if it matches on a direction value
+// that is correct from the very first iteration. m_currentDirection is
+// UNKNOWN until the direction-selection block a few lines above the switch
+// latches it - on the SAME update() as the first pulse, but a fix that
+// samples it BEFORE that latch (or that is written assuming the latch has
+// already happened) would see UNKNOWN, fail to match "RIGHT", and disable
+// the very predicate meant to catch the stop being approached, for however
+// long the mismatch persists. Matching on nextDirection (already computed
+// correctly before the switch) or on the motion mode itself
+// (MM_HOLD_JOG_RIGHT unambiguously means rightward, no latch needed) are
+// both safe. If this test starts failing once a fix lands, the fix matched
+// on the wrong direction value.
+TEST_F(EndstopDeadlockTest,
+       HoldJogFromRestWithACloseForwardStopStillDeceleratesAndLandsOnIt) {
+  buildRig();
+  ls->setCurrentPosition(0);
+  // 500 pulses: inside the ~1679-pulse stopping distance for full jog speed,
+  // so a working axis must decelerate before ever reaching jogSpeedPps().
+  ls->setStopPosition(LeadscrewStopPosition::RIGHT, 500);
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  pump(40000);
+
+  EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED)
+      << "must arrest at the forward stop rather than run through it";
+  EXPECT_NEAR(ls->getCurrentPosition(), 500, 5)
+      << "and land on it without overshoot - a fix that disables the "
+         "forward check during the pre-latch window would overshoot here. "
+         "Landed at " << ls->getCurrentPosition();
+}
+
+// ---------------------------------------------------------------------------
+// What the fix must not disturb, named rather than duplicated (per the task
+// brief - these already exist and already pass):
+//
+//   - a jog INTO a stop still decelerates and arrests:
+//       HoldJogIntoAStopStillArrests, PoweredRunIntoAStopStillArrests
+//   - the hold-jog still honours the jog-speed multiplier, MM_JOG_* does not:
+//       HoldJogRightReachesTheJogSpeedMultiplierNotThePlainJogSpeed,
+//       HoldJogLeftReachesTheJogSpeedMultiplierNotThePlainJogSpeed,
+//       JogRightSpeedStaysUnmultipliedRegardlessOfTheJogSpeedSetting
+//   - the interactive (dead-man) jog still drives straight through a stop:
+//       InteractiveJogDrivesStraightThroughAStop
+// ---------------------------------------------------------------------------
+
 }  // namespace
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.
