@@ -22,9 +22,48 @@ enum GlobalFeedMode { FM_UNSET = -1, FM_FEED = 0, FM_THREAD = 1, FM_JOG = 2, FM_
 // Disabled: The leadscrew does not move when the spindle is moving
 // Jog: The leadscrew is moving independently of the spindle
 // Enabled: The leadscrew is moving in sync with the spindle
-enum GlobalMotionMode { MM_UNSET = 0, MM_DISABLED = 2, MM_ENABLED = 3, MM_JOG_LEFT = 4, MM_JOG_RIGHT = 5, MM_INTERACTIVE_JOG_LEFT = 12, MM_INTERACTIVE_JOG_RIGHT = 13, MM_DECELLERATE = 20};
+//
+// TEST-AUTHOR DECLARATION (issue #11, round 2 - Leadscrew::update() does NOT
+// implement these yet; see test/test_leadscrew and test/test_endstop_deadlock
+// for the pinned target behaviour). MM_HOLD_JOG_LEFT/RIGHT is the hold-jog on
+// a side with a stop set: it must arrest at the stop the way MM_JOG_* does
+// (bit2/MMF_JOG set) AND run at jogSpeedPps() * getJogSpeed() the way
+// MM_INTERACTIVE_JOG_* does - no existing value does both.
+//
+// Bit layout, read off the existing values before choosing this one:
+//   bit0 (1)  direction: 0 = LEFT, 1 = RIGHT (MM_JOG_LEFT/RIGHT and
+//             MM_INTERACTIVE_JOG_LEFT/RIGHT each differ only in this bit;
+//             MMF_JOG_DIRECTION = 5 = bit0|bit2 tests "a jog-family mode
+//             going RIGHT").
+//   bit1 (2)  MMF_ENABLESTATE - the ENABLED/DISABLED pair, not a jog at all.
+//   bit2 (4)  MMF_JOG - "is a jog": Leadscrew::update() derives jogMode from
+//             this alone, and jogMode gates the expected-position discard,
+//             the resync-gate bypass and (via !jogMode) the ordinary
+//             position-error direction test. MM_DECELLERATE also carries it.
+//   bit3 (8)  MMF_INTERACTIVEJOG - set ONLY by MM_INTERACTIVE_JOG_LEFT/RIGHT
+//             today, and every place that spells out those two by name
+//             (leadscrew.cpp's endstop-arrest comment) is doing so BECAUSE
+//             they are the one thing the dead-man jog is allowed to do that
+//             the hold-jog must not: drive straight through a stop. This bit
+//             must therefore stay OFF here - the whole point of the new mode
+//             is "multiplier speed WITHOUT that exemption", and setting bit3
+//             would make a future refactor that swaps the hardcoded equality
+//             checks for `(mode & MMF_INTERACTIVEJOG)` silently exempt it too.
+//   bit4 (16) set only by MM_DECELLERATE, unrelated here.
+//
+// So MM_HOLD_JOG_LEFT/RIGHT needs bit2 set (it's a jog), bit0 set only for
+// RIGHT (keeps MMF_JOG_DIRECTION correct for it), and bit1/bit3/bit4 clear.
+// None of the low 5 bits are free without colliding with an existing value,
+// so this claims a new bit5 (32) - MMF_HOLDJOG below - purely to keep the
+// value unambiguous; nothing currently reads that mask.
+//   MM_HOLD_JOG_LEFT  = 32 | 4     = 36 = 0b100100
+//   MM_HOLD_JOG_RIGHT = 32 | 4 | 1 = 37 = 0b100101
+// i.e. MMF_HOLDJOG | MMF_JOG (| 1 for RIGHT), so the bit2/MMF_JOG membership
+// that makes jogMode come out true is visible at the arithmetic, not only in
+// this comment.
+enum GlobalMotionMode { MM_UNSET = 0, MM_DISABLED = 2, MM_ENABLED = 3, MM_JOG_LEFT = 4, MM_JOG_RIGHT = 5, MM_INTERACTIVE_JOG_LEFT = 12, MM_INTERACTIVE_JOG_RIGHT = 13, MM_DECELLERATE = 20, MM_HOLD_JOG_LEFT = 36, MM_HOLD_JOG_RIGHT = 37};
 
-enum GlobalMotionModeMasks { MMF_ENABLESTATE = 2, MMF_JOG = 4, MMF_JOG_DIRECTION = 5, MMF_INTERACTIVEJOG = 8};
+enum GlobalMotionModeMasks { MMF_ENABLESTATE = 2, MMF_JOG = 4, MMF_JOG_DIRECTION = 5, MMF_INTERACTIVEJOG = 8, MMF_HOLDJOG = 32};
 
 /**
  * The unit mode of the application, usually for threading

@@ -153,6 +153,17 @@ enum class UiIntent {
   None,
   JogLeftStart, JogRightStart, JogStop,
   RunToLeftStop, RunToRightStop,
+  // TEST-AUTHOR DECLARATION (issue #11, round 2 - not yet implemented by
+  // uistate.cpp). Hold on a side with a stop SET must emit ONE of these,
+  // distinct from RunToLeftStop/RunToRightStop (which stay the Click-run
+  // intent), so the caller (src/buttonpad.cpp) can route it to a NEW
+  // GlobalMotionMode that arrests at the stop like MM_JOG_* AND runs at
+  // jogSpeedPps() * GlobalState::getJogSpeed() like MM_INTERACTIVE_JOG_* -
+  // see lib/global_state/globalstate.h's MM_HOLD_JOG_LEFT/RIGHT, added
+  // alongside this for the same reason. Bookkeeping (m_jogDir vs m_runPhase)
+  // is unchanged from the prior round: this still records in m_jogDir so the
+  // dead-man terminator ends it on Release with JogStop.
+  JogToLeftStop, JogToRightStop,
   CancelMotion,
   PitchNext, PitchPrev,
   JogSpeedNext, JogSpeedPrev,

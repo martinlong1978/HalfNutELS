@@ -956,6 +956,205 @@ TEST_F(EndstopDeadlockTest, InteractiveJogDrivesStraightThroughAStop) {
 }
 
 // ---------------------------------------------------------------------------
+// HOLD-JOG (issue #11, round 2): GlobalMotionMode::MM_HOLD_JOG_LEFT/RIGHT.
+//
+// NOT IMPLEMENTED in Leadscrew::update() yet. Today the new modes match
+// neither direction-selection branch (leadscrew.cpp ~483/492) nor the
+// endstop-arrest condition (~378-379) nor the shouldStop speed switch
+// (~688-707), so m_currentDirection never leaves UNKNOWN and the axis simply
+// never moves under them. Every test below asserts the CORRECT target
+// behaviour and is EXPECTED TO FAIL until the implementer wires the new
+// modes into all three places - see the report for the precise scope:
+//   1. the endstop-arrest condition: arrest like MM_JOG_* (equality, both
+//      directions);
+//   2. both direction-selection branches, INSIDE the `&& !hitEndstop` gate
+//      like MM_JOG_* - NOT OR'd in outside it like MM_INTERACTIVE_JOG_*,
+//      which is how the dead-man jog gets to ignore the stop;
+//   3. the shouldStop switch: the MM_INTERACTIVE_JOG_* speed-cap formula
+//      (jogSpeedPps() * getJogSpeed()) combined with the MM_JOG_* endstop
+//      terms (goingToHitLeftEndstop / goingToHitRightEndstop) - no existing
+//      case is this combination.
+//
+// The arrest tests mirror PoweredRunIntoAStopStillArrests /
+// PoweredRunAwayFromAStopTheCarriageSitsOnStillRuns /
+// PoweredRunFromOneStopToTheOtherStillArrestsAtTheFarStop above, with
+// MM_HOLD_JOG_LEFT/RIGHT in place of MM_JOG_LEFT/RIGHT - the new mode must
+// behave exactly like the powered run for arrest purposes, differing only in
+// speed and in how UiState reaches it (Hold vs Click).
+// ---------------------------------------------------------------------------
+
+// RAII so a multiplier changed for one test can never leak into another -
+// GlobalState::getInstance() is a true singleton and persists across every
+// TEST_F case in this binary.
+struct JogSpeedGuard {
+  GlobalState* gs;
+  int orig;
+  explicit JogSpeedGuard(GlobalState* g) : gs(g), orig(g->getJogIndex()) {}
+  ~JogSpeedGuard() {
+    while (gs->getJogIndex() < orig) gs->incJogSpeed();
+    while (gs->getJogIndex() > orig) gs->decJogSpeed();
+  }
+};
+
+TEST_F(EndstopDeadlockTest, HoldJogIntoAStopStillArrests) {
+  {
+    SCOPED_TRACE("hold-jog LEFT into the left stop");
+    buildRig();
+    ls->setCurrentPosition(0);
+    ls->setStopPosition(LeadscrewStopPosition::LEFT, -400);
+    gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_LEFT);
+    pump(40000);
+    EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED)
+        << "the hold-jog must arrest at the stop the way MM_JOG_LEFT does";
+    EXPECT_NEAR(ls->getCurrentPosition(), -400, 5);
+  }
+  {
+    SCOPED_TRACE("hold-jog RIGHT into the right stop");
+    buildRig();
+    ls->setCurrentPosition(0);
+    ls->setStopPosition(LeadscrewStopPosition::RIGHT, 400);
+    gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+    pump(40000);
+    EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED)
+        << "the hold-jog must arrest at the stop the way MM_JOG_RIGHT does";
+    EXPECT_NEAR(ls->getCurrentPosition(), 400, 5);
+  }
+}
+
+TEST_F(EndstopDeadlockTest, HoldJogAwayFromAStopTheCarriageSitsOnStillRuns) {
+  {
+    SCOPED_TRACE("sitting on the left stop, hold-jog RIGHT");
+    buildRig();
+    ls->setCurrentPosition(0);
+    ls->setStopPosition(LeadscrewStopPosition::LEFT, 0);
+    gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+    pump(kDwellUpdates);
+    EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_HOLD_JOG_RIGHT)
+        << "the jog was arrested by the stop it was leaving";
+    EXPECT_GT(ls->getCurrentPosition(), 1000);
+  }
+  {
+    SCOPED_TRACE("sitting on the right stop, hold-jog LEFT");
+    buildRig();
+    ls->setCurrentPosition(0);
+    ls->setStopPosition(LeadscrewStopPosition::RIGHT, 0);
+    gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_LEFT);
+    pump(kDwellUpdates);
+    EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_HOLD_JOG_LEFT);
+    EXPECT_LT(ls->getCurrentPosition(), -1000);
+  }
+}
+
+TEST_F(EndstopDeadlockTest,
+       HoldJogFromOneStopToTheOtherStillArrestsAtTheFarStop) {
+  buildRig();
+  ls->setCurrentPosition(0);
+  ls->setStopPosition(LeadscrewStopPosition::LEFT, 0);
+  ls->setStopPosition(LeadscrewStopPosition::RIGHT, 4000);
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  pump(40000);
+
+  EXPECT_EQ(gs->getMotionMode(), GlobalMotionMode::MM_DISABLED);
+  EXPECT_NEAR(ls->getCurrentPosition(), 4000, 5);
+}
+
+// ---------------------------------------------------------------------------
+// SPEED (issue #11, round 2 - the owner's corrected requirement). UiState
+// cannot see speed, only intents, so this is the only level that can pin it.
+// The multiplier is set away from its 1.0 default (jogSpeeds[] top index) so
+// a mode that ignores it cannot accidentally pass by coincidence.
+// ---------------------------------------------------------------------------
+
+TEST_F(EndstopDeadlockTest,
+       HoldJogRightReachesTheJogSpeedMultiplierNotThePlainJogSpeed) {
+  buildRig();
+  JogSpeedGuard guard(gs);
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  gs->decJogSpeed();  // top index (1.0) down to jogSpeeds[2] == 0.1
+  ASSERT_FLOAT_EQ(gs->getJogSpeed(), 0.1f);
+
+  ls->setCurrentPosition(0);  // both stops unset - nothing to arrest on yet
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_RIGHT);
+  pump(kDwellUpdates);
+
+  const float expected = derived->jogSpeedPps() * gs->getJogSpeed();
+  EXPECT_NEAR(ls->getLeadscrewSpeedPulsesPerSecond(), expected,
+              expected * 0.05f + 1.0f)
+      << "the hold-jog must cruise at jogSpeedPps() * getJogSpeed(), the same "
+         "speed MM_INTERACTIVE_JOG_RIGHT uses, NOT the plain jogSpeedPps() "
+         "the Click-run (MM_JOG_RIGHT) uses";
+  EXPECT_LT(ls->getLeadscrewSpeedPulsesPerSecond(), derived->jogSpeedPps())
+      << "must be slower than the unmultiplied jog speed at this multiplier";
+}
+
+TEST_F(EndstopDeadlockTest,
+       HoldJogLeftReachesTheJogSpeedMultiplierNotThePlainJogSpeed) {
+  buildRig();
+  JogSpeedGuard guard(gs);
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  ASSERT_FLOAT_EQ(gs->getJogSpeed(), 0.1f);
+
+  ls->setCurrentPosition(0);
+  gs->setMotionMode(GlobalMotionMode::MM_HOLD_JOG_LEFT);
+  pump(kDwellUpdates);
+
+  const float expected = derived->jogSpeedPps() * gs->getJogSpeed();
+  EXPECT_NEAR(ls->getLeadscrewSpeedPulsesPerSecond(), expected,
+              expected * 0.05f + 1.0f)
+      << "same as the RIGHT case, mirrored";
+  EXPECT_LT(ls->getLeadscrewSpeedPulsesPerSecond(), derived->jogSpeedPps());
+}
+
+// Regression pins: the new mode must not change what MM_JOG_* or
+// MM_INTERACTIVE_JOG_* already do. Both of these pass today - they exist so
+// a fix that reaches for the wrong case label (or merges the two families'
+// speed formulas) is caught here rather than only in the two tests above.
+TEST_F(EndstopDeadlockTest,
+       JogRightSpeedStaysUnmultipliedRegardlessOfTheJogSpeedSetting) {
+  buildRig();
+  JogSpeedGuard guard(gs);
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  ASSERT_FLOAT_EQ(gs->getJogSpeed(), 0.1f);
+
+  ls->setCurrentPosition(0);
+  gs->setMotionMode(GlobalMotionMode::MM_JOG_RIGHT);
+  pump(kDwellUpdates);
+
+  EXPECT_NEAR(ls->getLeadscrewSpeedPulsesPerSecond(), derived->jogSpeedPps(),
+              derived->jogSpeedPps() * 0.02f + 1.0f)
+      << "regression: the Click-run's speed must stay unmultiplied";
+}
+
+TEST_F(EndstopDeadlockTest,
+       InteractiveJogRightSpeedStaysAtTheMultiplier) {
+  buildRig();
+  JogSpeedGuard guard(gs);
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  gs->decJogSpeed();
+  ASSERT_FLOAT_EQ(gs->getJogSpeed(), 0.1f);
+
+  ls->setCurrentPosition(0);
+  gs->setMotionMode(GlobalMotionMode::MM_INTERACTIVE_JOG_RIGHT);
+  pump(kDwellUpdates);
+
+  // Wider tolerance than the plain-jogSpeedPps() regression test above:
+  // measured, the discrete deceleration ramp settles into a saw-tooth a few
+  // percent below the cap rather than converging on it exactly (observed
+  // ~1224.8 against a 1259.84 cap, ~2.8% low).
+  const float expected = derived->jogSpeedPps() * gs->getJogSpeed();
+  EXPECT_NEAR(ls->getLeadscrewSpeedPulsesPerSecond(), expected,
+              expected * 0.05f + 1.0f)
+      << "regression: the dead-man jog's multiplier must be unaffected by "
+         "the new mode's introduction";
+}
+
+// ---------------------------------------------------------------------------
 // THE PROPERTY, stated once over everything above.
 // ---------------------------------------------------------------------------
 

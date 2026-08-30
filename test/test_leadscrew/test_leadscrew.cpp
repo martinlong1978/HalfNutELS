@@ -217,6 +217,105 @@ TEST_F(LeadscrewTest, NegativePitchReversesTravelDirection) {
   EXPECT_EQ(io.m_dirPinState, derived->dirLeft());
 }
 
+// --------------------------------------------------------------------------
+// Issue #11 / round 2: the bit-flag design of the NEW GlobalMotionMode values
+// MM_HOLD_JOG_LEFT/RIGHT (lib/global_state/globalstate.h). Pure enum
+// arithmetic - no Leadscrew object needed - so this pins the mask reasoning
+// on its own, independent of whether Leadscrew::update() has been taught to
+// use the new modes yet (test_endstop_deadlock/test_endstop_deadlock.cpp
+// pins the behavioural side: arrest + speed).
+//
+// Requirement (from the report): jogMode must come out true for the new
+// modes (so Leadscrew::update() discards m_expectedPosition and bypasses the
+// resync gate for them, exactly as it does for MM_JOG_*), and nothing keyed
+// on MMF_INTERACTIVEJOG or MMF_JOG_DIRECTION may be disturbed - in
+// particular MMF_INTERACTIVEJOG must NOT match the new modes, since that bit
+// is what currently means "exempt from the endstop arrest" and the whole
+// point of MM_HOLD_JOG_* is that it is NOT exempt.
+// --------------------------------------------------------------------------
+TEST(GlobalMotionModeMasks, HoldJogModesAreDistinctFromEveryExistingValue) {
+  const GlobalMotionMode existing[] = {
+      MM_UNSET,       MM_DISABLED,          MM_ENABLED,
+      MM_JOG_LEFT,    MM_JOG_RIGHT,         MM_INTERACTIVE_JOG_LEFT,
+      MM_INTERACTIVE_JOG_RIGHT, MM_DECELLERATE};
+  for (GlobalMotionMode m : existing) {
+    EXPECT_NE(m, MM_HOLD_JOG_LEFT);
+    EXPECT_NE(m, MM_HOLD_JOG_RIGHT);
+  }
+  EXPECT_NE(MM_HOLD_JOG_LEFT, MM_HOLD_JOG_RIGHT);
+}
+
+TEST(GlobalMotionModeMasks, HoldJogSatisfiesTheSameJogTestLeadscrewUpdateUses) {
+  // The exact expression from Leadscrew::update(): bool jogMode =
+  // (m_motionMode & MMF_JOG) == MMF_JOG.
+  EXPECT_EQ((MM_HOLD_JOG_LEFT & MMF_JOG), (int)MMF_JOG);
+  EXPECT_EQ((MM_HOLD_JOG_RIGHT & MMF_JOG), (int)MMF_JOG);
+  // Regression: the modes jogMode already had to get right are untouched.
+  EXPECT_EQ((MM_JOG_LEFT & MMF_JOG), (int)MMF_JOG);
+  EXPECT_EQ((MM_JOG_RIGHT & MMF_JOG), (int)MMF_JOG);
+  EXPECT_EQ((MM_INTERACTIVE_JOG_LEFT & MMF_JOG), (int)MMF_JOG);
+  EXPECT_EQ((MM_INTERACTIVE_JOG_RIGHT & MMF_JOG), (int)MMF_JOG);
+  EXPECT_EQ((MM_DECELLERATE & MMF_JOG), (int)MMF_JOG);
+  EXPECT_NE((MM_ENABLED & MMF_JOG), (int)MMF_JOG);
+  EXPECT_NE((MM_DISABLED & MMF_JOG), (int)MMF_JOG);
+}
+
+TEST(GlobalMotionModeMasks, HoldJogDoesNotMatchTheInteractiveExemptionBit) {
+  // MMF_INTERACTIVEJOG is the bit every "drives straight through a stop"
+  // comment in leadscrew.cpp keys its reasoning on (see
+  // InteractiveJogDrivesStraightThroughAStop in test_endstop_deadlock). The
+  // new modes MUST arrest, so this bit must stay clear for them - setting it
+  // would let a future refactor from the hardcoded MM_INTERACTIVE_JOG_LEFT/
+  // RIGHT equality checks to `(mode & MMF_INTERACTIVEJOG)` silently exempt
+  // the hold-jog too.
+  EXPECT_NE((MM_HOLD_JOG_LEFT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  EXPECT_NE((MM_HOLD_JOG_RIGHT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  // Regression: still matches only the modes it always matched.
+  EXPECT_EQ((MM_INTERACTIVE_JOG_LEFT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  EXPECT_EQ((MM_INTERACTIVE_JOG_RIGHT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  EXPECT_NE((MM_JOG_LEFT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  EXPECT_NE((MM_JOG_RIGHT & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+  EXPECT_NE((MM_DECELLERATE & MMF_INTERACTIVEJOG), (int)MMF_INTERACTIVEJOG);
+}
+
+TEST(GlobalMotionModeMasks, HoldJogDirectionMatchesTheExistingDirectionMask) {
+  // MMF_JOG_DIRECTION (bit0|bit2) is "a jog-family mode going RIGHT". The new
+  // RIGHT mode must match it and the new LEFT mode must not, the same as the
+  // two existing jog pairs.
+  EXPECT_EQ((MM_HOLD_JOG_RIGHT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+  EXPECT_NE((MM_HOLD_JOG_LEFT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+  // Regression: existing pairs unaffected.
+  EXPECT_EQ((MM_JOG_RIGHT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+  EXPECT_NE((MM_JOG_LEFT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+  EXPECT_EQ((MM_INTERACTIVE_JOG_RIGHT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+  EXPECT_NE((MM_INTERACTIVE_JOG_LEFT & MMF_JOG_DIRECTION), (int)MMF_JOG_DIRECTION);
+}
+
+TEST(GlobalMotionModeMasks, HoldJogIsNotAnEnableStateMode) {
+  // MMF_ENABLESTATE is the MM_ENABLED/MM_DISABLED pair; the hold-jog is
+  // neither.
+  EXPECT_NE((MM_HOLD_JOG_LEFT & MMF_ENABLESTATE), (int)MMF_ENABLESTATE);
+  EXPECT_NE((MM_HOLD_JOG_RIGHT & MMF_ENABLESTATE), (int)MMF_ENABLESTATE);
+  EXPECT_EQ((MM_ENABLED & MMF_ENABLESTATE), (int)MMF_ENABLESTATE);
+  EXPECT_EQ((MM_DISABLED & MMF_ENABLESTATE), (int)MMF_ENABLESTATE);
+}
+
+TEST(GlobalMotionModeMasks, MmfHoldjogIdentifiesOnlyTheNewModes) {
+  // The new mask this round adds. Nothing reads it in production code today
+  // (Leadscrew::update() still needs the equality checks scoped in the
+  // report), but it documents which bit distinguishes MM_HOLD_JOG_* and
+  // pins that no existing value accidentally carries it.
+  EXPECT_EQ((MM_HOLD_JOG_LEFT & MMF_HOLDJOG), (int)MMF_HOLDJOG);
+  EXPECT_EQ((MM_HOLD_JOG_RIGHT & MMF_HOLDJOG), (int)MMF_HOLDJOG);
+  const GlobalMotionMode existing[] = {
+      MM_UNSET,       MM_DISABLED,          MM_ENABLED,
+      MM_JOG_LEFT,    MM_JOG_RIGHT,         MM_INTERACTIVE_JOG_LEFT,
+      MM_INTERACTIVE_JOG_RIGHT, MM_DECELLERATE};
+  for (GlobalMotionMode m : existing) {
+    EXPECT_NE((m & MMF_HOLDJOG), (int)MMF_HOLDJOG) << "mode=" << (int)m;
+  }
+}
+
 }  // namespace
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.
