@@ -276,16 +276,117 @@ TEST(UiStateJog, RightClickWithRightStopSetRunsToRightStop) {
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
-TEST(UiStateJog, LeftHoldWithLeftStopSetAlsoRunsToLeftStop) {
-  // Spec §3 table: "Hold, left stop SET -> (same as click)". Safe because the
-  // keypad emits no Click after a Hold, so this cannot double-fire.
+// ---------------------------------------------------------------------------
+// Issue #11 / owner ruling (option 4): Hold on a side with a stop SET no
+// longer behaves "same as click" (docs/ux-redesign.md §3, pre-#11 wording).
+// It now JOGS WHILE HELD, arresting at the stop, and decelerates in place on
+// Release instead of continuing to the stop the way the Click-run does. The
+// START intent is UNCHANGED - still RunToLeftStop/RunToRightStop, the same
+// MM_JOG_LEFT/RIGHT the Click-run already uses (src/buttonpad.cpp) - because
+// that mode already arrests at a stop through the endstop-arrest path a
+// thread pass uses (lib/leadscrew/leadscrew.cpp:378-379), so no change to
+// Leadscrew::update() is needed to make Hold stop-respecting. What changes is
+// bookkeeping ONLY: Hold must record the jog in m_jogDir (so the existing
+// dead-man terminator ends it on Release), not in m_runPhase (which is what
+// lets a Click-run survive its own Release and be cancelled later instead).
+//
+// SPEED RULING (issue #11, item 1 - "decide it from the code and say why"):
+// because Hold reuses the SAME RunToLeftStop/RunToRightStop intent the Click
+// branch emits, src/buttonpad.cpp cannot tell from the intent alone whether a
+// given RunToLeftStop came from a Click or a Hold - both map unconditionally
+// to GlobalMotionMode::MM_JOG_LEFT/RIGHT. And Leadscrew::update()'s speed
+// switch (lib/leadscrew/leadscrew.cpp:698-706) caps MM_JOG_* at
+// config->jogSpeedPps() with no reference to GlobalState::getJogSpeed() -
+// that multiplier is read only for the MM_INTERACTIVE_JOG_* branch two lines
+// below it. So this hold-jog runs at the SAME unmultiplied speed as the
+// Click-run on the same side, not jogSpeedPps() * getJogSpeed(). It CANNOT
+// use MM_INTERACTIVE_JOG_* to pick up the multiplier instead: that mode is
+// explicitly excluded from the endstop arrest (leadscrew.cpp:483,492), and
+// using it here would silently restore the drive-through-the-stop behaviour
+// this issue exists to remove. Honouring the multiplier as well as arresting
+// would need a NEW signal all the way to the speed switch (a distinct
+// UiIntent plus a value for Leadscrew::update() to read for MM_JOG_* only
+// when that signal is live) - out of scope for this change and not pinned
+// here; see the report for the full trade-off.
+// ---------------------------------------------------------------------------
+
+TEST(UiStateJog, LeftHoldWithLeftStopSetStartsAStopRespectingJog) {
   Rig r;
-  EXPECT_EQ(UiIntent::RunToLeftStop, r.hold(UiKey::Left, kLeftOnly));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Press, kLeftOnly));
+  EXPECT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
 }
 
-TEST(UiStateJog, RightHoldWithRightStopSetAlsoRunsToRightStop) {
+TEST(UiStateJog, RightHoldWithRightStopSetStartsAStopRespectingJog) {
   Rig r;
-  EXPECT_EQ(UiIntent::RunToRightStop, r.hold(UiKey::Right, kRightOnly));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Right, UiKeyEvent::Press, kRightOnly));
+  EXPECT_EQ(UiIntent::RunToRightStop,
+            r.key(UiKey::Right, UiKeyEvent::Hold, kRightOnly));
+}
+
+TEST(UiStateJog, ReleasingTheHoldJogDeceleratesInsteadOfContinuingToTheStop) {
+  // This is the whole point of the change (issue #11, item 2): unlike the
+  // Click-run, whose Release is inert (PressAndReleaseAreInertWhenTheStopIsSet
+  // below) so the carriage keeps running to the stop, the Hold-jog's Release
+  // must ask the caller to wind the carriage down right where it is. JogStop
+  // is the existing intent the no-stop dead-man jog already uses for exactly
+  // this, and src/buttonpad.cpp already maps it to MM_DECELLERATE.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
+}
+
+TEST(UiStateJog, ReleasingTheRightHoldJogDeceleratesInsteadOfContinuingToTheStop) {
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToRightStop,
+            r.key(UiKey::Right, UiKeyEvent::Hold, kRightOnly));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Right, UiKeyEvent::Release, kRightOnly));
+}
+
+TEST(UiStateJog,
+     ReleaseAlwaysStopsAHoldJogEvenIfTheStopDisappearedMidHold) {
+  // Mirror of ReleaseAlwaysStopsAnInFlightJogEvenIfTheStopAppeared below, other
+  // direction: the stop was SET when Hold started the jog, then the operator
+  // (or the web UI) clears it while the arrow is still physically down. The
+  // dead-man terminator at the top of handleKey() does not consult
+  // ctx.leftStopSet at all - it fires on any Release while m_jogDir != 0 - so
+  // this must still answer JogStop, not fall through to wherever an "at rest,
+  // no stop" context would otherwise land.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Left, UiKeyEvent::Release, kNoStops));
+}
+
+TEST(UiStateJog, ClickAfterAHoldJogAtTheSameStopStartsAFreshRun) {
+  // Requirement 3 (issue #11): m_runPhase and m_jogDir must never both be
+  // live. If Hold had written m_runPhase as well as (or instead of) m_jogDir,
+  // this Click would read a stale Commanded phase and answer CancelMotion
+  // instead of starting the run the operator is actually asking for now that
+  // the arrow has been let go and pressed again.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.hold(UiKey::Left, kLeftOnly));
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
+}
+
+TEST(UiStateJog,
+     HoldAfterACancelledClickRunAtTheSameStopStillJogsAndReleaseStops) {
+  // The other direction: a cancelled Click-run clears m_runPhase (existing
+  // behaviour, ThirdClickAfterCancelStartsAFreshRun below) and never touches
+  // m_jogDir either way, so a Hold right afterwards must jog normally and its
+  // own Release must still decelerate - nothing from the Click/cancel pair
+  // should be left over to confuse it.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
+  ASSERT_EQ(UiIntent::CancelMotion, r.click(UiKey::Left, kLeftOnly));
+  ASSERT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  EXPECT_EQ(UiIntent::JogStop,
+            r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
 }
 
 TEST(UiStateJog, LeftPressWithLeftStopUnsetStartsJogAndReleaseStops) {
@@ -1238,6 +1339,22 @@ TEST(UiStateHalt, CancelsMidPoweredRunAndClearsTheRunFlag) {
   ASSERT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
   ASSERT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt, kLeftOnly));
   // The next arrow click must start a fresh run, not cancel a stale one.
+  EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
+}
+
+TEST(UiStateHalt, CancelsMidHoldJogAtAStopAndClearsTheJogFlag) {
+  // Companion to CancelsMidPoweredRunAndClearsTheRunFlag, for the NEW
+  // stop-respecting hold-jog (issue #11). It is tracked in m_jogDir, not
+  // m_runPhase, so HALT's own `m_jogDir = 0` (uistate.cpp's HALT branch) has
+  // to retire it the same way the m_runPhase reset retires a Click-run, or
+  // the arrow's own late Release would fire a second, spurious JogStop after
+  // HALT already asked for MM_DECELLERATE.
+  Rig r;
+  ASSERT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  ASSERT_EQ(UiIntent::CancelMotion, r.click(UiKey::Halt, kLeftOnly));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
+  // And the arrow works normally afterwards - nothing left latched.
   EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, kLeftOnly));
 }
 
@@ -4230,6 +4347,29 @@ TEST(UiStateAlarm, APoweredRunLatchDoesNotSurviveIt) {
   r.tick(idle);
   ASSERT_EQ(UiFocus::Jog, r.focus());
   EXPECT_EQ(UiIntent::RunToLeftStop, r.click(UiKey::Left, idle));
+}
+
+// Companion to AJogInFlightWhenItTripsIsForgotten and
+// APoweredRunLatchDoesNotSurviveIt, for the NEW stop-respecting hold-jog
+// (issue #11): it lives in m_jogDir, so it needs the SAME tick()-alarm
+// retirement the interactive jog gets, or a fault mid-hold stranded there
+// would let the arrow's eventual Release fire a JogStop against an axis the
+// alarm task is already holding at MM_DISABLED.
+TEST(UiStateAlarm, AHoldJogAtAStopInFlightWhenItTripsIsForgotten) {
+  Rig r;
+  const UiContext leftStopAlarmMoving =
+      ctx(/*leftStopSet=*/true, /*rightStopSet=*/false,
+          /*motionEnabled=*/false, /*motionActive=*/true,
+          /*threadMode=*/false, /*alarm=*/true);
+  ASSERT_EQ(UiIntent::RunToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  r.tick(leftStopAlarmMoving);
+  EXPECT_EQ(UiFocus::Alarm, r.focus());
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Left, UiKeyEvent::Release, leftStopAlarmMoving));
+  // And after the clear, the stale direction is not lurking either.
+  r.tick(kLeftOnly);
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Left, UiKeyEvent::Release, kLeftOnly));
 }
 
 // The alarm outranks the motion lockout, not the other way round. Both are true
