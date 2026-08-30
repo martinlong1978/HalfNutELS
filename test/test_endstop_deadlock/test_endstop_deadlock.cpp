@@ -1278,6 +1278,114 @@ TEST_F(EndstopDeadlockTest, FedAwayTheAxisLeavesTheStopBeforeHuntingBackOntoIt_T
          "tighter version of this one";
 }
 
+// ---------------------------------------------------------------------------
+// ISSUE #13: the shouldStop switch (leadscrew.cpp, ~line 723) has no
+// `default:` and no `case MM_UNSET:`. MM_UNSET (= 0) is the only
+// GlobalMotionMode value it misses.
+//
+// GlobalState's constructor always sets MM_DISABLED and nothing in lib/ or
+// src/ ever writes MM_UNSET, so this is latent rather than live. But
+// GlobalState::setMotionMode() takes the raw enum, so a test can put the
+// machine there directly - and the path, once there, is not structurally
+// dead: jogMode is false for MM_UNSET (MM_UNSET & MMF_JOG == 0), so it is
+// treated exactly like MM_ENABLED for m_expectedPosition accumulation and
+// for direction selection (leadscrew.cpp ~518-538, the ordinary
+// positionError-driven branches), but it matches none of the spelled-out
+// mode equalities in the endstop-arrest block above the switch (~378-471)
+// and none of the switch's case labels. Reviewed at the object-code level
+// (objdump on leadscrew.cpp.o): gcc resolves the uninitialised `shouldStop`
+// to false, i.e. the ACCELERATE branch - a carriage that runs to its
+// mechanical limit at increasing speed with the stops ignored.
+//
+// Reusing this file's rig rather than a new suite, for the same reason the
+// HOLD_JOG section above does: the 100us-step clock here is the only one in
+// the repo that can resolve a steady-state PPS (test_leadscrew.cpp's pump()
+// forces one step per 100ms call regardless of speed, which cannot show
+// "climbing toward max" versus "held near zero"). The bug itself is
+// unrelated to the re-engage deadlock the rest of the file chases.
+//
+// WHAT'S PINNED HERE:
+//   1. the core case - MM_UNSET must not accelerate;
+//   2. stops are honoured - a stop set while MM_UNSET is active must not be
+//      run through.
+//
+// WHAT IS DELIBERATELY NOT RE-PINNED: every mode the switch already has a
+// case for. A `default:` (or an explicit `case MM_UNSET:`) cannot change the
+// behaviour of an already-matched case label - C++ switch dispatch tries the
+// specific labels first regardless of what else is in the switch - so the
+// existing suites are the regression fence for that, for free:
+//   MM_DISABLED / MM_DECELLERATE  - ArrivingAtTheStopUnderPowerArrests,
+//     TheSettledArrestReleasesTheDirectionLatch,
+//     JoggingOffTheStopRestoresANormalReEngage (this file);
+//     DisabledModeDoesNotMove (test_leadscrew.cpp).
+//   MM_ENABLED                    - the whole "THE DEADLOCK" and "MUST NOT
+//     BREAK" blocks above (this file); EnabledModeFollowsSpindleWhenSynced,
+//     NegativePitchReversesTravelDirection (test_leadscrew.cpp).
+//   MM_JOG_LEFT / MM_JOG_RIGHT     - PoweredRunIntoAStopStillArrests,
+//     PoweredRunAwayFromAStopTheCarriageSitsOnStillRuns,
+//     PoweredRunFromOneStopToTheOtherStillArrestsAtTheFarStop,
+//     JogRightSpeedStaysUnmultipliedRegardlessOfTheJogSpeedSetting (this
+//     file); JogRightAdvancesOneStepPerUpdate, JogLeftRetreatsOneStepPerUpdate,
+//     JogIntoRightEndstopStopsAndDisables (test_leadscrew.cpp).
+//   MM_INTERACTIVE_JOG_LEFT/RIGHT  - InteractiveJogAwayFromAStopTheCarriageSitsOnStillRuns,
+//     InteractiveJogDrivesStraightThroughAStop,
+//     InteractiveJogRightSpeedStaysAtTheMultiplier (this file).
+//   MM_HOLD_JOG_LEFT/RIGHT         - HoldJogIntoAStopStillArrests,
+//     HoldJogAwayFromAStopTheCarriageSitsOnStillRuns,
+//     HoldJogFromOneStopToTheOtherStillArrestsAtTheFarStop,
+//     HoldJogRightReachesTheJogSpeedMultiplierNotThePlainJogSpeed,
+//     HoldJogLeftReachesTheJogSpeedMultiplierNotThePlainJogSpeed (this file).
+// Running this file (and test_leadscrew.cpp) after the fix is what proves
+// none of those regressed; nothing new is added for them here.
+// ---------------------------------------------------------------------------
+
+TEST_F(EndstopDeadlockTest, UnsetMotionModeDoesNotAccelerateTowardMaxSpeed) {
+  // No stops here - this pin is about the switch alone; the next test covers
+  // the endstop. Enough spindle motion to latch a direction and put real
+  // demand behind it, exactly as EnabledModeFollowsSpindleWhenSynced
+  // (test_leadscrew.cpp) does for MM_ENABLED - jogMode is false for MM_UNSET
+  // too, so the accumulation into m_expectedPosition is identical.
+  ls->setTargetPitchMM(0.25f);
+  ls->setCurrentPosition(0);
+  gs->setMotionMode(GlobalMotionMode::MM_UNSET);
+
+  driveSpindle(kK);  // latches a direction and banks real positionError
+  settle();          // give a working ramp every chance to reach cruise and
+                      // come back down; a broken one never stabilises and
+                      // settle() falls through to its iteration cap instead
+
+  EXPECT_LT(ls->getLeadscrewSpeedPulsesPerSecond(), 5.0f)
+      << "an unrecognised motion mode must not accelerate the axis - pre-fix "
+         "this climbs toward and holds at leadscrewMaxSpeedPps() ("
+      << derived->leadscrewMaxSpeedPps()
+      << " pps), because the shouldStop switch has no case for MM_UNSET and "
+         "gcc resolves the uninitialised bool to false, the accelerate "
+         "branch (issue #13)";
+}
+
+TEST_F(EndstopDeadlockTest, UnsetMotionModeDoesNotRunThroughASetStop) {
+  // A real SET stop, close enough that a working axis could not possibly
+  // miss it, and a drive long enough that a tracking axis would travel well
+  // past it (kK*3 is kLongDrive - a working MM_ENABLED axis covers ~474
+  // pulses over this same drive, see kLongDriveMinTravel above).
+  ls->setTargetPitchMM(0.25f);
+  ls->setCurrentPosition(0);
+  ls->setStopPosition(LeadscrewStopPosition::RIGHT, 50);
+  gs->setMotionMode(GlobalMotionMode::MM_UNSET);
+
+  driveSpindle(kK * 3);
+  settle();
+
+  EXPECT_LE(ls->getCurrentPosition(), 55)
+      << "the carriage ran through a SET stop while MM_UNSET - the "
+         "endstop-arrest block (leadscrew.cpp ~378-471) is a list of "
+         "spelled-out mode equalities that does not include MM_UNSET, and "
+         "with the shouldStop switch also missing a case for it the broken "
+         "accelerate branch keeps pulsing regardless of the stop. Measured "
+         "position: "
+      << ls->getCurrentPosition();
+}
+
 }  // namespace
 
 // PlatformIO does not inject a googletest runner for this env, so provide one.
