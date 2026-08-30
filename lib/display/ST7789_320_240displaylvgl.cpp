@@ -1964,7 +1964,10 @@ void Display::showSplash() {
   lv_obj_t* version = createLabel(lv_screen_active(), &lv_font_montserrat_14,
                                   m_palette->textDim, 0, SPLASH_VERSION_Y);
   fixLabelBox(version, SCREEN_W, LV_TEXT_ALIGN_CENTER);
-  lv_label_set_text(version, FIRMWARE_VERSION);
+  // Splash carries the FULL provenance - version plus "-<branch>@<sha>" on a
+  // non-release build (issue #4). 14pt centred across 320px has the room, and
+  // the splash is the one screen every boot shows.
+  lv_label_set_text(version, FIRMWARE_VERSION_DISPLAY);
 
   lv_timer_handler();
 }
@@ -2727,7 +2730,10 @@ void Display::init() {
                                m_palette->textPrimary, ABOUT_FW_X,
                                ABOUT_ROW2_VALUE_Y);
     fixLabelBox(fv, ABOUT_FW_W, LV_TEXT_ALIGN_LEFT);
-    lv_label_set_text(fv, FIRMWARE_VERSION);
+    // The SHA, not the version, when this is not a clean master build (issue
+    // #4): a version string on a demo build is exactly what cost hours during
+    // the EP2 filming. Both forms fit TEXT26_ABOUT_FW_W.
+    lv_label_set_text(fv, FIRMWARE_VERSION_ABOUT);
     lv_obj_t* ul = createLabel(aboutPanel, &lv_font_montserrat_14,
                                m_palette->textDim, ABOUT_UP_X,
                                ABOUT_ROW2_LABEL_Y);

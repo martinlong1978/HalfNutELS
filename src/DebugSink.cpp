@@ -134,7 +134,9 @@ bool postTrace(const HttpUrlParts& url, const DebugData* trace, int count) {
   head += "Content-Type: text/csv\r\n";
   // Metadata the sink puts in the filename / summary line, so a capture can be
   // told apart from the next one without opening it.
-  head += String("X-ELS-Version: ") + FIRMWARE_VERSION + "\r\n";
+  // Full provenance, not the bare version: a capture uploaded from a demo or
+  // dirty build must be attributable to it (issue #4).
+  head += String("X-ELS-Version: ") + FIRMWARE_VERSION_DISPLAY + "\r\n";
   head += String("X-ELS-Samples: ") + String(count) + "\r\n";
   head += String("X-ELS-Device: ") + WiFi.macAddress() + "\r\n";
   head += "Transfer-Encoding: chunked\r\n";
