@@ -994,6 +994,16 @@ UiIntent UiState::handleKey(UiKey key, UiKeyEvent ev, const UiContext& ctx,
         if (stopSet) {
           return UiIntent::None;  // display flashes "hold to clear"
         }
+        // Setting a stop is the one gesture in this widget the operator is
+        // done after: the next thing they want is to jog or engage, not a
+        // second press to close a bar that has nothing left to confirm. So
+        // this - and only this - outcome also drops focus back to Jog.
+        // Clearing (Hold, below) does NOT: it is the one destructive edit
+        // here, so it stays on screen for the operator to see what the
+        // panel now shows before they move on. An inert click on an
+        // already-set stop or a refused edit under power obviously don't
+        // close either - nothing changed for the operator to walk away from.
+        m_focus = UiFocus::Jog;
         return left ? UiIntent::SetLeftStop : UiIntent::SetRightStop;
       }
       if (ev == UiKeyEvent::Hold) {
