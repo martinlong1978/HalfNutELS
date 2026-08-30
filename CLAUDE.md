@@ -302,9 +302,17 @@ counts them and should stay at zero.
 
 ## Gotchas
 
-- PlatformIO / the IDE occasionally rewrite `.vscode/extensions.json` (and sometimes source files) with
-  CRLF churn — revert those before committing so diffs stay clean. `lib/` sources are CRLF; `src/`/README are
-  LF (mixed; a `.gitattributes` would settle it).
+- **Line endings are settled: `.gitattributes` normalises everything to LF** (issue #9, `4e5c3ae` policy
+  + `b98ca27` renormalisation). PlatformIO and the IDE can still rewrite files, but the clean filter now
+  normalises whatever they produce, so it no longer reaches a diff - there is nothing left to revert by
+  hand. This corrects the older note here, which said `lib/` was CRLF and `src/`/README LF: measured
+  before the change, `lib/` was 19 CRLF against 16 LF, mixed within itself, so the CRLF was accident
+  rather than intent. Two deliberate carve-outs: **`cad/` is neither converted nor frozen** (the three
+  STEP files disagree with each other, and normalising them is a 191,405-line diff nobody will read),
+  and the Gerber/drill/IPC output under `kicad/LVGL/gerbers/` and `kicad/LVGL/production/` is `-text` so
+  a board house always gets the committed bytes. One surprise worth knowing: existing working-tree files
+  may still be CRLF on disk, because git skips rewriting a file whose clean-filter output already matches
+  the blob. Harmless, it self-heals as files are touched, and a fresh clone gets LF.
 - `publish.cmd` is gitignored (a local wrapper); the real publish path is `scripts/release.sh` via the
   `esp32dev_publish` `upload_command`.
 - The WiFi **captive portal** (config AP) serves the config page at any URL; on Android the browser routes
