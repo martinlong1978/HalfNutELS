@@ -317,20 +317,23 @@ counts them and should stay at zero.
 - ~~Negative-RPM colour line (renders blue)~~ â€” fixed on `ux-redesign` and confirmed red in
   `tools/screenshot/out/rest-reverse-spindle.png`.
 
-### Found by the first screenshot run (`ux-redesign`, unfixed)
+### ~~Found by the first screenshot run~~ — all four fixed (verified 2026-08-30)
 
-All four are legibility, not layout, so no `static_assert` can catch them:
+The four legibility findings once listed here (invisible `colourDisabled` in dark, invisible
+`textDim` on `colourDisabled` in light, the pitch ticker's translucent track, and the un-swapped
+OTA/Wi-Fi screens) are **all resolved on `master`**. Checked against the rendered pixels rather
+than the code, which is the only check that means anything for legibility:
 
-1. **Dark palette: `colourDisabled` (`0xCCCCCC`) is invisible on `background` (`0xF5F5F5`)** â€” 1.5:1.
-   Kills all four band rules, the un-synced `SYNC` chip, and the `IDLE` state word + dot. The rest screen
-   at idle has no readable machine state at all.
-2. **Light palette: `textDim` (`0x757575`) on `colourDisabled` (`0x6B7280`) is invisible** â€” ~1.1:1,
-   measured off the pixels. The unselected MODE tile labels ("FEED", "THREAD L") and a blocked menu card's
-   name render as blank grey slabs. See `light-overlay-mode.png` / `light-menu-sync-blocked.png`.
-3. **The pitch ticker's track is not the colour the code asks for.** `init()` sets `bg_color` on the
-   slider's `LV_PART_MAIN` but never `bg_opa`, so it keeps the default theme's ~20% translucent main while
-   the INDICATOR is opaque `colourDisabled`. The two therefore differ, and the ticker reads as a fill/
-   progress bar â€” the exact thing the comment there says it must not do. Glaring in the light palette.
-4. **The OTA and Wi-Fi screens are not pre-swapped.** They use LVGL's stock theme colours, so the update
-   progress bar renders **orange** (`#2196F3` â†’ `#F39621`) instead of blue. Also `"Checking for updates..."`
-   at Montserrat 26 spans essentially the full 320 px with no margin.
+- `light-overlay-mode.png` — "FEED" and "THREAD L" are legible dark-on-white, not blank slabs.
+- `light-menu-sync-blocked.png` — the blocked "Sync" card reads clearly, with an amber
+  "needs thread mode" chip.
+- `overlay-rate.png` — the pitch ticker is no longer a slider at all. It is a value with its two
+  neighbours (`1.00  **1.25**  1.50`), so there is no track to be the wrong colour. The finding is
+  moot rather than fixed.
+- `ota-checking.png` — the OTA screen is palette-coloured throughout, the bar is not orange, and
+  the string is "CHECKING" with a proper margin rather than "Checking for updates..." spanning the
+  panel.
+
+The palette itself was reworked: `STATE_DISABLED` is `0x80726B`, not the `0xCCCCCC` the old finding
+cited, and the `DisplayPalette` comments now carry measured contrast ratios (3.9:1 on the dimmest
+chip fill, ~9:1 on the rest). Do not resurrect these from an old branch's notes.
