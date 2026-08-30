@@ -769,11 +769,65 @@ void Leadscrew::update() {
     case MM_DECELLERATE:
       shouldStop = true;
       break;
+    // ISSUE #14: goingToHitLeftEndstop/goingToHitRightEndstop are direction-
+    // agnostic by construction (leadscrew_stopsync.h) - each only compares a
+    // lookahead position to ITS OWN stop, with no notion of which way the
+    // carriage is travelling. Left unguarded here, a stop behind the
+    // carriage throttles the ramp exactly as hard as the one ahead: jog
+    // RIGHT away from a LEFT stop you just arrested on, and the rear
+    // predicate keeps asking "how soon can I stop AT the left stop" every
+    // iteration, which the acceleration branch above (shouldStop when
+    // m_leadscrewSpeed exceeds the jog cap) has to satisfy alongside it.
+    //
+    // Gating each term on nextDirection - RIGHT can only be blocked by the
+    // stop ahead of rightward travel, LEFT only by the one ahead of
+    // leftward travel - restores that: only the stop actually in front of
+    // the carriage can hold the ramp down. Measured severity (issue #14
+    // comment): with the gate absent this was a ~1-1.5% transient that
+    // converged to exact parity within ~0.3 s, not the sustained crawl the
+    // issue first suspected - it very nearly cancels because this branch's
+    // speed cap and getStoppingDistanceInPulses() both scale on the same
+    // m_leadscrewAccel. That near-cancellation is coincidence, not
+    // intended behaviour: retune deceleration away from acceleration and
+    // the rear stop starts genuinely throttling, so the fix stays even
+    // though today's cost is small.
+    //
+    // MUST be nextDirection, NOT m_currentDirection. nextDirection is
+    // computed once, unambiguously, by the direction-selection block above
+    // this switch, before either latch runs. m_currentDirection starts each
+    // update() UNKNOWN until that same block latches it - on the SAME call
+    // as the first pulse - so a match against it evaluated any earlier
+    // would see UNKNOWN, fail to match either arm, and silently drop BOTH
+    // endstop terms (including the forward one) for however long the
+    // mismatch lasted: a jog made fast by deleting a safety check.
+    // HoldJogFromRestWithACloseForwardStopStillDeceleratesAndLandsOnIt pins
+    // the forward stop still catching a jog started from rest for exactly
+    // this reason.
+    //
+    // Carriage already sitting ON the forward stop when this mode is
+    // (re)selected does not reach here at all: the endstop-arrest block
+    // above (~377-471) matches this exact mode+hit combination first and
+    // rewrites m_motionMode to MM_DISABLED before the switch runs, which
+    // takes the unconditional-shouldStop arm below instead - so there is no
+    // window where nextDirection's UNKNOWN (direction selection gates the
+    // jog arms on !hitRightEndstop/!hitLeftEndstop) is asked to catch it.
+    //
+    // Deliberately NOT touching MM_ENABLED: a pass starts from rest (issue
+    // #8), so the rear predicate there would need pulsesToStop(v) >= d0 + s
+    // with d0 >= 0, which v <= sqrt(2as) never satisfies - it is already a
+    // no-op on that arm, so widening this fix to it buys nothing and risks
+    // the thread pass.
+    //
+    // Cost: two enum compares (`nextDirection == LeadscrewDirection::LEFT`
+    // / `::RIGHT`), no divide, no allocation, no virtual call - and only
+    // evaluated inside `if (sendPulse())`, i.e. on an iteration that
+    // already emitted a pulse.
     case MM_JOG_LEFT:
     case MM_JOG_RIGHT:
       shouldStop = m_leadscrewSpeed > config->jogSpeedPps() ||
         nextDirection != m_currentDirection ||
-        goingToHitLeftEndstop || goingToHitRightEndstop;
+        (nextDirection == LeadscrewDirection::LEFT && goingToHitLeftEndstop) ||
+        (nextDirection == LeadscrewDirection::RIGHT && goingToHitRightEndstop);
       break;
     case MM_INTERACTIVE_JOG_LEFT:
     case MM_INTERACTIVE_JOG_RIGHT:
@@ -795,11 +849,20 @@ void Leadscrew::update() {
     // Cost is one float multiply and one GlobalState read, identical to the
     // MM_INTERACTIVE_JOG_* case, and only on an iteration that actually
     // emitted a pulse. No divide is introduced.
+    //
+    // Same issue #14 direction-match as MM_JOG_* above, and for the same
+    // reason: the ENDSTOP TERMS are borrowed from the powered run precisely
+    // so this mode plans its deceleration onto the stop it is approaching,
+    // not the one it just left. See the long comment on MM_JOG_LEFT/RIGHT
+    // for the full reasoning (rear-stop cancellation being coincidental,
+    // why nextDirection and not m_currentDirection, why MM_ENABLED is
+    // excluded) - it applies here unchanged.
     case MM_HOLD_JOG_LEFT:
     case MM_HOLD_JOG_RIGHT:
       shouldStop = m_leadscrewSpeed > (config->jogSpeedPps() * m_globalState->getJogSpeed()) ||
         nextDirection != m_currentDirection ||
-        goingToHitLeftEndstop || goingToHitRightEndstop;
+        (nextDirection == LeadscrewDirection::LEFT && goingToHitLeftEndstop) ||
+        (nextDirection == LeadscrewDirection::RIGHT && goingToHitRightEndstop);
       break;
     }
 
