@@ -684,8 +684,8 @@ TEST_F(MidPassStallTest, PlantedRearStopMirrorForALeftHandThread) {
 // ===========================================================================
 // PART 4 - what actually turned up while the hypothesis was being refuted.
 //
-// NOT the rear predicate, and NOT the field report either - but a real defect
-// found by the sweep above, recorded here rather than dropped.
+// NOT the rear predicate, and NOT the field report either - but a real
+// phenomenon found by the sweep above, recorded here rather than dropped.
 //
 // THE OBSERVATION. Both stops set, the carriage on the left one, a 0.25 mm
 // right-hand thread, spindle at 300 PPS (15 rpm - a wholly ordinary
@@ -701,11 +701,22 @@ TEST_F(MidPassStallTest, PlantedRearStopMirrorForALeftHandThread) {
 //
 // THE MECHANISM is the minimum step rate, not the stops. m_currentPulseDelay is
 // clamped to initialPulseDelay, which is LEADSCREW_JERK (0.5 mm/s) worth of
-// steps - 157 pps, halved to ~79 by sendPulse()'s two-call toggle. A 0.25 mm
-// thread at 15 rpm demands 19.7 pps. The axis physically cannot feed that
-// slowly, so it steps, overshoots, drives the following error past -1, flips
-// the direction latch and steps back - and because the pass began standing on
-// the stop, the first backward step lands on it and the arrest fires.
+// steps. A 0.25 mm thread at 15 rpm demands 19.7 pps, well under that floor.
+// The axis physically cannot feed that slowly, so it steps, overshoots, drives
+// the following error past -1, flips the direction latch and steps back - and
+// because the pass began standing on the stop, the first backward step lands
+// on it and the arrest fires.
+//
+// (An earlier note here computed the floor as "157 pps, halved to ~79 by
+// sendPulse()'s two-call toggle". That halving does not happen: board.h
+// defines ELS_USE_RMT unconditionally, so sendPulse() always takes the RMT
+// branch and always returns true - the pin-toggle branch the halving
+// describes is dead code, on the host build and the real device alike. The
+// floor is the un-halved ~157 pps. Verified directly in
+// test/test_midfeed_tracking by measuring the interval between real steps: it
+// is capped at initialPulseDelay and never doubles it. This does not change
+// any conclusion below, since every number here came from observing pass/fail
+// outcomes rather than from this arithmetic.)
 //
 // Measured threshold, sweeping the demanded feed: the pass fails below about
 // 60 leadscrew pps (~0.19 mm/s at the carriage) and runs above about 66. That
@@ -719,9 +730,28 @@ TEST_F(MidPassStallTest, PlantedRearStopMirrorForALeftHandThread) {
 // report was MM_ENABLED - CUTTING - with the panel locked out. It also happens
 // at the START of a pass, not mid-pass.
 //
-// WHY IT IS ASSERTED AS A DEFECT rather than characterized: no judgement about
-// intended behaviour is needed to call it one. Both stops set, engaged, spindle
-// turning, and the machine silently disables itself and reports nothing.
+// RE-SCOPED (issue #1). This section originally asserted the arrest above as a
+// defect via AFineThreadAtLowRpmMustActuallyLeaveItsStop, on the premise that a
+// pass starts parked on a stop. Issue #8 has since ruled that premise false: a
+// pass ends at its stop and is finished there, so a fresh pass never starts
+// standing on one - the operator withdraws, returns and re-engages away from
+// it. That test asserted the wrong requirement and has been REMOVED.
+//
+// The mechanism above is still real (the axis genuinely cannot step slower
+// than the initialPulseDelay floor) and it is still worth recording here,
+// because THIS scenario - starting a pass standing on a stop - is exactly what
+// trips it: the very first overshoot-and-reverse of the dither lands on the
+// stop the carriage never left, and the endstop arrest (correctly) fires. The
+// question of whether the underlying dither is a problem AWAY from a stop -
+// which is what issue #1 actually needed answered - is measured directly in
+// test/test_midfeed_tracking, mid-pass, with no stop nearby to trip: the
+// answer there is no. The dither is bounded (worst observed following error
+// 4.35 pulses / 0.0138 mm) and does not cost pitch accuracy over dozens of
+// revolutions; it is a surface-finish question at worst, not a stall or a
+// pitch defect. This suite's TheLowFeedDitherThresholdIsAboutSixtyPulsesPerSecond
+// below is kept AS IS - it still correctly characterizes when THIS scenario
+// (starting on a stop) arrests - but it is deliberately not read as a general
+// tracking limit any more.
 //
 // SCOPE NOTE for whoever picks this up: the arrest that fires here is the same
 // one test/test_endstop_deadlock is about, so a fix probably belongs with that
@@ -729,52 +759,29 @@ TEST_F(MidPassStallTest, PlantedRearStopMirrorForALeftHandThread) {
 // feed, not a re-engage onto a stop the carriage was parked on) and it is not
 // covered by any test in that suite. The cure is more likely to be in the
 // direction latch's -1 threshold, or in refusing to step at all when the
-// demanded feed is below the minimum step rate, than in the arrest itself.
+// demanded feed is below the minimum step rate, than in the arrest itself -
+// bearing in mind that test_midfeed_tracking now fences the mid-pass case, so
+// any such fix must not change LowFeedDitherStaysBoundedAndPitchIsExact,
+// LongRunFollowingErrorDoesNotAccumulate or the ordinary-speed regression
+// fence in that suite.
 // ===========================================================================
 
-TEST_F(MidPassStallTest, AFineThreadAtLowRpmMustActuallyLeaveItsStop) {
-  const float pitch = 0.25f;
-  const int pps = 300;  // 15 rpm
+// REMOVED: AFineThreadAtLowRpmMustActuallyLeaveItsStop asserted that this
+// exact setup (both stops set, carriage starting ON the left one) must reach
+// >100 pulses of travel within four spindle revolutions. Its premise - that a
+// fresh pass starts parked on a stop - is false per issue #8: a pass ends at
+// its stop and is finished there, so this exact starting condition does not
+// arise on the machine. See the PART 4 header comment above for the full
+// re-scoping and where the real question (is the underlying dither a problem
+// AWAY from a stop) is now answered: test/test_midfeed_tracking, answer no.
 
-  buildRig();
-  ls->setTargetPitchMM(pitch);
-  ls->setCurrentPosition(0);
-  ls->setStopPosition(LeadscrewStopPosition::LEFT, 0);
-  ls->setStopPosition(LeadscrewStopPosition::RIGHT, 4000);
-  ASSERT_EQ(gs->getThreadSyncState(), GlobalThreadSyncState::SS_SYNC);
-  gs->setMotionMode(GlobalMotionMode::MM_ENABLED);
-
-  // Four spindle revolutions: at this pitch that is 200 pulses of travel, far
-  // more than any startup transient.
-  const int spindlePulses = 4 * encoderPPR();
-  const double perStep = (double)pps * (double)kDt / 1e6;
-  double carry = 0.0;
-  int delivered = 0;
-  while (delivered < spindlePulses) {
-    advanceMockMicros(kDt);
-    carry += perStep;
-    int whole = (int)carry;
-    if (whole > 0) {
-      if (delivered + whole > spindlePulses) whole = spindlePulses - delivered;
-      carry -= (double)((int)carry);
-      spindle->incrementCurrentPosition(whole);
-      delivered += whole;
-    }
-    ls->update();
-  }
-
-  EXPECT_EQ((int)gs->getMotionMode(), (int)GlobalMotionMode::MM_ENABLED)
-      << "the axis disabled itself: it dithered off the stop, overshot, "
-         "reversed into the stop and arrested. Nothing on the panel says why "
-         "- the state word just goes back to IDLE.";
-  EXPECT_GT(ls->getCurrentPosition(), 100)
-      << "four spindle revolutions of a 0.25 mm thread is 200 pulses of "
-         "carriage travel; the pass never left the stop";
-}
-
-// CHARACTERIZATION of the boundary of the defect above, so the fix can be aimed
-// and so a regression is visible as a shift in the threshold rather than as one
-// test flipping. Recorded, not judged: these are the observed pass/fail feeds.
+// CHARACTERIZATION of the boundary of the arrest above, so a fix aimed at it
+// can tell the threshold moved, and so a regression is visible as a shift in
+// the threshold rather than as one test flipping. Recorded, not judged: these
+// are the observed pass/fail feeds for THIS scenario specifically - carriage
+// starting on the stop it is about to feed away from. It says nothing about
+// tracking quality away from a stop; that question belongs to
+// test/test_midfeed_tracking, not here.
 TEST_F(MidPassStallTest, TheLowFeedDitherThresholdIsAboutSixtyPulsesPerSecond) {
   struct Point { float pitch; int pps; bool expectStarts; };
   const Point points[] = {
