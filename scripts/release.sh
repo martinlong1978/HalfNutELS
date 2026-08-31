@@ -38,13 +38,42 @@ if [ ! -f "$FIRMWARE" ]; then
   exit 1
 fi
 
+# THE GUARD THAT MATTERS. When CI runs this from a tag push, the tag and
+# FIRMWARE_VERSION must agree, because the device compares the release's
+# tag_name against FIRMWARE_VERSION VERBATIM (src/ESPCommsManager.cpp). If they
+# disagree the update is silently broken in one of two directions: a device on
+# the new firmware keeps being offered it, or one on the old firmware is never
+# told. Neither surfaces until someone tries to update a real lathe.
+if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+  TAG="${GITHUB_REF_NAME:-}"
+  if [ "$TAG" != "$VERSION" ]; then
+    echo "ERROR: tag $TAG does not match FIRMWARE_VERSION $VERSION." >&2
+    echo "       The OTA check compares these verbatim, so publishing this" >&2
+    echo "       would break the update path. Bump include/version.h to match" >&2
+    echo "       the tag (or retag), then push again." >&2
+    exit 1
+  fi
+fi
+
 cp "$FIRMWARE" "$ASSET"
 
 echo "Publishing GitHub release $VERSION (asset: elstft.bin)"
-gh release create "$VERSION" \
-  "$ASSET" \
-  --title "$VERSION" \
-  --notes "Firmware release $VERSION"
+
+# In CI the notes are generated from the commits since the last release;
+# locally there is no such history to lean on without more ceremony than a
+# bench publish wants, so it keeps the one-liner it always had. Either can be
+# rewritten afterwards with `gh release edit --notes`.
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  gh release create "$VERSION" \
+    "$ASSET" \
+    --title "$VERSION" \
+    --generate-notes
+else
+  gh release create "$VERSION" \
+    "$ASSET" \
+    --title "$VERSION" \
+    --notes "Firmware release $VERSION"
+fi
 
 echo "Done. OTA permalink:"
 echo "  https://github.com/martinlong1978/HalfNutELS/releases/latest/download/elstft.bin"

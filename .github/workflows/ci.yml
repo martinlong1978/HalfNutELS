@@ -1,0 +1,134 @@
+name: CI
+
+# Every push and every PR. The three jobs are the same three checks CLAUDE.md
+# asks for by hand before a commit, so the point of having them here is that
+# they stop being optional.
+on:
+  push:
+    # Naming `branches` at all is what excludes tag pushes: those are
+    # release.yml's job, and a push event carrying refs/tags/* matches no
+    # branch filter.
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Host tests (native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ~/.platformio holds the toolchains and the fetched libraries; .pio is
+      # the build tree. Keyed on platformio.ini because that is what decides
+      # which of either is wanted.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-native-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # googletest/gmock, ~660 cases. This is the check that matters most: all
+      # of lib/keyscan, lib/ui, lib/alarm, lib/leadscrew and lib/ota are pure
+      # C++ precisely so they can be judged here rather than on the machine.
+      - name: pio test -e native
+        run: pio test -e native
+
+  build:
+    name: Device build (esp32dev_usb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-esp32-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-esp32-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # Compile only - no -t upload, so upload_port (COM14) is never consulted.
+      # scripts/build_provenance.py runs here and reads GITHUB_REF_TYPE /
+      # GITHUB_REF_NAME rather than the detached HEAD the runner checks out.
+      - name: pio run -e esp32dev_usb
+        run: pio run -e esp32dev_usb
+
+      # Flash is at 77% of a 4 MB partition and the LVGL heap is at ~85%, so
+      # the size line is worth having in the log of every build rather than
+      # only when someone thinks to look.
+      - name: Report size
+        run: pio run -e esp32dev_usb --target size | tail -20
+
+  screenshots:
+    name: Screenshots (every scene must render)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-esp32-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-esp32-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # tools/screenshot/build.sh compiles the REAL Display class against the
+      # same LVGL checkout the firmware links, which it expects to find under
+      # .pio/libdeps/esp32dev_*. Fetching the packages is enough; no firmware
+      # build is needed.
+      - name: Fetch device libraries (LVGL)
+        run: pio pkg install -e esp32dev_usb
+
+      # THE TIMEOUT ON THIS JOB IS LOAD-BEARING. LV_ASSERT_HANDLER is
+      # `while(1);` and LV_USE_ASSERT_MALLOC is on, so exhausting the 64 KB
+      # LVGL heap does not fail - it HANGS, here exactly as it would on the
+      # device. A job that times out is the signal; a job that fails on
+      # `unpainted != 0` is a hole in a render.
+      - name: Render every scene
+        run: bash tools/screenshot/render.sh
+
+      # Worth keeping even on success: the fastest way to judge a layout change
+      # is to look at it, and this saves rebuilding the harness locally.
+      - name: Upload rendered scenes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: tools/screenshot/out/*.png
+          if-no-files-found: error

@@ -1,0 +1,148 @@
+name: Release
+
+# Cutting a release is now: bump FIRMWARE_VERSION in include/version.h, commit,
+# then push a matching tag.
+#
+#   git tag v1.0.6 && git push martinlong1978 v1.0.6
+#
+# Everything below follows from that. The binary that reaches a lathe is built
+# from exactly the tagged commit, by a clean checkout, having passed the tests -
+# none of which was true of the bench publish this replaces.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Never two releases at once, and never cancel one half-done: an interrupted
+# run could leave a release created with no asset attached, which the OTA
+# permalink would resolve to and fail on.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # needed to create the release and upload the asset
+
+jobs:
+  # The tag and include/version.h must agree BEFORE anything is built, because
+  # the device compares the release tag_name against FIRMWARE_VERSION verbatim
+  # (src/ESPCommsManager.cpp). scripts/release.sh checks this too, but failing
+  # here costs ten seconds instead of ten minutes and says so before the build.
+  verify:
+    name: Tag matches FIRMWARE_VERSION
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare
+        run: |
+          VERSION="$(grep -oE '#define[[:space:]]+FIRMWARE_VERSION[[:space:]]+"[^"]+"' include/version.h \
+            | grep -oE '"[^"]+"' | tr -d '"')"
+          echo "tag=${GITHUB_REF_NAME}  version.h=${VERSION}"
+          if [ "${GITHUB_REF_NAME}" != "${VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match FIRMWARE_VERSION ${VERSION} in include/version.h."
+            echo "::error::The OTA version check compares these verbatim, so a mismatch silently breaks updates."
+            exit 1
+          fi
+
+  # A release must not be publishable on red tests. This duplicates ci.yml's
+  # test job deliberately rather than depending on it: a tag can be pushed to a
+  # commit whose CI run has expired, been cancelled, or never happened.
+  test:
+    name: Host tests (native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-native-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-${{ runner.os }}-
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: pio test -e native
+        run: pio test -e native
+
+  publish:
+    name: Build and publish
+    needs: [verify, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-esp32-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-esp32-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # scripts/build_provenance.py stamps this RELEASE because GITHUB_REF_TYPE
+      # is "tag" - without that it would read the runner's detached HEAD, decide
+      # it was not on master, and put a SHA on the About screen of a shipped
+      # release. The step below proves it did the right thing rather than
+      # assuming so.
+      - name: Build firmware
+        run: pio run -e esp32dev_publish 2>&1 | tee build.log
+
+      - name: Assert the build stamped itself a release
+        run: |
+          if ! grep -q "build provenance: RELEASE" build.log; then
+            echo "::error::The firmware did not stamp itself as a release build."
+            echo "::error::It would show a commit SHA on the About screen instead of the version (issue #4)."
+            grep -i "build provenance" build.log || echo "(no provenance line at all)"
+            exit 1
+          fi
+          grep -i "build provenance" build.log
+
+      # scripts/release.sh is the single place that knows the asset must be
+      # named elstft.bin - the OTA permalink downloads that exact filename - and
+      # that the version comes from include/version.h. It re-checks the tag, and
+      # generates notes from the commits since the last release when in CI.
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/release.sh
+
+      # The permalink is what every lathe in the field actually fetches, and it
+      # is the one thing that can be broken by a release that otherwise looks
+      # fine - a draft, a prerelease, or a missing asset all publish cleanly and
+      # resolve to nothing.
+      - name: Verify the OTA permalink resolves
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/elstft.bin"
+          CODE="$(curl -sIL -o /dev/null -w '%{http_code}' "$URL")"
+          SIZE="$(curl -sIL "$URL" | awk 'BEGIN{IGNORECASE=1} /^content-length:/ {v=$2} END{gsub(/\r/,"",v); print v}')"
+          echo "permalink=$URL http=$CODE bytes=$SIZE"
+          if [ "$CODE" != "200" ] || [ "${SIZE:-0}" -lt 100000 ]; then
+            echo "::error::The OTA permalink did not resolve to a plausible firmware image."
+            echo "::error::Check the release is a full release, not a draft or prerelease."
+            exit 1
+          fi
+
+      - name: Verify the API tag matches what devices compare against
+        run: |
+          TAG="$(curl -s "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+            | python -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')"
+          echo "latest tag_name=$TAG  expected=${GITHUB_REF_NAME}"
+          if [ "$TAG" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::releases/latest reports $TAG, not ${GITHUB_REF_NAME}. Devices will not see this update."
+            exit 1
+          fi

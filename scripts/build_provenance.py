@@ -34,6 +34,7 @@ the defaults in version.h, so their output stays deterministic and does not
 churn with the checkout.
 """
 
+import os
 import subprocess
 
 Import("env")
@@ -55,15 +56,38 @@ def _git(*args):
     return out.stdout.strip()
 
 
+# GitHub Actions checks out a DETACHED HEAD, so `rev-parse --abbrev-ref HEAD`
+# answers "HEAD" and the branch test below could never pass - every CI build,
+# including the one that produces the released binary, would stamp itself "not
+# a release" and the About screen would show a SHA where the version belongs.
+#
+# The CI context is authoritative there and is not a thing anyone types, so it
+# is trusted in preference to the local git heuristic:
+#   GITHUB_REF_TYPE=tag     -> a release build, by definition. Releases are cut
+#                              by pushing a tag, and the runner's checkout is
+#                              clean by construction.
+#   GITHUB_REF_TYPE=branch  -> GITHUB_REF_NAME is the real branch name; from
+#                              there the ordinary rule applies unchanged.
+ci_ref_type = os.environ.get("GITHUB_REF_TYPE")
+ci_ref_name = os.environ.get("GITHUB_REF_NAME")
+
 branch = _git("rev-parse", "--abbrev-ref", "HEAD")
 sha = _git("rev-parse", "--short", "HEAD")
+
+if ci_ref_type == "branch" and ci_ref_name:
+    branch = ci_ref_name
 
 # `git status --porcelain` is empty exactly when the tree is clean. An untracked
 # file counts: it may well be the thing that changed behaviour.
 status = _git("status", "--porcelain")
 dirty = bool(status)
 
-if sha is None or branch is None:
+if ci_ref_type == "tag" and ci_ref_name:
+    # A tag build. Say so, and carry the tag rather than a branch name.
+    is_release = True
+    sha_label = sha if sha else ci_ref_name
+    suffix = ""
+elif sha is None or branch is None:
     # No git, or not a checkout - a tarball build, say. Say so rather than
     # silently claiming to be a release, which is the whole point of the file.
     is_release = False

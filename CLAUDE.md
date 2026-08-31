@@ -149,9 +149,22 @@ OTA pulls from **GitHub Releases** via the stable permalink
   hop is real but costs one handshake, not throughput.
 - RSSI is worth reading off the `OTA:` log line when an update is slow — it swung -86 to -49 dBm across
   runs on the same bench, and at the bottom of that range TLS connect itself intermittently fails.
-- **To release:** bump `FIRMWARE_VERSION` in `include/version.h`, `pio run -e esp32dev_publish`, then
-  `bash scripts/release.sh` (needs `gh` + `gh auth login`). It uploads `firmware.bin` as asset `elstft.bin`.
-  Publish full releases (not drafts/pre-releases) or the `/latest/` permalink won't resolve.
+- **To release: push a tag. CI does the rest** (`.github/workflows/release.yml`). Bump
+  `FIRMWARE_VERSION` in `include/version.h`, commit, then `git tag v1.0.6 && git push <remote> v1.0.6`.
+  The workflow refuses to go on if the tag and `FIRMWARE_VERSION` disagree (the OTA check compares them
+  verbatim, so a mismatch silently breaks updates in one direction or the other), runs the host tests,
+  builds `esp32dev_publish`, **asserts the build stamped itself `RELEASE`**, publishes via
+  `scripts/release.sh`, and then checks the `/latest/` permalink actually resolves and that the API's
+  `tag_name` matches. Publish full releases, never drafts or pre-releases, or that permalink resolves to
+  nothing.
+- `scripts/release.sh` is still the only place that knows the asset must be named `elstft.bin` and that the
+  version comes from `version.h`; CI calls it rather than reimplementing it, and it still works by hand on
+  the bench (`pio run -e esp32dev_publish` then `bash scripts/release.sh`, needs `gh auth login`). In CI it
+  generates notes from the commits since the last release; by hand it keeps its one-liner.
+- **`scripts/build_provenance.py` reads `GITHUB_REF_TYPE`/`GITHUB_REF_NAME` before it reads git.** It has to:
+  `actions/checkout` produces a DETACHED HEAD, so the local "clean tree on master" rule can never pass on a
+  runner, and every CI build - including the released one - would stamp itself "not a release" and put a SHA
+  on the About screen. A tag build is a release by definition.
 
 ## Display (lib/display)
 
