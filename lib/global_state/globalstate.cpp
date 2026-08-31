@@ -219,9 +219,11 @@ bool  GlobalState::hasOTA() { return OTA; };
 void GlobalState::setOTA() {
   m_otaHeadline[0] = '\0';
   m_otaDetail[0] = '\0';
+  m_otaVersionLine[0] = '\0';
   m_otaStatus = OTA_IDLE;
   OTAbytes = 0;
   OTAlength = 0;
+  m_otaProgressAtMs = 0;
   OTA = true;
 };
 void  GlobalState::clearOTA() { OTA = false; };
@@ -255,6 +257,14 @@ void GlobalState::setOtaText(const char* headline, const char* detail) {
 
 const char* GlobalState::getOtaHeadline() { return m_otaHeadline; }
 const char* GlobalState::getOtaDetail() { return m_otaDetail; }
+
+void GlobalState::setOtaVersionLine(const char* line) {
+  copyOtaText(m_otaVersionLine, (int)sizeof(m_otaVersionLine), line);
+}
+const char* GlobalState::getOtaVersionLine() { return m_otaVersionLine; }
+
+void GlobalState::setOtaProgressMs(unsigned long ms) { m_otaProgressAtMs = ms; }
+unsigned long GlobalState::getOtaProgressMs() { return m_otaProgressAtMs; }
 
 
 void  GlobalState::setDisplayReset() { m_displayReset = true; }

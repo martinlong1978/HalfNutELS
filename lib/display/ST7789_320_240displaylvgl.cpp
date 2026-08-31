@@ -4,6 +4,7 @@
 #include <ST7789_320_240displaylvgl.h>
 #include <globalstate.h>
 #include <dro.h>
+#include <otaoutcome.h>  // OtaOutcome::kRateStaleMs, drawOTA()'s staleness gate
 #include <version.h>  // FIRMWARE_VERSION, shown on the About screen
 
 #if !PIO_UNIT_TESTING
@@ -1820,6 +1821,7 @@ void Display::resetObjectTree() {
   updateSlider = nullptr;
   updateLabel = nullptr;
   updateDetailLabel = nullptr;
+  updateVersionLabel = nullptr;
 
   for (int i = 0; i < TS_COUNT; i++) {
     m_textCache[i][0] = '\0';
@@ -2180,6 +2182,25 @@ void Display::initialiseOta() {
   // Below the bar (bar is y 150..160) with a clear 10 px gap, so a two-line
   // wrap never touches it; well clear of the bottom edge too.
   lv_obj_align(updateDetailLabel, LV_ALIGN_TOP_MID, 0, 170);
+
+  // Aug 2026: "v1.0.5 -> v1.0.6", in the ~90 px this screen leaves empty
+  // above updateLabel (headline centred ~y105, bar y150, detail y170).
+  // Same 14pt/textDim/wrap/280px recipe as updateDetailLabel just above --
+  // secondary to the headline, and wrap rather than measure-and-fall-back
+  // because an overlong pair (AnOverlongVersionTagIsTruncatedNotSplattered-
+  // style input) degrading to two lines is harmless here, unlike
+  // otaFittedLine()'s auto-width label which has nowhere to put a second
+  // line. Empty at creation; OtaOutcome::versionTransition() is "" until
+  // both the current and target versions are known, and drawOTA() passes
+  // that straight through.
+  updateVersionLabel = lv_label_create(lv_screen_active());
+  lv_label_set_text(updateVersionLabel, "");
+  lv_obj_set_style_text_font(updateVersionLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(updateVersionLabel, m_palette->textDim, 0);
+  lv_obj_set_width(updateVersionLabel, 280);
+  lv_obj_set_style_text_align(updateVersionLabel, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(updateVersionLabel, LV_LABEL_LONG_WRAP);
+  lv_obj_align(updateVersionLabel, LV_ALIGN_TOP_MID, 0, 25);
 }
 
 // Builds the whole main screen ONCE. Nothing here may be repeated per tick: the
@@ -2916,7 +2937,33 @@ void Display::drawOTA() {
   // of the wording, which is how "Update failed" ended up being all a failure
   // ever said.
   const char* headline = state->getOtaHeadline();
-  const char* detail = state->getOtaDetail();
+  const char* rawDetail = state->getOtaDetail();
+
+  // Aug 2026: the version-transition line is a separate, always-visible
+  // label -- not gated by anything below, because it never goes stale
+  // (versionTransition() is held unchanged from the moment it is known
+  // through Downloading, Finishing and the settled screen alike).
+  lv_label_set_text(updateVersionLabel, state->getOtaVersionLine());
+
+  // Update.writeStream() BLOCKS the OTA task, so a stalled transfer stops
+  // Update.onProgress() firing entirely -- and with it the throttled
+  // republish that otherwise keeps this detail's rate/ETA fresh. m_otaDetail
+  // then just sits there holding whatever it last said. A frozen progress
+  // BAR is truthful (see the percent calculation below, which reads the
+  // byte counters live and simply stops moving); a frozen RATE next to it is
+  // not, and that is exactly the "ETA that lies during a stall" OtaOutcome's
+  // own steady-gate exists to avoid -- the gate only works if something
+  // keeps polling with a fresh nowMs, and nothing does while this task is
+  // blocked. So: suppress the detail text once it has gone stale, rather
+  // than composing different wording for that case -- otaFittedLine() below
+  // only ever decides WHETHER a string is shown, never what it says, and
+  // this keeps it that way.
+  const bool staleDownload =
+      status == OTA_DOWNLOADING &&
+      (unsigned long)(millis() - state->getOtaProgressMs()) >
+          OtaOutcome::kRateStaleMs;
+  const char* detail = staleDownload ? "" : rawDetail;
+
   if (headline[0] == '\0' && detail[0] == '\0') {
     // The window between ButtonPad calling setOTA() and the OTA task's first
     // publish -- a few hundred ms in practice. One string, owned here, that

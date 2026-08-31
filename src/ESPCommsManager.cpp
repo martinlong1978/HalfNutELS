@@ -38,8 +38,9 @@ ESPCommsManager* ESPCommsManager::s_active = nullptr;
 
 ESPCommsManager::ESPCommsManager(/* args */) {
     // m_outcome initialises every one of its own members (otaoutcome.cpp), and
-    // `updating` has an in-class initialiser. s_active is static, so it is the
-    // one thing here that is not per-object; it is set when a run starts.
+    // `updating` / m_lastProgressPublishMs both have in-class initialisers.
+    // s_active is static, so it is the one thing here that is not per-object;
+    // it is set when a run starts.
 }
 
 ESPCommsManager::~ESPCommsManager() {}
@@ -71,8 +72,16 @@ bool ESPCommsManager::wifiConnect(WebSettings* webSettings, uint32_t timeoutMs) 
 
     Serial.print("OTA: WiFi connected, IP ");
     Serial.println(WiFi.localIP());
-    Serial.printf("OTA: rssi=%d dBm, modem sleep %s\n", (int)WiFi.RSSI(),
+    const int rssi = (int)WiFi.RSSI();
+    Serial.printf("OTA: rssi=%d dBm, modem sleep %s\n", rssi,
                   WiFi.getSleep() ? "ON" : "OFF");
+    // Fed to the screen, not just the log: a marginal reading is visible
+    // during Connecting/Checking, before the download commits to it (see
+    // OtaOutcome::signalDetail()'s header comment - raw dBm, not a
+    // qualitative word, because CLAUDE.md records TLS connect itself failing
+    // intermittently at the bottom of the measured -86..-49 dBm range).
+    m_outcome.noteSignal(rssi);
+    publishOutcome();
     return true;
 }
 
@@ -183,14 +192,27 @@ bool ESPCommsManager::downloadAndFlash(const char* url) {
         GlobalState* g = GlobalState::getInstance();
         g->setOTAContentLength((int)total);
         g->setOTABytes((int)done);
+        const unsigned long now = millis();
+        // The one write this callback makes that is NOT throttled below:
+        // drawOTA() needs to know, with no delay, the instant this callback
+        // stops firing (writeStream() blocking on a stalled connection), so
+        // it can stop trusting the rate/ETA words already sitting in
+        // m_otaDetail rather than wait for a throttle window to expire on a
+        // publish that is never coming.
+        g->setOtaProgressMs(now);
         // The callback is a bare function pointer with no `this`, so the
         // outcome is reached the same way GlobalState is: through a known
         // pointer rather than a capture. Null only if the callback somehow
         // outlives the run, which the `updating` one-shot prevents.
         ESPCommsManager* self = s_active;
         if (self != nullptr) {
-            self->m_outcome.noteProgress((unsigned long)done,
-                                         (unsigned long)total, millis());
+            self->m_outcome.noteProgress((unsigned long)done, (unsigned long)total,
+                                         now);
+            // THROTTLED: this callback fires per chunk (hundreds of times
+            // across a 1.5 MB transfer); see maybePublishProgress()'s comment
+            // for why only the cross-task publish, not the string rebuild
+            // inside OtaOutcome, needs gating.
+            self->maybePublishProgress(now);
         }
     });
 
@@ -213,10 +235,15 @@ bool ESPCommsManager::downloadAndFlash(const char* url) {
     const uint32_t elapsedMs = millis() - tStart;
     http.end();
 
+    const int postTransferRssi = (int)WiFi.RSSI();
     Serial.printf("OTA: %u bytes in %u ms (%u B/s), rssi=%d dBm\n",
                   (unsigned)written, (unsigned)elapsedMs,
                   (unsigned)(elapsedMs ? (uint32_t)((uint64_t)written * 1000 / elapsedMs) : 0),
-                  (int)WiFi.RSSI());
+                  postTransferRssi);
+    // Not shown anywhere yet (the Downloading detail is bytes+rate+ETA, not
+    // signal - see render()), but kept current for whatever reads
+    // signalDbm()/signalDetail() next, same as the connect-time reading above.
+    m_outcome.noteSignal(postTransferRssi);
 
     if (written != (size_t)contentLength) {
         // A short write is a stall, not a bad image: the bytes that DID arrive
@@ -299,6 +326,7 @@ void ESPCommsManager::publishOutcome() {
     // colour under the new text, rather than a red UPDATE FAILED colour applied
     // to the text of whatever was happening before it.
     gs->setOtaText(m_outcome.headline(), m_outcome.detail());
+    gs->setOtaVersionLine(m_outcome.versionTransition());
 
     switch (m_outcome.result()) {
     case OtaResult::InProgress:
@@ -320,6 +348,14 @@ void ESPCommsManager::publishOutcome() {
         gs->setOtaStatus(OTA_FAILED);
         break;
     }
+}
+
+void ESPCommsManager::maybePublishProgress(unsigned long nowMs) {
+    if (nowMs - m_lastProgressPublishMs < 250) {
+        return;
+    }
+    m_lastProgressPublishMs = nowMs;
+    publishOutcome();
 }
 
 bool ESPCommsManager::beginBootNotice() {
@@ -367,7 +403,12 @@ void ESPCommsManager::runOta() {
     // screen back. There is deliberately no `delay(3000); ESP.restart();` left
     // anywhere: see the class comment.
     s_active = this;
+    m_lastProgressPublishMs = 0;
     m_outcome.begin(millis());  // phase = Connecting
+    // The version this device is running BEFORE the attempt - the other half
+    // of the "v1.0.5 -> v1.0.6" transition line, once noteVersion() supplies
+    // the release tag during the Checking phase below.
+    m_outcome.noteCurrentVersion(FIRMWARE_VERSION);
     publishOutcome();
 
     WebSettings* webSettings = getWebSettings();

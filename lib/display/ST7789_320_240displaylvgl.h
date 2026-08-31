@@ -266,6 +266,14 @@ private:
   // empty otherwise, so it is never a visible label with nothing useful in
   // it. See drawOTA() and otaFittedLine().
   lv_obj_t* updateDetailLabel;
+  // Aug 2026: the version-transition line ("v1.0.5 -> v1.0.6"), in the
+  // otherwise-empty ~90 px above updateLabel. The one new object this screen
+  // gets for that feature (three total, still nowhere near the LVGL-heap
+  // budget CLAUDE.md warns about) -- everything else (Wi-Fi signal, transfer
+  // bytes/rate/ETA) reuses updateDetailLabel via OtaOutcome::detail() being
+  // phase-aware, deliberately not a fourth label. Empty until
+  // OtaOutcome::versionTransition() has both ends of the pair. See drawOTA().
+  lv_obj_t* updateVersionLabel;
 
   // --- Redraw suppression ---------------------------------------------------
   // Display::update() re-runs every draw*() at 10 Hz, and LVGL's setters for

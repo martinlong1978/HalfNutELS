@@ -45,6 +45,11 @@ private:
     // one OTA task, guarded by `updating`).
     static ESPCommsManager* s_active;
 
+    // Last millis() a progress-callback publish actually crossed into
+    // GlobalState - see maybePublishProgress()'s comment for why this is
+    // throttled at all.
+    unsigned long m_lastProgressPublishMs = 0;
+
     // Connect to the configured WiFi network (STA). Returns false if it can't
     // associate within timeoutMs.
     bool wifiConnect(WebSettings* webSettings, uint32_t timeoutMs);
@@ -64,6 +69,15 @@ private:
     // place the two are translated, so the panel and the Serial log cannot
     // disagree about the same attempt.
     void publishOutcome();
+
+    // Called from Update.onProgress() (via s_active, see that member) on
+    // every chunk - hundreds of times across a 1.5 MB transfer. Throttled to
+    // roughly every 250 ms: the string FORMATTING inside OtaOutcome::render()
+    // happens on every noteProgress() call regardless (cheap - it is just
+    // this object rewriting its own buffers) and is not what needs
+    // throttling; what does is the cross-task publish into GlobalState this
+    // method gates, which is the only part with a real per-call cost.
+    void maybePublishProgress(unsigned long nowMs);
 
     // The whole update sequence (check -> download -> flash -> hold -> restart
     // or return). Runs on its own task because TLS + CA-bundle validation +

@@ -552,12 +552,20 @@ void sc_alarmFailed(Rig& r) {
 // This mirrors ESPCommsManager::publishOutcome(), which lives in src/ and is not
 // in the renderer's source list. It is the one duplicated thing in these scenes;
 // keep the two in step.
-void publishOutcome(Rig& r, const OtaOutcome& o) {
+// nowMs matches this scene's OtaOutcome calls (they run at t=0 through the
+// build-up of a scenario) into GlobalState::m_otaProgressAtMs, which is what
+// drawOTA() compares against millis() (also 0 here -- the host clock never
+// advances in a scene) to decide whether the transfer line is stale. Default
+// 0 keeps every existing call site fresh (0 - 0 = 0, well inside
+// kRateStaleMs) without having to touch them.
+void publishOutcome(Rig& r, const OtaOutcome& o, unsigned long nowMs = 0) {
   // setOTA() FIRST: it wipes the bus's OTA text and byte counts so a retry
   // cannot inherit the last attempt's words. ESPCommsManager orders it the same
   // way, and anything a scene wants in the byte counters has to be set after.
   r.gs->setOTA();
   r.gs->setOtaText(o.headline(), o.detail());
+  r.gs->setOtaVersionLine(o.versionTransition());
+  r.gs->setOtaProgressMs(nowMs);
   switch (o.result()) {
   case OtaResult::InProgress:
     r.gs->setOtaStatus((o.phase() == OtaPhase::Downloading ||
@@ -571,15 +579,44 @@ void publishOutcome(Rig& r, const OtaOutcome& o) {
   }
 }
 
+// Aug 2026: version pair + a live transfer line. Real elapsed virtual time
+// (advanceMockMicros(), not a hand-picked timestamp) so that
+// GlobalState::getOtaProgressMs() -- published at the true millis() this
+// scene finishes at -- reads as FRESH once pump()'s later ticks move the
+// clock on a little further, exactly like a real device's onProgress()
+// publish does relative to drawOTA()'s next poll.
 void sc_otaDownloading(Rig& r) {
   baseState(r);
   OtaOutcome o;
-  o.begin(0);
-  o.notePhase(OtaPhase::Downloading, 0);
-  o.noteProgress(861000, 1400000, 10);
-  publishOutcome(r, o);
-  r.gs->setOTAContentLength(1400000);
-  r.gs->setOTABytes(861000);
+  o.begin(millis());
+  o.noteCurrentVersion("v1.0.5");
+  o.notePhase(OtaPhase::Checking, millis());
+  o.noteVersion("v1.0.6");
+  o.notePhase(OtaPhase::Downloading, millis());
+  // 8400 bytes every 100 ms = 84000 B/s once the EWMA has settled - the same
+  // shape as TransferDetailMatchesTheOwnersExample in test/test_otaoutcome,
+  // so the rendered rate is a number that suite has already pinned rather
+  // than one this scene invents on its own.
+  const unsigned long total = 1572864;  // elstft.bin, the measured size
+  unsigned long done = 0;
+  for (int i = 0; i < 20; ++i) {
+    advanceMockMicros(100000);
+    done += 8400;
+    o.noteProgress(done, total, millis());
+  }
+  publishOutcome(r, o, millis());
+  r.gs->setOTAContentLength((int)total);
+  r.gs->setOTABytes((int)done);
+}
+
+// "A marginal signal is visible before the download commits" - the owner's
+// own wording. Mid-CONNECTING, before anything has been asked of GitHub yet.
+void sc_otaConnecting(Rig& r) {
+  baseState(r);
+  OtaOutcome o;
+  o.begin(millis());
+  o.noteSignal(-61);
+  publishOutcome(r, o, millis());
 }
 
 void sc_otaChecking(Rig& r) {
@@ -695,6 +732,7 @@ const SceneDef kScenes[] = {
   // dark one transfers.
   { "light-alarm",            sc_alarm,               THEME_LIGHT, false, 0 },
   // OTA screen (a separate screen, not the dashboard).
+  { "ota-connecting",         sc_otaConnecting,       THEME_DARK,  false, 0 },
   { "ota-downloading",        sc_otaDownloading,      THEME_DARK,  false, 0 },
   { "ota-checking",           sc_otaChecking,         THEME_DARK,  false, 0 },
   { "ota-no-update",          sc_otaNoUpdate,         THEME_DARK,  false, 0 },

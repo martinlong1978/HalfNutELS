@@ -155,6 +155,28 @@ private:
   char m_otaHeadline[16];
   char m_otaDetail[48];
 
+  // "v1.0.5 -> v1.0.6" - OtaOutcome::versionTransition(), on its own bus slot
+  // rather than folded into m_otaDetail: it is a SEPARATE label on the OTA
+  // screen (drawn once, held through the whole attempt) rather than part of
+  // the headline/detail pair otaFittedLine() chooses between. Sized to match
+  // OtaOutcome::kVersionTransitionLen (56 = kVersionLen*2 + 8); not
+  // #include <otaoutcome.h> for the same reason m_otaHeadline/m_otaDetail
+  // above are not either.
+  char m_otaVersionLine[56];
+
+  // millis() at the last live progress callback (Update.onProgress), i.e. the
+  // last time m_otaHeadline/m_otaDetail's rate+ETA content was actually
+  // fresh. Update.writeStream() BLOCKS the OTA task, so a stalled transfer
+  // stops this callback firing entirely - m_otaHeadline/m_otaDetail then sit
+  // frozen with whatever rate/ETA they last said, which is exactly the "ETA
+  // that lies during a stall" OtaOutcome's steady-gate exists to avoid. The
+  // gate only works if something keeps polling with a fresh nowMs, and
+  // nothing does while the task is blocked - so drawOTA() compares this
+  // against OtaOutcome::kRateStaleMs itself and suppresses the detail text
+  // when it goes quiet, rather than trusting whatever string happens to be
+  // sitting in m_otaDetail.
+  volatile unsigned long m_otaProgressAtMs = 0;
+
 
 
   // These are read AND written from two RTOS tasks pinned to different cores:
@@ -390,6 +412,18 @@ public:
   void setOtaText(const char* headline, const char* detail);
   const char* getOtaHeadline();
   const char* getOtaDetail();
+
+  // The version-transition line ("v1.0.5 -> v1.0.6"), straight off
+  // OtaOutcome::versionTransition(). "" until known, same convention as
+  // m_otaHeadline/m_otaDetail.
+  void setOtaVersionLine(const char* line);
+  const char* getOtaVersionLine();
+
+  // millis() at the last live Update.onProgress() callback - see
+  // m_otaProgressAtMs's comment for why drawOTA() needs this rather than
+  // trusting getOtaDetail() to be fresh.
+  void setOtaProgressMs(unsigned long ms);
+  unsigned long getOtaProgressMs();
 
   void setDisplayReset();
   bool getDisplayReset();

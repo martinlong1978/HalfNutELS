@@ -206,15 +206,11 @@ class OtaOutcome {
 
   // --- More on the OTA screen (owner-requested, Aug 2026) -------------------
   //
-  // TEST-AUTHOR NOTE (test stage, not yet implemented): everything from here
-  // to "--- Progress arithmetic v2 ---" below is a DECLARATION ONLY. There is
-  // no matching definition in otaoutcome.cpp yet, and the constructor's /
-  // begin()'s initialiser lists have NOT been extended to cover the new
-  // members - see test/test_otaoutcome/test_otaoutcome.cpp for the full pinned
-  // contract these are meant to satisfy. This will not link until it is
-  // implemented; that is expected at this stage (see that file's header
-  // comment for what CLAUDE.md's constructor-initialisation rule requires of
-  // it).
+  // IMPLEMENTATION NOTE: everything from here to "--- Progress arithmetic v2
+  // ---" below was written test-first (test/test_otaoutcome/test_otaoutcome.cpp
+  // is the pinned contract; the constructor and begin() zero every new member,
+  // per CLAUDE.md's rule on heap-allocated objects). The definitions live in
+  // otaoutcome.cpp, alongside the pre-existing methods.
   //
   // Four things layered onto the existing headline()/detail() contract, all
   // still owned HERE so drawOTA() keeps holding no wording of its own:
@@ -436,8 +432,22 @@ class OtaOutcome {
   static const int kSignalLen = 24;     // "Wi-Fi -104 dBm"
 
  private:
-  void render();  // rebuild m_headline / m_detail from the current state
+  // Rebuilds m_headline / m_detail from the current state. Takes nowMs
+  // because the Downloading branch is phase-aware (see the header comment
+  // above noteCurrentVersion()): it reads transferDetail(nowMs)/etaDetail(
+  // nowMs), which are themselves pure functions of stored state and nowMs.
+  // Called from every state-changing method that has a nowMs in hand
+  // (notePhase/noteProgress/settle/restore/begin); the handful that don't
+  // (noteVersion/noteVersionUnknown/noteSignal) reuse the last one seen,
+  // cached in m_nowMs - a version or signal update should refresh the text
+  // immediately, not wait for the next timestamped call.
+  void render(unsigned long nowMs);
   void settle(OtaResult r, unsigned long nowMs, int code, const char* note);
+  // Recomputes m_versionTransition from m_currentVersion(Known) and
+  // m_version(Known). Separate from render(): the transition string is held
+  // through Downloading/Finishing/settled untouched by render() (see
+  // versionTransition()'s own comment), so it is only ever written here.
+  void updateVersionTransition();
 
   OtaResult m_result;
   OtaPhase m_phase;
@@ -451,23 +461,32 @@ class OtaOutcome {
   bool m_noticeCleared;
   bool m_restored;  // came back from a notice; must never ask for a reboot
   volatile bool m_acked;
+  // Last nowMs seen by any timestamped call, for the handful of setters
+  // (noteVersion/noteVersionUnknown/noteSignal) that don't get one of their
+  // own but still need to refresh render()'s phase-aware detail text.
+  unsigned long m_nowMs;
 
   char m_version[kVersionLen];
   char m_note[kDetailLen];
   char m_headline[kHeadlineLen];
   char m_detail[kDetailLen];
 
-  // --- New members for the test stage above (see the TEST-AUTHOR NOTE) -----
-  // Not yet touched by the constructor, begin(), settle() or render() -
-  // that wiring, including zeroing every one of these on construction and on
-  // a fresh begin() (CLAUDE.md: heap-allocated objects are not zero-inited,
-  // and this class has been bitten by that before), is implementation work
-  // for the next stage.
+  // --- Members for the four Aug 2026 additions above -----------------------
+  // Zeroed by both the constructor and begin() (CLAUDE.md: heap-allocated
+  // objects are not zero-inited, and this class has been bitten by that
+  // before).
   char m_currentVersion[kVersionLen];
   bool m_currentVersionKnown;
   char m_versionTransition[kVersionTransitionLen];
 
   unsigned long m_bytesPerSec;  // EWMA - see "RATE SMOOTHING" above
+  // Whether m_bytesPerSec holds a real sample yet, so the first one can seed
+  // the average outright rather than being blended against zero. A distinct
+  // flag rather than "m_bytesPerSec == 0" as the sentinel, because a tiny
+  // instantaneous sample (a handful of bytes over a couple of seconds) can
+  // legitimately round down to 0 in integer maths and would otherwise be
+  // mistaken for "no sample yet" and re-seed instead of averaging in.
+  bool m_haveRateSample;
 
   bool m_signalKnown;
   int m_signalDbm;
