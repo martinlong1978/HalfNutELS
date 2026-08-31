@@ -204,6 +204,117 @@ class OtaOutcome {
   bool versionKnown() const { return m_versionKnown; }
   const char* version() const { return m_version; }
 
+  // --- More on the OTA screen (owner-requested, Aug 2026) -------------------
+  //
+  // TEST-AUTHOR NOTE (test stage, not yet implemented): everything from here
+  // to "--- Progress arithmetic v2 ---" below is a DECLARATION ONLY. There is
+  // no matching definition in otaoutcome.cpp yet, and the constructor's /
+  // begin()'s initialiser lists have NOT been extended to cover the new
+  // members - see test/test_otaoutcome/test_otaoutcome.cpp for the full pinned
+  // contract these are meant to satisfy. This will not link until it is
+  // implemented; that is expected at this stage (see that file's header
+  // comment for what CLAUDE.md's constructor-initialisation rule requires of
+  // it).
+  //
+  // Four things layered onto the existing headline()/detail() contract, all
+  // still owned HERE so drawOTA() keeps holding no wording of its own:
+  //
+  //   1. VERSION TRANSITION - "v1.0.5 -> v1.0.6", from the moment the release
+  //      tag is known through the whole download. Needs the CURRENT version,
+  //      which nothing before this handed in - see noteCurrentVersion().
+  //   2. TRANSFER RATE + BYTES - "0.9/1.5MB  84kB/s".
+  //   3. ETA, gated on "steady" - see rateSteady().
+  //   4. WI-FI SIGNAL, handed in the same way as the current version, because
+  //      this class cannot call WiFi.RSSI() itself - see noteSignal().
+  //
+  // RATE SMOOTHING. An EWMA over successive noteProgress() byte-count
+  // INCREASES: each fresh instantaneous sample (deltaBytes * 1000 / deltaMs)
+  // is folded in at weight 1/4 - (3*old + new)/4 - except the very first
+  // valid sample, which seeds the average outright (there is nothing to
+  // smooth yet). A sample with deltaMs == 0 (two calls at the same
+  // millisecond, or the very first call right after notePhase(Downloading,
+  // ...) primed the clock at that same instant) is SKIPPED rather than
+  // divided by zero. bytesPerSec(nowMs) therefore reads 0 until a second,
+  // time-separated increase has landed - "too noisy to read yet" - and it
+  // reads 0 AGAIN once nowMs is kRateStaleMs (5 s) past the last increase,
+  // regardless of how healthy the average was a moment before: a caller
+  // polling with a fresh clock during a stall gets an honest zero, not a
+  // stale number. This is the same "poll with a fresh now" contract
+  // stalled(nowMs) already uses; the two constants are deliberately far
+  // apart (kRateStaleMs 5 s vs kStallTimeoutMs 20 s) so the rate and the ETA
+  // go quiet well before the stall watchdog ever fires a failure.
+  //
+  // STEADY, FOR THE ETA. rateSteady(nowMs) is bytesPerSec(nowMs) > 0 while
+  // still downloading (not settled). Deliberately throughput-blind: the
+  // measured modem-sleep crawl (one 1364-byte MSS every ~350 ms, 2-4 kB/s) is
+  // comfortably "steady" by this definition, because every sample lands well
+  // inside kRateStaleMs - and the owner's own call was that an ETA during
+  // that crawl is honest, useful information ("it IS progressing"), not a
+  // lie. What flips it false is the samples STOPPING, which is the one case
+  // an ETA would be dishonest about - and that already happens automatically,
+  // through the same staleness check bytesPerSec(nowMs) uses. There is no
+  // separate "N consecutive samples" counter: one fresh, time-separated
+  // sample is enough to be steady, because waiting for several would only
+  // keep the ETA off screen for longer after a stall ends, for no benefit -
+  // the failure mode this class is built against is a LYING eta, not a
+  // slightly-early one.
+
+  // The version this device is running BEFORE the attempt. Separate from
+  // begin() (rather than a parameter on it) so every existing call site -
+  // there are dozens, across this suite - keeps compiling unchanged; call it
+  // once per attempt, same as noteVersion(). Nothing calls WiFi or reads
+  // version.h from in here (this class stays pure) - the caller supplies the
+  // string, e.g. from FIRMWARE_VERSION.
+  void noteCurrentVersion(const char* version);
+  bool currentVersionKnown() const { return m_currentVersionKnown; }
+  const char* currentVersion() const { return m_currentVersion; }
+
+  // "v1.0.5 -> v1.0.6" once BOTH currentVersion() and version() (the release
+  // tag) are known; "" otherwise. Nothing after this settles clears it - only
+  // begin() does - so it survives Downloading, Finishing and the settled
+  // screen alike ("held through the download").
+  const char* versionTransition() const { return m_versionTransition; }
+
+  // See "RATE SMOOTHING" above.
+  unsigned long bytesPerSec(unsigned long nowMs) const;
+
+  // Seconds remaining at bytesPerSec(nowMs), or -1 when there is nothing
+  // honest to report: not rateSteady(nowMs), or bytesTotal is still unknown.
+  // 0 once bytesDone has reached or passed bytesTotal - a server that
+  // over-reports cannot produce a negative ETA any more than percent() can
+  // exceed 100 (see PercentIsIntegerAndClamped).
+  long etaSeconds(unsigned long nowMs) const;
+  // See "STEADY, FOR THE ETA" above.
+  bool rateSteady(unsigned long nowMs) const;
+
+  // "0.9/1.5MB  84kB/s" - the rate half appears only once bytesPerSec(nowMs)
+  // > 0, so early in a download this degrades to "0.0/1.5MB" rather than a
+  // fake rate. "" while bytesTotal is still 0 (content length unknown - e.g.
+  // the home-network fallback URL, same case AStallWithNoContentLength...
+  // exercises for the failure path).
+  const char* transferDetail(unsigned long nowMs) const;
+
+  // "ETA 12m 51s" / "ETA 45s" while rateSteady(nowMs); "" otherwise - this
+  // class would rather show nothing than a number it cannot stand behind.
+  const char* etaDetail(unsigned long nowMs) const;
+
+  // RSSI, handed in because this class cannot call WiFi.RSSI() itself (pure,
+  // no WiFi includes - see the class comment at the top of the file). The raw
+  // dBm number is shown, not a qualitative word: CLAUDE.md records RSSI
+  // swinging -86 to -49 dBm on the SAME bench, with TLS connect itself
+  // intermittently failing at the bottom of that range, so the number itself
+  // carries diagnostic value that a word like "weak" would throw away. No
+  // smoothing - the radio's own reported figure is already smoothed on its
+  // side, and the last call wins.
+  void noteSignal(int rssiDbm);
+  bool signalKnown() const { return m_signalKnown; }
+  int signalDbm() const { return m_signalDbm; }
+  // "Wi-Fi -52 dBm" once noteSignal() has been called; "" before, so
+  // Connecting/Checking never show a fake reading before the radio answers.
+  const char* signalDetail() const { return m_signalDetail; }
+
+  // --- Progress arithmetic v2 -------------------------------------------
+
   unsigned long bytesDone() const { return m_bytesDone; }
   unsigned long bytesTotal() const { return m_bytesTotal; }
   // 0..100, or -1 when the content length was never known. Integer maths only:
@@ -309,6 +420,21 @@ class OtaOutcome {
   static const int kDetailLen = 48;
   static const int kVersionLen = 24;
 
+  // How long a rate reading / ETA stays trusted after the last byte-count
+  // increase before bytesPerSec(nowMs) and rateSteady(nowMs) both fall back
+  // to "nothing to report". Deliberately far short of kStallTimeoutMs (20 s):
+  // the ETA must go quiet well before the stall watchdog ever fires, or the
+  // operator watches a confident countdown right up to the instant "UPDATE
+  // FAILED" replaces it.
+  static const unsigned long kRateStaleMs = 5000;
+
+  // Sizes of the new rendered strings, same reasoning as kHeadlineLen et al.:
+  // small on purpose, members of an object on the OTA task's stack budget.
+  static const int kVersionTransitionLen = kVersionLen * 2 + 8;  // "vX -> vY"
+  static const int kTransferLen = 40;   // "0.9/1.5MB  84kB/s"
+  static const int kEtaLen = 20;        // "ETA 12m 51s"
+  static const int kSignalLen = 24;     // "Wi-Fi -104 dBm"
+
  private:
   void render();  // rebuild m_headline / m_detail from the current state
   void settle(OtaResult r, unsigned long nowMs, int code, const char* note);
@@ -330,6 +456,31 @@ class OtaOutcome {
   char m_note[kDetailLen];
   char m_headline[kHeadlineLen];
   char m_detail[kDetailLen];
+
+  // --- New members for the test stage above (see the TEST-AUTHOR NOTE) -----
+  // Not yet touched by the constructor, begin(), settle() or render() -
+  // that wiring, including zeroing every one of these on construction and on
+  // a fresh begin() (CLAUDE.md: heap-allocated objects are not zero-inited,
+  // and this class has been bitten by that before), is implementation work
+  // for the next stage.
+  char m_currentVersion[kVersionLen];
+  bool m_currentVersionKnown;
+  char m_versionTransition[kVersionTransitionLen];
+
+  unsigned long m_bytesPerSec;  // EWMA - see "RATE SMOOTHING" above
+
+  bool m_signalKnown;
+  int m_signalDbm;
+  char m_signalDetail[kSignalLen];
+
+  // mutable: bytesPerSec(nowMs)/etaSeconds(nowMs)/rateSteady(nowMs) are pure
+  // functions of stored state and nowMs (same contract as stalled(nowMs)),
+  // but transferDetail()/etaDetail() format that into a buffer to hand back a
+  // const char* - logically const (nothing about the OUTCOME changes), so the
+  // cache they format into is the one part of the object allowed to be
+  // mutable, the same bargain lv_obj-style lazy caches make elsewhere.
+  mutable char m_transferDetail[kTransferLen];
+  mutable char m_etaDetail[kEtaLen];
 };
 
 #endif

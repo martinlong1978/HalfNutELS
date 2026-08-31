@@ -802,6 +802,403 @@ TEST(OtaOutcome, ScenarioAGoodUpdateIsStillQuick) {
 
 }  // namespace
 
+// =============================================================================
+// TEST STAGE (Aug 2026): "more information on the OTA screens" - see the
+// TEST-AUTHOR NOTE atop the new block in otaoutcome.h. Everything below drives
+// API DECLARED there but not yet DEFINED in otaoutcome.cpp, so as things
+// stand this whole binary fails to LINK, not merely to pass - see this file's
+// companion report for what that means for the counts below. The tests still
+// pin the exact contract the implementation must satisfy; that is the point
+// of writing them now.
+//
+// Four features, four groups: VERSION TRANSITION, RATE + TRANSFER BYTES,
+// ETA/"steady", WI-FI SIGNAL - plus one group fixing the pre-existing
+// "Now running" bug (Success renders that BEFORE the reboot, when it is not
+// true yet - see PreRebootSuccessSaysRestartingNotNowRunning below, which
+// pins the CORRECT text and is expected to fail against today's render()
+// even once the new methods above it link, per CLAUDE.md's testing
+// conventions: "reveal a real bug -> assert the CORRECT behaviour, let it
+// fail, then fix").
+// =============================================================================
+
+namespace {
+
+// Drives noteProgress() at a CONSTANT instantaneous rate - bytesPerStep bytes
+// every stepMs ms, `steps` times, starting from startMs. The EWMA of a
+// constant series is that same constant (see otaoutcome.h's "RATE SMOOTHING"
+// comment), which is what lets the tests below pin EXACT numbers rather than
+// approximate ranges. Returns the timestamp of the last call.
+unsigned long feedConstantRate(OtaOutcome& o, unsigned long startMs,
+                               unsigned long bytesPerStep,
+                               unsigned long stepMs, int steps,
+                               unsigned long total) {
+  unsigned long done = 0;
+  unsigned long t = startMs;
+  for (int i = 0; i < steps; ++i) {
+    t += stepMs;
+    done += bytesPerStep;
+    o.noteProgress(done, total, t);
+  }
+  return t;
+}
+
+// --- Version transition -----------------------------------------------------
+
+TEST(OtaOutcome, VersionTransitionEmptyWithoutCurrentVersion) {
+  // downloading() calls noteVersion("1.4.2") but never noteCurrentVersion() -
+  // the same shape every one of the 49 pre-existing cases uses, so this also
+  // stands as the "existing call sites still work" check.
+  OtaOutcome o;
+  downloading(o, kT0);
+  EXPECT_FALSE(o.currentVersionKnown());
+  EXPECT_EQ(std::string(o.versionTransition()), "");
+}
+
+TEST(OtaOutcome, VersionTransitionAppearsOnceBothEndsAreKnown) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.5");
+  EXPECT_EQ(std::string(o.versionTransition()), "");  // target not known yet
+  o.notePhase(OtaPhase::Checking, kT0);
+  o.noteVersion("v1.0.6");
+  EXPECT_TRUE(o.currentVersionKnown());
+  EXPECT_EQ(std::string(o.currentVersion()), "v1.0.5");
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.5 -> v1.0.6");
+}
+
+TEST(OtaOutcome, VersionTransitionHeldThroughDownloadAndSettle) {
+  // "shown from the moment the release tag is known and held through the
+  // download" - the owner's own wording for this feature.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.5");
+  o.notePhase(OtaPhase::Checking, kT0);
+  o.noteVersion("v1.0.6");
+  o.notePhase(OtaPhase::Downloading, kT0);
+  o.noteProgress(1000, kImage, kT0 + 100);
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.5 -> v1.0.6");
+  o.notePhase(OtaPhase::Finishing, kT0 + 5000);
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.5 -> v1.0.6");
+  o.succeed(kT0 + 6000);
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.5 -> v1.0.6");
+}
+
+TEST(OtaOutcome, VersionTransitionTruncatesRatherThanOverflows) {
+  OtaOutcome o;
+  o.begin(kT0);
+  std::string longCurrent(200, 'a');
+  std::string longTarget(200, 'b');
+  o.noteCurrentVersion(longCurrent.c_str());
+  o.noteVersion(longTarget.c_str());
+  EXPECT_LT(std::string(o.versionTransition()).size(),
+            (size_t)OtaOutcome::kVersionTransitionLen);
+}
+
+TEST(OtaOutcome, CurrentVersionResetsOnFreshBegin) {
+  // Pins a REQUIRED change to begin()'s body (not just the new methods): a
+  // retry must not carry the previous attempt's current-version stamp
+  // forward silently. Per-attempt, not sticky - same policy begin() already
+  // applies to m_version/m_versionKnown.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.5");
+  ASSERT_TRUE(o.currentVersionKnown());
+  o.begin(kT0 + 60000);  // the operator pressed update again
+  EXPECT_FALSE(o.currentVersionKnown());
+  EXPECT_EQ(std::string(o.versionTransition()), "");
+}
+
+// --- Rate smoothing ----------------------------------------------------------
+
+TEST(OtaOutcome, RateReadsZeroBeforeASecondTimeSeparatedSample) {
+  OtaOutcome o;
+  downloading(o, kT0);  // notePhase(Downloading, kT0) primes m_lastProgressMs = kT0
+  EXPECT_EQ(o.bytesPerSec(kT0), 0u);
+  o.noteProgress(4096, kImage, kT0);  // same instant: deltaMs == 0, skipped
+  EXPECT_EQ(o.bytesPerSec(kT0), 0u);
+  o.noteProgress(8192, kImage, kT0 + 100);  // first valid delta
+  EXPECT_GT(o.bytesPerSec(kT0 + 100), 0u);
+}
+
+TEST(OtaOutcome, RateConvergesExactlyForAConstantThroughput) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  // 8400 bytes every 100 ms = 84000 B/s, every step - chosen divisible by 4
+  // so the integer EWMA is exact, not merely close.
+  unsigned long t = feedConstantRate(o, kT0, 8400, 100, 5, kImage);
+  EXPECT_EQ(o.bytesPerSec(t), 84000u);
+}
+
+TEST(OtaOutcome, RateStaysAtLastValueJustBeforeStalenessThenDropsToZero) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  unsigned long t = feedConstantRate(o, kT0, 8400, 100, 5, kImage);
+  EXPECT_EQ(o.bytesPerSec(t + OtaOutcome::kRateStaleMs - 1), 84000u);
+  EXPECT_EQ(o.bytesPerSec(t + OtaOutcome::kRateStaleMs), 0u);
+}
+
+TEST(OtaOutcome, RepeatedUnchangedProgressCallbacksDoNotRefreshTheRate) {
+  // Mirrors ARepeatedProgressCallbackWithNoNewBytesIsNotLife for the stall
+  // watchdog: Update.onProgress can fire with an unchanged count, and that
+  // must not read as "still alive" for the rate either.
+  OtaOutcome o;
+  downloading(o, kT0);
+  o.noteProgress(283115, kImage, kT0 + 4000);
+  ASSERT_GT(o.bytesPerSec(kT0 + 4000), 0u);
+  for (unsigned long t = 0; t < OtaOutcome::kStallTimeoutMs; t += 500) {
+    o.noteProgress(283115, kImage, kT0 + 4000 + t);  // same count every time
+  }
+  EXPECT_EQ(o.bytesPerSec(kT0 + 4000 + OtaOutcome::kStallTimeoutMs), 0u);
+}
+
+TEST(OtaOutcome, RateResetsOnFreshBegin) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  feedConstantRate(o, kT0, 8400, 100, 3, kImage);
+  ASSERT_GT(o.bytesPerSec(kT0 + 400), 0u);
+  o.begin(kT0 + 60000);
+  EXPECT_EQ(o.bytesPerSec(kT0 + 60000), 0u);
+}
+
+// --- "Steady", and the ETA it gates ------------------------------------------
+
+TEST(OtaOutcome, EtaAbsentBeforeAnyProgress) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  EXPECT_FALSE(o.rateSteady(kT0));
+  EXPECT_EQ(o.etaSeconds(kT0), -1);
+  EXPECT_EQ(std::string(o.etaDetail(kT0)), "");
+}
+
+TEST(OtaOutcome, EtaIsExactForASteadyConstantTransfer) {
+  // REGIME 1: healthy. 1000 B/s exactly (10000 bytes / 10 s), total chosen so
+  // 771000 bytes remain -> 771 s -> "12m 51s".
+  OtaOutcome o;
+  downloading(o, kT0);
+  const unsigned long total = 871000;
+  unsigned long t = feedConstantRate(o, kT0, 10000, 10000, 10, total);
+  ASSERT_EQ(o.bytesPerSec(t), 1000u);
+  EXPECT_TRUE(o.rateSteady(t));
+  EXPECT_EQ(o.etaSeconds(t), 771);
+  EXPECT_EQ(std::string(o.etaDetail(t)), "ETA 12m 51s");
+}
+
+TEST(OtaOutcome, EtaDetailUnderAMinuteHasNoMinutesField) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  const unsigned long total = 45000;
+  unsigned long t = feedConstantRate(o, kT0, 100, 100, 10, total);  // 1000 B/s
+  ASSERT_EQ(o.bytesPerSec(t), 1000u);
+  EXPECT_EQ(o.etaSeconds(t), 44);  // (45000 - 1000) / 1000
+  EXPECT_EQ(std::string(o.etaDetail(t)), "ETA 44s");
+}
+
+TEST(OtaOutcome, EtaStaysHonestButPresentDuringTheModemSleepCrawl) {
+  // REGIME 2: pathologically slow but progressing. The measured fault: one
+  // 1364-byte MSS every ~350 ms (2-4 kB/s). Owner's call: this IS
+  // progressing, so a big-but-honest ETA is correct, not a withheld one.
+  OtaOutcome o;
+  downloading(o, kT0);
+  unsigned long done = 0;
+  unsigned long t = kT0;
+  for (int i = 0; i < 50; ++i) {  // ~17.5 s of virtual time, under kStall (20 s)
+    t += 350;
+    done += 1364;
+    o.noteProgress(done, kImage, t);
+    ASSERT_TRUE(o.rateSteady(t)) << "step " << i;
+    ASSERT_GT(o.etaSeconds(t), 0) << "step " << i;
+  }
+}
+
+TEST(OtaOutcome, EtaDisappearsWellBeforeTheStallWatchdogFires) {
+  // REGIME 3: stopped. The ETA must go quiet BEFORE "UPDATE FAILED" ever
+  // appears, not the instant after - otherwise there is a window where the
+  // screen shows a confident countdown for a transfer that has already died.
+  OtaOutcome o;
+  downloading(o, kT0);
+  o.noteProgress(283115, kImage, kT0 + 4000);
+  ASSERT_TRUE(o.rateSteady(kT0 + 4000));
+  const unsigned long staleAt = kT0 + 4000 + OtaOutcome::kRateStaleMs;
+  ASSERT_LT(OtaOutcome::kRateStaleMs, OtaOutcome::kStallTimeoutMs);
+  EXPECT_FALSE(o.rateSteady(staleAt));
+  EXPECT_EQ(o.etaSeconds(staleAt), -1);
+  EXPECT_EQ(std::string(o.etaDetail(staleAt)), "");
+  // ...and the stall watchdog itself has not fired yet at this instant - the
+  // ETA is the one to go quiet first.
+  EXPECT_FALSE(o.stalled(staleAt));
+  EXPECT_FALSE(o.failIfStalled(staleAt));
+}
+
+TEST(OtaOutcome, EtaNeverShownOnceSettled) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  o.noteProgress(kImage, kImage, kT0 + 1000);
+  ASSERT_TRUE(o.rateSteady(kT0 + 1000));
+  o.succeed(kT0 + 1000);
+  EXPECT_FALSE(o.rateSteady(kT0 + 1000));
+  EXPECT_EQ(o.etaSeconds(kT0 + 1000), -1);
+}
+
+TEST(OtaOutcome, EtaUnknownWhenContentLengthIsUnknown) {
+  // The home-network fallback URL case: a rate is knowable, an ETA is not.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.notePhase(OtaPhase::Downloading, kT0);
+  o.noteProgress(1000, 0, kT0 + 1000);
+  o.noteProgress(2000, 0, kT0 + 2000);
+  EXPECT_GT(o.bytesPerSec(kT0 + 2000), 0u);
+  EXPECT_EQ(o.etaSeconds(kT0 + 2000), -1);
+  EXPECT_EQ(std::string(o.transferDetail(kT0 + 2000)), "");
+}
+
+TEST(OtaOutcome, EtaZeroAndTransferClampedWhenDoneExceedsTotal) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  o.noteProgress(kImage, kImage, kT0 + 1000);
+  o.noteProgress(kImage + 99999, kImage, kT0 + 2000);  // server over-reports
+  EXPECT_EQ(o.etaSeconds(kT0 + 2000), 0);
+  EXPECT_THAT(std::string(o.transferDetail(kT0 + 2000)),
+              testing::HasSubstr("1.5/1.5MB"));
+}
+
+// --- Transfer detail formatting ----------------------------------------------
+
+TEST(OtaOutcome, TransferDetailMatchesTheOwnersExample) {
+  // The literal example from the feature request: "0.9/1.5MB  84kB/s".
+  OtaOutcome o;
+  downloading(o, kT0);
+  unsigned long t = feedConstantRate(o, kT0, 8400, 100, 107, kImage);
+  ASSERT_EQ(o.bytesPerSec(t), 84000u);
+  EXPECT_EQ(std::string(o.transferDetail(t)), "0.9/1.5MB  84kB/s");
+}
+
+TEST(OtaOutcome, TransferDetailIsBytesOnlyBeforeARateExists) {
+  OtaOutcome o;
+  downloading(o, kT0);
+  o.noteProgress(0, kImage, kT0);  // deltaMs == 0: no rate sample yet
+  EXPECT_EQ(o.bytesPerSec(kT0), 0u);
+  EXPECT_EQ(std::string(o.transferDetail(kT0)), "0.0/1.5MB");
+}
+
+// --- Wi-Fi signal -------------------------------------------------------------
+
+TEST(OtaOutcome, SignalUnknownUntilNoted) {
+  OtaOutcome o;
+  o.begin(kT0);
+  EXPECT_FALSE(o.signalKnown());
+  EXPECT_EQ(std::string(o.signalDetail()), "");
+}
+
+TEST(OtaOutcome, NoteSignalRendersTheRawDbmNumber) {
+  // Raw dBm, not a qualitative word - CLAUDE.md's own reasoning: RSSI swung
+  // -86 to -49 dBm on the SAME bench, and TLS connect itself intermittently
+  // fails at the bottom of that range, so the number has diagnostic value a
+  // word like "weak" would throw away.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteSignal(-52);
+  EXPECT_TRUE(o.signalKnown());
+  EXPECT_EQ(o.signalDbm(), -52);
+  EXPECT_EQ(std::string(o.signalDetail()), "Wi-Fi -52 dBm");
+}
+
+TEST(OtaOutcome, SignalSurvivesIntoDownloadingOnceKnown) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.notePhase(OtaPhase::Connecting, kT0);
+  o.noteSignal(-61);
+  o.notePhase(OtaPhase::Checking, kT0);
+  o.notePhase(OtaPhase::Downloading, kT0);
+  EXPECT_TRUE(o.signalKnown());
+  EXPECT_EQ(std::string(o.signalDetail()), "Wi-Fi -61 dBm");
+}
+
+TEST(OtaOutcome, SignalResetsOnFreshBegin) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteSignal(-70);
+  ASSERT_TRUE(o.signalKnown());
+  o.begin(kT0 + 60000);
+  EXPECT_FALSE(o.signalKnown());
+  EXPECT_EQ(std::string(o.signalDetail()), "");
+}
+
+TEST(OtaOutcome, SignalRendersBothEndsOfTheMeasuredBenchRange) {
+  OtaOutcome healthy;
+  healthy.begin(kT0);
+  healthy.noteSignal(-49);
+  EXPECT_EQ(std::string(healthy.signalDetail()), "Wi-Fi -49 dBm");
+
+  OtaOutcome marginal;
+  marginal.begin(kT0);
+  marginal.noteSignal(-86);
+  EXPECT_EQ(std::string(marginal.signalDetail()), "Wi-Fi -86 dBm");
+}
+
+TEST(OtaOutcome, SignalIsVisibleBeforeTheDownloadCommits) {
+  // "so a marginal signal is visible before the download commits" - the
+  // owner's own wording. Pinned during Checking, i.e. before notePhase()
+  // ever reaches Downloading.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.notePhase(OtaPhase::Checking, kT0);
+  o.noteSignal(-58);
+  EXPECT_EQ(o.phase(), OtaPhase::Checking);
+  EXPECT_TRUE(o.signalKnown());
+  EXPECT_FALSE(o.settled());
+}
+
+// --- Restarting vs. Now running: the success-wording bug ---------------------
+//
+// OtaResult::Success has always rendered "Now running %s" - correct for a
+// restore()d notice on the NEW firmware's first screen, but WRONG for the
+// 2 s (kSuccessHoldMs) it is ALSO shown before ESP.restart() actually runs,
+// on the OLD firmware. m_restored already distinguishes the two cases (false
+// until restore() sets it true) - no new flag is needed, only a render()
+// change keyed on it. The two tests below pin the two renderings; the first
+// is expected to FAIL against the current implementation.
+
+TEST(OtaOutcome, PreRebootSuccessSaysRestartingNotNowRunning) {
+  OtaOutcome o;
+  downloading(o, kT0);  // noteVersion("1.4.2"); m_restored stays false
+  o.succeed(kT0 + 1);
+  EXPECT_EQ(std::string(o.headline()), "UPDATED");
+  EXPECT_THAT(detailOf(o), testing::HasSubstr("1.4.2"));
+  EXPECT_THAT(detailOf(o), testing::HasSubstr("Restarting"));
+  EXPECT_THAT(detailOf(o), testing::Not(testing::HasSubstr("Now running")));
+}
+
+TEST(OtaOutcome, RestoredSuccessStillSaysNowRunning) {
+  // The other half of the same pin, on the path that is ALREADY correct
+  // today - restore() sets m_restored, so this should pass whether or not
+  // the pre-reboot half above has been fixed yet.
+  OtaOutcome before;
+  downloading(before, kT0);
+  before.succeed(kT0 + 1);
+  OtaOutcome after;
+  after.restore(before.snapshot(), 3000);
+  EXPECT_THAT(std::string(after.detail()), testing::HasSubstr("Now running"));
+  EXPECT_THAT(std::string(after.detail()),
+              testing::Not(testing::HasSubstr("Restarting")));
+}
+
+TEST(OtaOutcome, SuccessHeadlineIsUpdatedRegardlessOfRebootTiming) {
+  // The headline must NOT be where the pre/post distinction lives - it is
+  // one of the three deliberately-unalike headlines
+  // (EveryResultRendersSomethingDistinctToRead), and SuccessSaysWhichVersion-
+  // IsNowRunning above already pins it "UPDATED" pre-reboot.
+  OtaOutcome pre;
+  downloading(pre, kT0);
+  pre.succeed(kT0);
+  EXPECT_EQ(std::string(pre.headline()), "UPDATED");
+
+  OtaOutcome post;
+  post.restore(pre.snapshot(), 500);
+  EXPECT_EQ(std::string(post.headline()), "UPDATED");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleMock(&argc, argv);
   return RUN_ALL_TESTS();
