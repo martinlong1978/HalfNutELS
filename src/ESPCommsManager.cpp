@@ -435,7 +435,18 @@ void ESPCommsManager::runOta() {
         if (fetchLatestTag(GITHUB_API_URL, tag, sizeof(tag))) {
             Serial.printf("OTA: latest=%s current=%s\n", tag, FIRMWARE_VERSION);
             m_outcome.noteVersion(tag);
-            if (strcmp(tag, FIRMWARE_VERSION) == 0) {
+            // ELS_BUILD_IS_RELEASE gates this, and it is not belt and
+            // braces. A bench build takes its FIRMWARE_VERSION from the
+            // NEAREST TAG, so a USB-flashed build of the v1.0.6 commit
+            // reports "v1.0.6" and would compare equal to the published
+            // v1.0.6 - leaving the machine sitting on an unofficial image
+            // and told there was nothing to fetch, with no way to get the
+            // real one short of another USB flash.
+            //
+            // A local build is never the artifact that was published, even
+            // when the commit matches, so it is never up to date with
+            // respect to a release. It is always offered the real thing.
+            if (ELS_BUILD_IS_RELEASE && strcmp(tag, FIRMWARE_VERSION) == 0) {
                 // Already up to date. This NO LONGER REBOOTS: "No update
                 // available" followed by a restart was the single most
                 // confusing sequence the old code had - nothing happened, and

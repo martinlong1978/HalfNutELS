@@ -101,8 +101,26 @@ else:
 status = _git("status", "--porcelain")
 dirty = bool(status)
 
+# A RELEASE IS SOMETHING CI BUILT FROM A TAG. Nothing else is, and in
+# particular a local build is not - not even a clean one, on master, sitting
+# exactly on the tag.
+#
+# The rule used to be "clean tree on master", which was defensible while
+# FIRMWARE_VERSION was hand-edited: setting it was a deliberate act. It stopped
+# being defensible the moment the version started coming from the nearest tag,
+# because a clean master build three commits PAST v1.0.5 then took v1.0.5 as
+# its version and stamped itself a release - reporting a version it was not,
+# which is the exact confusion issue #4 exists to prevent. It shipped that way
+# for one build; the device flashed over USB on 2026-08-31 claimed to be
+# v1.0.5 while being three commits ahead of it.
+#
+# A local build cannot be verified to be the artifact that was published even
+# when the commit matches - different toolchain, different libdeps, an edit
+# that never reached git. So it reports its SHA instead of a version, and the
+# OTA check refuses to treat it as up to date against any release (see
+# ELS_BUILD_IS_RELEASE in src/ESPCommsManager.cpp), which means a bench build
+# is always offered the real thing.
 if ci_ref_type == "tag" and ci_ref_name:
-    # A tag build. Say so, and carry the tag rather than a branch name.
     is_release = True
     sha_label = sha if sha else ci_ref_name
     suffix = ""
@@ -113,15 +131,12 @@ elif sha is None or branch is None:
     sha_label = "nogit"
     suffix = "-nogit"
 else:
-    is_release = (branch == "master") and not dirty
+    is_release = False
     sha_label = sha + ("*" if dirty else "")
-    if is_release:
-        suffix = ""
-    else:
-        # Keep the branch short enough that the splash line stays on one row:
-        # 14pt across 320px is comfortable to about 40 characters all told.
-        short_branch = branch if len(branch) <= 16 else branch[:15] + "~"
-        suffix = "-{}@{}".format(short_branch, sha_label)
+    # Keep the branch short enough that the splash line stays on one row:
+    # 14pt across 320px is comfortable to about 40 characters all told.
+    short_branch = branch if len(branch) <= 16 else branch[:15] + "~"
+    suffix = "-{}@{}".format(short_branch, sha_label)
 
 defines = [
     ("ELS_BUILD_IS_RELEASE", "1" if is_release else "0"),

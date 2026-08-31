@@ -169,10 +169,21 @@ OTA pulls from **GitHub Releases** via the stable permalink
   lie. By hand it is still `pio run -e esp32dev_publish` then `bash scripts/release.sh` (needs
   `gh auth login`). In CI it generates notes from the commits since the last release; by hand it keeps
   its one-liner.
-- **`scripts/build_provenance.py` reads `GITHUB_REF_TYPE`/`GITHUB_REF_NAME` before it reads git.** It has to:
-  `actions/checkout` produces a DETACHED HEAD, so the local "clean tree on master" rule can never pass on a
-  runner, and every CI build - including the released one - would stamp itself "not a release" and put a SHA
-  on the About screen. A tag build is a release by definition.
+- **A RELEASE IS SOMETHING CI BUILT FROM A TAG, and nothing else is.** `scripts/build_provenance.py` sets
+  `ELS_BUILD_IS_RELEASE` only when `GITHUB_REF_TYPE=tag`. A local build is never a release - not even a
+  clean one, on master, sitting exactly on the tag - because it cannot be shown to be the artifact that
+  was published (different toolchain, different libdeps, an edit that never reached git). It reports its
+  **SHA** on the About screen instead of a version, with `*` if the tree was dirty.
+- The rule used to be "clean tree on master", which was fine while `FIRMWARE_VERSION` was hand-edited -
+  setting it was a deliberate act. It stopped being fine the moment the version came from the nearest tag:
+  a clean master build three commits past `v1.0.5` then took `v1.0.5` as its version and called itself a
+  release, reporting a version it was not. That shipped for exactly one build (the USB flash on
+  2026-08-31) before being tightened.
+- **The OTA up-to-date check is gated on `ELS_BUILD_IS_RELEASE` too** (`src/ESPCommsManager.cpp`), and that
+  is not redundant: a bench build takes its version from the nearest tag, so a USB-flashed build of the
+  `v1.0.6` commit reports `v1.0.6` and would compare equal to the published release - leaving the machine
+  on an unofficial image and told there was nothing to fetch. A non-release build is never up to date, so
+  it is always offered the real thing.
 
 ## Display (lib/display)
 
