@@ -103,10 +103,9 @@ cross-checked against the schematic:
 | C1 | 1 | 10 µF capacitor | 0805 | C15850 |
 | C2 | 1 | 22 µF capacitor | 0805 | C45783 |
 | C3, C4 | 2 | 0.1 µF capacitor | 0805 | C49678 |
-| R1–R8, R11, R12, R18, R20, R21 | 13 | 10 kΩ resistor (pull-ups) | 0805 | C17414 |
+| R1–R8, R11, R12, R17, R18, R20, R21 | 14 | 10 kΩ resistor (pull-ups) | 0805 | C17414 |
 | R9, R10, R19 | 3 | 330 Ω resistor (encoder LED series) | 0805 | C17630 |
 | R13, R14 | 2 | 0 Ω link (encoder direct-connect option) | 0805 | C17477 |
-| R17 | 1 | 1 kΩ resistor | 0805 | C17513 |
 | SW1–SW10 | 10 | Omron B3FS-101xP **SMD** tactile switch (SW2–SW10 = the 3×3 keypad; SW1 = stepper-enable override) | SW_SPST_Omron_B3FS-101xP | C231324 |
 | J5 | 1 | 2×3 1.27 mm header — UART programming header | PinHeader 2x03 1.27 mm SMD | C42372553 |
 
