@@ -34,3 +34,7 @@ kicad/LVGL/TeensyELS-backups/
 # Python bytecode from scripts/ (make_logo.py imports make_glyphs.py)
 __pycache__/
 *.pyc
+
+# Cygwin/MSYS crash dumps from the Bash tool (heredoc failures on large content)
+bash.exe.stackdump
+*.stackdump

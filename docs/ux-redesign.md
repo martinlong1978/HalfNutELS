@@ -144,6 +144,16 @@ mean, because it knows whether the stop exists.
 The two gestures cannot collide: the keypad never emits a `Click` after a `Hold`
 (`lib/keyscan`), so one press is either a run or a jog and never both.
 
+**There are now two hold thresholds.** A press becomes a `Hold` at **500 ms**
+(`kKeyHoldMs`), halved because on an arrow the wait is dead time before the carriage
+moves and firing early costs at worst a jog that stops the moment you let go. Every
+gesture that **takes something away** fires on `LongHold` at **1 s** instead
+(`kKeyLongHoldMs`) and so kept the dwell it already had: clear both stops, clear one
+stop, and zero the DRO. A press released between the two does nothing at all, which is
+what keeps letting go the escape hatch the confirm bar offers.
+So in the STOPS widget: a tap sets a stop, past 500 ms it is a hold and the tap is
+cancelled, and only at 1 s - with the bar full - does the clear fire.
+
 Hold on a side with a stop is a **jog**, not a shorter way to say click. Releasing the arrow
 decelerates the carriage where it is rather than letting it carry on to the stop, and the
 speed is the operator's — `jogSpeedPps() * getJogSpeed()`, the same speed the stop-free jog
@@ -221,7 +231,7 @@ Shows the travel bar full-width with both stop markers and the live carriage pos
 | ◀ click, left stop unset | Set left stop **here** |
 | ◀ click, left stop set | Flash "hold to clear" — no action |
 | ◀ hold, left stop set | Clear the left stop |
-| `STOPS` hold | Clear **both**, after a 1 s confirm bar |
+| `STOPS` hold | Clear **both**, after a 1 s confirm bar (`LongHold` - the 500 ms `Hold` on the way there is inert) |
 
 The asymmetry is deliberate: setting a stop is cheap to undo, clearing one loses a position
 you may have spent time finding. ▶ is the mirror.

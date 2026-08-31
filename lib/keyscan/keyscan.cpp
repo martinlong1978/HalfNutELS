@@ -10,6 +10,7 @@ KeyScanner::KeyScanner()
       m_stable(0),
       m_stableSinceMs(0),
       m_holdFired(false),
+      m_longHoldFired(false),
       m_bounceRejects(0) {}
 
 namespace {
@@ -79,6 +80,9 @@ int KeyScanner::update(int rawCode, unsigned long nowMs, KeyScanOut* out,
     m_stable = m_candidate;
     m_stableSinceMs = nowMs;
     m_holdFired = false;
+    // BOTH latches, or the second key of a roll could never long-hold: the
+    // first press would leave m_longHoldFired set and nothing else clears it.
+    m_longHoldFired = false;
 
     if (m_stable != 0) {
       push(out, maxOut, n, m_stable, KS_PRESSED);
@@ -95,6 +99,24 @@ int KeyScanner::update(int rawCode, unsigned long nowMs, KeyScanOut* out,
       (nowMs - m_stableSinceMs) >= kKeyHoldMs) {
     m_holdFired = true;
     push(out, maxOut, n, m_stable, KS_HELD);
+  }
+
+  // ------------------------------------------------------------------------
+  // 4. THE LONG HOLD. The confirm dwell for a gesture that destroys something.
+  //    Once per press, at the later threshold, and only while the key is still
+  //    down - a release between the two thresholds gets here never, which is
+  //    what makes letting go the escape hatch.
+  //
+  //    Its own latch, not a second use of m_holdFired, so the two can never
+  //    interfere; and deliberately NOT else-if, because at a coarse scan rate
+  //    (or after a stall) one sample can legitimately cross both thresholds
+  //    and must then report both, in order. kKeyScanMaxEvents already allows
+  //    for four events in a sample.
+  // ------------------------------------------------------------------------
+  if (m_stable != 0 && !m_longHoldFired &&
+      (nowMs - m_stableSinceMs) >= kKeyLongHoldMs) {
+    m_longHoldFired = true;
+    push(out, maxOut, n, m_stable, KS_LONG_HELD);
   }
 
   return n;

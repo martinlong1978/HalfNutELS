@@ -87,6 +87,8 @@ bool ButtonPad::stateToEvent(int buttonState, UiKeyEvent& ev) {
   case BS_PRESSED:  ev = UiKeyEvent::Press;   return true;
   case BS_CLICKED:  ev = UiKeyEvent::Click;   return true;
   case BS_HELD:     ev = UiKeyEvent::Hold;    return true;
+  // The 1 s confirm dwell. Only the destructive gestures look at it.
+  case BS_LONG_HELD: ev = UiKeyEvent::LongHold; return true;
   case BS_RELEASED: ev = UiKeyEvent::Release; return true;
   // BS_NONE is the empty-queue marker; BS_DOUBLE_CLICKED is declared but never
   // emitted by KeyArray. Neither has a UiKeyEvent, so drop them.

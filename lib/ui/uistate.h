@@ -146,7 +146,12 @@ enum class UiKey {
   EncoderCw, EncoderCcw
 };
 
-enum class UiKeyEvent { Press, Release, Click, Hold };
+// LongHold is the SECOND hold threshold (kKeyLongHoldMs, 1 s), and exists
+// because Hold was halved to 500 ms for the jog. Every gesture that TAKES
+// SOMETHING AWAY hangs off LongHold instead - clear both stops, clear one
+// stop, zero the DRO - so each keeps the full second it already required.
+// A press released between the two does nothing at all.
+enum class UiKeyEvent { Press, Release, Click, Hold, LongHold };
 
 // What the caller should do. Exactly one per key event; None means "nothing".
 enum class UiIntent {

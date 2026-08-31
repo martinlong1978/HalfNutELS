@@ -229,6 +229,19 @@ by integration (a reading must persist 8 ms) and produces the gesture events `Ui
 `Press → Click → Release`, or `Press → Hold → Release` with **no Click after a Hold**. Pure C++,
 host-tested (`test/test_keyscan`).
 
+**TWO hold thresholds since v1.0.5.** `Hold` fires at `kKeyHoldMs` = **500 ms**; a second
+event, `LongHold`, fires at `kKeyLongHoldMs` = **1 s** if the key is still down. Hold was
+halved because hold-to-jog made the operator wait out dead time before the carriage moved.
+That is only safe because **every gesture that takes something away moved to `LongHold`**
+and so kept the second it already had: clear both stops, clear one stop, zero the DRO.
+Clear-both is the one that matters - it leaves `syncPositionState` with no anchor, so the
+thread cannot be picked up for a second cut - and the confirm bar fills across exactly that
+interval (`kStopsConfirmMs`). A press released between the two thresholds does nothing at
+all. When adding a gesture, the question is not "is this a hold" but **"does this destroy
+something"**; if it does, it belongs on `LongHold`. Note `LongHold` still ARRIVES for keys
+that do not want it (keyscan does not know), so every other handler must be inert to it -
+`test/test_uistate`'s `UiStateHoldThresholds` block is the fence for both halves.
+
 Do NOT reintroduce edge interrupts. The previous scheme armed RISING for a press and FALLING for a
 release, re-armed as a side effect of each scan, behind a 10 ms lockout shared between the two — so a
 release inside that window returned early *before* the re-arming line and left the pad waiting for an

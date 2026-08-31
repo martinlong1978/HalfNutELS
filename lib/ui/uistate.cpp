@@ -836,6 +836,15 @@ UiIntent UiState::handleKeyImpl(UiKey key, UiKeyEvent ev, const UiContext& ctx,
     }
 
     if (ev == UiKeyEvent::Hold) {
+      // 500 ms only says "this is a hold, not a tap". The bar is still
+      // filling and the clear has not been earned yet, so m_stopsConfirming
+      // is left exactly as the Press set it. An explicit branch rather than a
+      // fallthrough: without it a Hold would reach the Click handler below and
+      // toggle the selector, which is the opposite of inert.
+      return UiIntent::None;
+    }
+
+    if (ev == UiKeyEvent::LongHold) {
       const bool armed = m_stopsConfirming;
       m_stopsConfirming = false;  // consumed either way; the bar is done
       if (!armed) {
@@ -922,7 +931,10 @@ UiIntent UiState::handleKeyImpl(UiKey key, UiKeyEvent ev, const UiContext& ctx,
       m_focus = UiFocus::JogSpeed;
       return UiIntent::None;
     }
-    if (ev == UiKeyEvent::Hold && m_focus == UiFocus::Jog) {
+    if (ev == UiKeyEvent::LongHold && m_focus == UiFocus::Jog) {
+      // LONG hold, not Hold: zeroing throws away the datum every position on
+      // the screen is measured from, so it keeps the full 1 s it always had
+      // rather than inheriting the halved threshold the jog wanted.
       // Defined "at rest" only, so a slow OK press inside a widget can never
       // silently move the datum. Zeroing moves no metal, so the MM_ENABLED
       // inhibit of §3 does not apply.
@@ -1088,13 +1100,21 @@ UiIntent UiState::handleKeyImpl(UiKey key, UiKeyEvent ev, const UiContext& ctx,
         m_focus = UiFocus::Jog;
         return left ? UiIntent::SetLeftStop : UiIntent::SetRightStop;
       }
-      if (ev == UiKeyEvent::Hold) {
+      if (ev == UiKeyEvent::LongHold) {
+        // LONG hold: clearing a stop takes away a limit the operator set, so
+        // it keeps the full 1 s it already required. Less severe than
+        // clear-both - the remaining stop still anchors the helix - but it is
+        // still a deletion, and the two should not disagree about how
+        // deliberate they have to be.
         if (!stopSet) {
           return UiIntent::None;  // a hold must never set a stop by accident
         }
         return left ? UiIntent::ClearLeftStop : UiIntent::ClearRightStop;
       }
-      return UiIntent::None;  // Press / Release inert
+      // Press / Release / Hold inert. Hold reaching here is the 500 ms
+      // threshold passing on the way to the clear, and it must do nothing -
+      // in particular it must not set the stop, which is the Click's job.
+      return UiIntent::None;
     }
 
     case UiFocus::Menu:

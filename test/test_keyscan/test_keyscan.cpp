@@ -105,7 +105,10 @@ TEST(KeyScan, TheHoldFiresOnceNoMatterHowLongItIsHeld) {
   Rig r;
   r.feed(kOk, kKeyHoldMs + 50);
   std::vector<KeyScanOut> more = r.feed(kOk, 5000);
-  EXPECT_TRUE(more.empty()) << "a held key must not repeat";
+  // Exactly ONE further event in five seconds: the long hold at
+  // kKeyLongHoldMs. Neither threshold repeats.
+  EXPECT_EQ(std::vector<int>({KS_LONG_HELD}), events(more))
+      << "a held key must not repeat - one Hold, one LongHold, then silence";
 }
 
 TEST(KeyScan, TheHoldLandsAtTheThresholdNotBefore) {
@@ -316,4 +319,75 @@ TEST(KeyScan, SurvivesAMillisWrapMidPress) {
 int main(int argc, char** argv) {
   ::testing::InitGoogleMock(&argc, argv);
   return RUN_ALL_TESTS();
+}
+
+// ===========================================================================
+// 7. THE LONG HOLD - a second, later threshold for destructive gestures
+//
+// kKeyHoldMs was halved to 500 ms so hold-to-jog stops making the operator
+// wait. That is only safe because the gestures that TAKE SOMETHING AWAY moved
+// to kKeyLongHoldMs and kept the full second they already had: clear both
+// stops (which leaves the helix with no anchor), clear one stop, zero the DRO.
+//
+// The fence that matters is not that Hold got faster. It is that a press
+// released between the two thresholds produces NO LongHold at all, so letting
+// go while the confirm bar fills is still the escape hatch.
+// ===========================================================================
+
+TEST(KeyScan, TheLongHoldLandsAtItsOwnThresholdNotTheShortOne) {
+  Rig r;
+  std::vector<KeyScanOut> shortHold = r.feed(kOk, kKeyHoldMs + 20);
+  EXPECT_EQ(std::vector<int>({KS_PRESSED, KS_HELD}), events(shortHold))
+      << "the short threshold alone, with no LongHold riding along";
+
+  std::vector<KeyScanOut> upToLong =
+      r.feed(kOk, (kKeyLongHoldMs - kKeyHoldMs) - 40);
+  EXPECT_TRUE(upToLong.empty()) << "nothing between the two thresholds";
+
+  std::vector<KeyScanOut> atLong = r.feed(kOk, 60);
+  ASSERT_EQ(std::vector<int>({KS_LONG_HELD}), events(atLong));
+  EXPECT_EQ(kOk, atLong[0].code);
+}
+
+TEST(KeyScan, ReleasingBetweenTheThresholdsProducesNoLongHold) {
+  // THE ESCAPE HATCH. The operator started a destructive gesture, watched the
+  // confirm bar fill, and thought better of it. Nothing must fire.
+  Rig r;
+  r.feed(kOk, kKeyHoldMs + 20);
+  std::vector<KeyScanOut> up = r.feed(0, 200);
+  EXPECT_EQ(std::vector<int>({KS_RELEASED}), events(up))
+      << "Release alone - no LongHold, and still no Click after a Hold";
+}
+
+TEST(KeyScan, TheLongHoldFiresOnlyOncePerPress) {
+  Rig r;
+  r.feed(kOk, kKeyLongHoldMs + 50);
+  std::vector<KeyScanOut> more = r.feed(kOk, 5000);
+  EXPECT_TRUE(more.empty()) << "the long threshold does not repeat either";
+}
+
+TEST(KeyScan, TheSecondKeyOfARollGetsItsOwnLongHoldWindow) {
+  // Both latches must reset when a new key is promoted. If m_longHoldFired
+  // were left set by the first press, the second key could never reach a
+  // destructive gesture at all - a dead STOPS hold, and a subtle one.
+  Rig r;
+  r.feed(kOk, kKeyLongHoldMs + 50);
+  r.feed(kMenu, kKeyHoldMs + 20);
+  std::vector<KeyScanOut> second =
+      r.feed(kMenu, (kKeyLongHoldMs - kKeyHoldMs) + 40);
+  ASSERT_EQ(std::vector<int>({KS_LONG_HELD}), events(second));
+  EXPECT_EQ(kMenu, second[0].code) << "and it names the second key";
+}
+
+TEST(KeyScan, OneCoarseSampleCanCrossBothThresholdsAndReportsBoth) {
+  // Not reachable at the 2 ms scan rate, but the scanner must not lose an
+  // event to a stalled or coarse caller: the two checks are separate ifs, not
+  // an else-if, precisely so a single late sample reports Hold then LongHold
+  // in that order rather than silently skipping one.
+  Rig r;
+  r.feed(kOk, 20);                 // press becomes stable
+  r.advance(kKeyLongHoldMs + 100);  // the caller went away and came back
+  std::vector<KeyScanOut> late = r.sample(kOk);
+  EXPECT_EQ(std::vector<int>({KS_HELD, KS_LONG_HELD}), events(late))
+      << "both, in order, from one sample";
 }

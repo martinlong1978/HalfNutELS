@@ -9,7 +9,7 @@
 #include <ESP32Encoder.h>
 #include <encoderdetents.h>
 
-enum ButtonState { BS_NONE = 0, BS_PRESSED = 1, BS_CLICKED = 2, BS_HELD = 3, BS_RELEASED = 4, BS_DOUBLE_CLICKED = 5 };
+enum ButtonState { BS_NONE = 0, BS_PRESSED = 1, BS_CLICKED = 2, BS_HELD = 3, BS_RELEASED = 4, BS_DOUBLE_CLICKED = 5, BS_LONG_HELD = 6 };
 
 typedef struct buttonInfo {
     int button;

@@ -21,6 +21,7 @@ static_assert((int)KS_PRESSED == (int)BS_PRESSED, "keyscan/ButtonState drift");
 static_assert((int)KS_CLICKED == (int)BS_CLICKED, "keyscan/ButtonState drift");
 static_assert((int)KS_HELD == (int)BS_HELD, "keyscan/ButtonState drift");
 static_assert((int)KS_RELEASED == (int)BS_RELEASED, "keyscan/ButtonState drift");
+static_assert((int)KS_LONG_HELD == (int)BS_LONG_HELD, "keyscan/ButtonState drift");
 
 KeyArray::KeyArray(Leadscrew* leadscrew)
 #ifdef ELS_UI_ENCODER

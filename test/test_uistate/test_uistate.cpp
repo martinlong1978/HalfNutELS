@@ -172,10 +172,31 @@ class Rig {
     return out;
   }
 
-  // Full long-press gesture; returns the intent produced by the Hold.
+  // Press, Hold, Release - a press that crossed kKeyHoldMs (500 ms) but was
+  // let go before kKeyLongHoldMs. Returns the intent produced by the Hold.
+  //
+  // This is NO LONGER the gesture that destroys anything. Clearing a stop,
+  // clearing both and zeroing the DRO all moved to LongHold when Hold was
+  // halved for the jog, so for those this helper is the NEGATIVE case - the
+  // operator who let go while the confirm bar was still filling.
   UiIntent hold(UiKey k, const UiContext& c = kNoStops) {
     m_ui.handleKey(k, UiKeyEvent::Press, c, m_now);
     UiIntent out = m_ui.handleKey(k, UiKeyEvent::Hold, c, m_now);
+    m_ui.handleKey(k, UiKeyEvent::Release, c, m_now);
+    return out;
+  }
+
+  // The full 1 s dwell, in the order the device produces it: Press, then Hold
+  // at 500 ms, then LongHold at 1 s, then Release. Returns the intent produced
+  // by the LongHold, which is where every destructive gesture now lives.
+  //
+  // The Hold is deliberately NOT skipped. On the machine it always arrives
+  // first, and a handler that reacted to it would be a real bug this helper
+  // must be able to catch.
+  UiIntent longHold(UiKey k, const UiContext& c = kNoStops) {
+    m_ui.handleKey(k, UiKeyEvent::Press, c, m_now);
+    m_ui.handleKey(k, UiKeyEvent::Hold, c, m_now);
+    UiIntent out = m_ui.handleKey(k, UiKeyEvent::LongHold, c, m_now);
     m_ui.handleKey(k, UiKeyEvent::Release, c, m_now);
     return out;
   }
@@ -724,7 +745,7 @@ TEST(UiStateOk, ClickWithWidgetOpenCommitsAndReturnsToJog) {
 
 TEST(UiStateOk, HoldAtRestZerosTheDroAndKeepsJogFocus) {
   Rig r;
-  EXPECT_EQ(UiIntent::ZeroDro, r.hold(UiKey::Ok));
+  EXPECT_EQ(UiIntent::ZeroDro, r.longHold(UiKey::Ok));
   EXPECT_EQ(UiFocus::Jog, r.focus());
 }
 
@@ -1025,7 +1046,7 @@ TEST(UiStateStops, LeftHoldWithLeftStopSetClearsIt) {
   Rig r;
   r.click(UiKey::Stops, kLeftOnly);
   ASSERT_EQ(UiFocus::Stops, r.focus());
-  EXPECT_EQ(UiIntent::ClearLeftStop, r.hold(UiKey::Left, kLeftOnly));
+  EXPECT_EQ(UiIntent::ClearLeftStop, r.longHold(UiKey::Left, kLeftOnly));
   EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
@@ -1062,7 +1083,7 @@ TEST(UiStateStops, RightHoldWithRightStopSetClearsIt) {
   Rig r;
   r.click(UiKey::Stops, kRightOnly);
   ASSERT_EQ(UiFocus::Stops, r.focus());
-  EXPECT_EQ(UiIntent::ClearRightStop, r.hold(UiKey::Right, kRightOnly));
+  EXPECT_EQ(UiIntent::ClearRightStop, r.longHold(UiKey::Right, kRightOnly));
   EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
@@ -1182,12 +1203,12 @@ TEST(UiStateStops, TheInhibitLiftsWhenDisengaged) {
   Rig clearL;
   clearL.click(UiKey::Stops, kBothStops);
   ASSERT_EQ(UiIntent::None, clearL.hold(UiKey::Left, engagedSet));
-  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.hold(UiKey::Left, kBothStops));
+  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.longHold(UiKey::Left, kBothStops));
 
   Rig clearR;
   clearR.click(UiKey::Stops, kBothStops);
   ASSERT_EQ(UiIntent::None, clearR.hold(UiKey::Right, engagedSet));
-  EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, kBothStops));
+  EXPECT_EQ(UiIntent::ClearRightStop, clearR.longHold(UiKey::Right, kBothStops));
 }
 
 TEST(UiStateStops, TheStopsWidgetDoesNotOpenWhileMotionEnabled) {
@@ -1296,11 +1317,11 @@ TEST(UiStateStops, TheMotionActiveInhibitLiftsWhenBothFlagsAreFalse) {
 
   Rig clearL;
   clearL.click(UiKey::Stops, atRestSet);
-  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.hold(UiKey::Left, atRestSet));
+  EXPECT_EQ(UiIntent::ClearLeftStop, clearL.longHold(UiKey::Left, atRestSet));
 
   Rig clearR;
   clearR.click(UiKey::Stops, atRestSet);
-  EXPECT_EQ(UiIntent::ClearRightStop, clearR.hold(UiKey::Right, atRestSet));
+  EXPECT_EQ(UiIntent::ClearRightStop, clearR.longHold(UiKey::Right, atRestSet));
 }
 
 TEST(UiStateStops, TheStopsWidgetDoesNotOpenWhileMotionActive) {
@@ -2273,18 +2294,18 @@ TEST(UiStateClearBoth, StopsHeldInsideTheWidgetClearsBoth) {
   Rig r;
   r.click(UiKey::Stops, kBothStops);
   ASSERT_EQ(UiFocus::Stops, r.focus());
-  EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops));
+  EXPECT_EQ(UiIntent::ClearBothStops, r.longHold(UiKey::Stops, kBothStops));
 }
 
 TEST(UiStateClearBoth, OneStopSetIsEnough) {
   // "Clear both" means "leave no stops", not "there must be two".
   Rig rl;
   rl.click(UiKey::Stops, kLeftOnly);
-  EXPECT_EQ(UiIntent::ClearBothStops, rl.hold(UiKey::Stops, kLeftOnly));
+  EXPECT_EQ(UiIntent::ClearBothStops, rl.longHold(UiKey::Stops, kLeftOnly));
 
   Rig rr;
   rr.click(UiKey::Stops, kRightOnly);
-  EXPECT_EQ(UiIntent::ClearBothStops, rr.hold(UiKey::Stops, kRightOnly));
+  EXPECT_EQ(UiIntent::ClearBothStops, rr.longHold(UiKey::Stops, kRightOnly));
 }
 
 TEST(UiStateClearBoth, DoesNothingWhenNoStopIsSet) {
@@ -2324,7 +2345,7 @@ TEST(UiStateClearBoth, StopsHeldFromTheRestScreenClearsBoth) {
   // The ruling, end to end: press and hold from the rest screen, one gesture.
   Rig r;
   ASSERT_EQ(UiFocus::Jog, r.focus());
-  EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops));
+  EXPECT_EQ(UiIntent::ClearBothStops, r.longHold(UiKey::Stops, kBothStops));
   EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
@@ -2378,7 +2399,7 @@ TEST(UiStateClearBoth, StopsHeldFromAnyOtherWidgetAlsoClearsBoth) {
     Rig r;
     r.enterFocus(f);
     ASSERT_EQ(f, r.focus());
-    EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops))
+    EXPECT_EQ(UiIntent::ClearBothStops, r.longHold(UiKey::Stops, kBothStops))
         << "focus=" << f;
     EXPECT_EQ(UiFocus::Stops, r.focus()) << "focus=" << f;
   }
@@ -2452,7 +2473,7 @@ TEST(UiStateClearBoth, IsAllowedOnceTheCarriageIsAtRest) {
   UiContext moving = ctx(true, true, /*motionEnabled=*/true);
   r.click(UiKey::Stops, moving);
   ASSERT_EQ(UiIntent::None, r.hold(UiKey::Stops, moving));
-  EXPECT_EQ(UiIntent::ClearBothStops, r.hold(UiKey::Stops, kBothStops));
+  EXPECT_EQ(UiIntent::ClearBothStops, r.longHold(UiKey::Stops, kBothStops));
 }
 
 TEST(UiStateClearBoth, DoesNotDisturbTheSingleStopGestures) {
@@ -2460,8 +2481,8 @@ TEST(UiStateClearBoth, DoesNotDisturbTheSingleStopGestures) {
   // inside the widget (§4's click-sets / hold-clears asymmetry).
   Rig r;
   r.click(UiKey::Stops, kBothStops);
-  EXPECT_EQ(UiIntent::ClearLeftStop, r.hold(UiKey::Left, kBothStops));
-  EXPECT_EQ(UiIntent::ClearRightStop, r.hold(UiKey::Right, kBothStops));
+  EXPECT_EQ(UiIntent::ClearLeftStop, r.longHold(UiKey::Left, kBothStops));
+  EXPECT_EQ(UiIntent::ClearRightStop, r.longHold(UiKey::Right, kBothStops));
   EXPECT_EQ(UiIntent::None, r.click(UiKey::Left, kBothStops));
   Rig r2;
   r2.click(UiKey::Stops, kNoStops);
@@ -2565,7 +2586,7 @@ TEST(UiStateStopsToggle, CaseThreeHoldFromJogOpensFillsAndClearsBoth) {
   r.advance(UiState::kStopsConfirmMs / 2);
   EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
   EXPECT_EQ(UiIntent::ClearBothStops,
-            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+            r.key(UiKey::Stops, UiKeyEvent::LongHold, kBothStops));
   EXPECT_EQ(UiFocus::Stops, r.focus());
 }
 
@@ -2585,7 +2606,7 @@ TEST(UiStateStopsToggle, CaseFourHoldFromStopsStillFillsAndStillClearsBoth) {
   r.advance(UiState::kStopsConfirmMs / 2);
   EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
   EXPECT_EQ(UiIntent::ClearBothStops,
-            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+            r.key(UiKey::Stops, UiKeyEvent::LongHold, kBothStops));
   EXPECT_EQ(UiFocus::Stops, r.focus());
   EXPECT_EQ(UiIntent::None,
             r.key(UiKey::Stops, UiKeyEvent::Release, kBothStops));
@@ -2865,7 +2886,7 @@ TEST(UiStateConfirmBar, EmptiesWhenTheHoldFires) {
   r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
   r.advance(UiState::kStopsConfirmMs);
   ASSERT_EQ(UiIntent::ClearBothStops,
-            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+            r.key(UiKey::Stops, UiKeyEvent::LongHold, kBothStops));
   EXPECT_EQ(0, r.ui().stopsConfirmPermille(r.now()));
 }
 
@@ -2875,7 +2896,7 @@ TEST(UiStateConfirmBar, HoldFiresOnlyOnce) {
   r.click(UiKey::Stops, kBothStops);
   r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
   ASSERT_EQ(UiIntent::ClearBothStops,
-            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+            r.key(UiKey::Stops, UiKeyEvent::LongHold, kBothStops));
   EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
 }
 
@@ -2922,7 +2943,7 @@ TEST(UiStateConfirmBar, FillsWhileHeldFromTheRestScreen) {
   r.advance(UiState::kStopsConfirmMs - 700);
   EXPECT_EQ(1000, r.ui().stopsConfirmPermille(r.now()));
   EXPECT_EQ(UiIntent::ClearBothStops,
-            r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+            r.key(UiKey::Stops, UiKeyEvent::LongHold, kBothStops));
 }
 
 TEST(UiStateConfirmBar, DoesNotFillFromTheRestScreenForAGestureThatWouldFail) {
@@ -3954,7 +3975,7 @@ TEST(UiStateMotionLockout, EverythingIsLiveAgainOnceTheCarriageIsAtRest) {
 
   Rig zero;
   ASSERT_EQ(UiIntent::None, zero.hold(UiKey::Ok, moving));
-  EXPECT_EQ(UiIntent::ZeroDro, zero.hold(UiKey::Ok, kNoStops));
+  EXPECT_EQ(UiIntent::ZeroDro, zero.longHold(UiKey::Ok, kNoStops));
 
   Rig knob;
   ASSERT_EQ(UiIntent::None,
@@ -4743,6 +4764,87 @@ TEST(UiStateOta, HasNoIdleTimeout) {
   r.advance(kTimeout * 10);
   EXPECT_FALSE(r.tick(kOta));
   EXPECT_EQ(UiFocus::Ota, r.focus());
+}
+
+// ===========================================================================
+// 20. THE TWO HOLD THRESHOLDS - Hold is cheap now, LongHold is not
+//
+// kKeyHoldMs was halved to 500 ms so hold-to-jog stops making the operator
+// wait out dead time before the carriage moves. Everything that TAKES
+// SOMETHING AWAY moved to LongHold (1 s) and kept the dwell it already had.
+//
+// The tests above prove each destructive gesture still fires on LongHold.
+// These prove the other half, which is the half that makes the halving safe:
+// a press let go at the short threshold destroys NOTHING. Without these, a
+// future edit could quietly move any of them back onto Hold and every other
+// test in this file would still pass.
+// ===========================================================================
+
+TEST(UiStateHoldThresholds, AShortHoldOnStopsDoesNotClearBoth) {
+  Rig r;
+  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Stops, kBothStops))
+      << "500 ms only says the press is a hold; the bar has not filled";
+}
+
+TEST(UiStateHoldThresholds, AShortHoldOnStopsDoesNotToggleTheWidgetEither) {
+  // The specific trap in wiring this up: with the clear moved off Hold, a Hold
+  // reaching the STOPS Click handler by fallthrough would toggle the selector.
+  // Inert means inert, not "does something smaller".
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  ASSERT_EQ(UiFocus::Stops, r.focus());
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+  EXPECT_EQ(UiFocus::Stops, r.focus()) << "the widget stays exactly as it was";
+}
+
+TEST(UiStateHoldThresholds, TheConfirmBarKeepsFillingThroughTheShortHold) {
+  // The bar tracks the press, not the Hold event. It must not empty at 500 ms
+  // now that the Hold no longer consumes the gesture - the operator is halfway
+  // through a deliberate action and the screen has to keep saying so.
+  Rig r;
+  r.key(UiKey::Stops, UiKeyEvent::Press, kBothStops);
+  r.advance(UiState::kStopsConfirmMs / 2);
+  ASSERT_EQ(500, r.ui().stopsConfirmPermille(r.now()));
+  EXPECT_EQ(UiIntent::None, r.key(UiKey::Stops, UiKeyEvent::Hold, kBothStops));
+  EXPECT_EQ(500, r.ui().stopsConfirmPermille(r.now()))
+      << "the Hold must not disarm the confirm it is on the way to earning";
+}
+
+TEST(UiStateHoldThresholds, AShortHoldOnAnArrowDoesNotClearThatStop) {
+  Rig r;
+  r.enterFocus(UiFocus::Stops);
+  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Left, kLeftOnly));
+  Rig r2;
+  r2.enterFocus(UiFocus::Stops);
+  EXPECT_EQ(UiIntent::None, r2.hold(UiKey::Right, kRightOnly));
+}
+
+TEST(UiStateHoldThresholds, AShortHoldOnOkDoesNotZeroTheDro) {
+  Rig r;
+  ASSERT_EQ(UiFocus::Jog, r.focus());
+  EXPECT_EQ(UiIntent::None, r.hold(UiKey::Ok))
+      << "the datum every position is measured from keeps its full second";
+}
+
+TEST(UiStateHoldThresholds, TheJogStillFiresOnTheShortHold) {
+  // The point of the whole change. This is the gesture that got faster, and it
+  // must still be the SHORT threshold that starts it - a jog that waited for
+  // LongHold would leave the operator exactly where they started.
+  Rig r;
+  EXPECT_EQ(UiIntent::JogToLeftStop, r.hold(UiKey::Left, kLeftOnly));
+}
+
+TEST(UiStateHoldThresholds, ALongHoldOnAJogArrowDoesNotFireASecondTime) {
+  // On the machine the LongHold ALWAYS arrives 500 ms into a held jog, because
+  // keyscan does not know the jog does not want it. It must be inert: a second
+  // intent here would re-issue the jog mid-gesture.
+  Rig r;
+  r.key(UiKey::Left, UiKeyEvent::Press, kLeftOnly);
+  ASSERT_EQ(UiIntent::JogToLeftStop,
+            r.key(UiKey::Left, UiKeyEvent::Hold, kLeftOnly));
+  EXPECT_EQ(UiIntent::None,
+            r.key(UiKey::Left, UiKeyEvent::LongHold, kLeftOnly))
+      << "the jog is already running; the later threshold has nothing to add";
 }
 
 }  // namespace

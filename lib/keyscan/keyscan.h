@@ -49,6 +49,14 @@ enum KeyScanEvent {
   KS_PRESSED = 1,
   KS_CLICKED = 2,
   KS_HELD = 3,
+  // The SECOND hold threshold, for gestures that destroy something. Fires once
+  // per press, later, and only if the key is still down. A consumer that does
+  // not care simply never looks at it - KS_HELD still arrives for every press
+  // that reaches it, exactly as before.
+  // 6, NOT 5: src/keyarray.cpp passes these values through as ButtonState
+  // verbatim, and BS_DOUBLE_CLICKED already owns 5 (it is never emitted, but
+  // the numbering is load-bearing). The static_assert block there pins it.
+  KS_LONG_HELD = 6,
   KS_RELEASED = 4,
 };
 
@@ -75,10 +83,30 @@ struct KeyScanOut {
 // sample re-reads the whole matrix regardless.
 static const unsigned long kKeyDebounceMs = 8;
 
-// How long a key must be down before it counts as a Hold. UNCHANGED at 1 s:
-// UiState's clear-both-stops gesture and the OK-hold DRO zero are both
-// specified against it, and both are pinned by host tests.
-static const unsigned long kKeyHoldMs = 1000;
+// TWO hold thresholds, because "this press is a hold" and "this press may
+// destroy something" are different questions and were previously answered by
+// the same number.
+//
+// kKeyHoldMs is when a press stops being a tap. HALVED to 500 ms: the gesture
+// it gates most often is hold-to-jog (issue #11), where the wait is dead time
+// before the carriage moves and firing early costs at worst a jog that stops
+// the moment the operator lets go. A second of that was reported as annoying
+// in use on the machine.
+//
+// kKeyLongHoldMs is the confirm dwell for the gestures that take something
+// away - clear both stops, clear one stop, zero the DRO. It is 1 s, which is
+// what ALL of those required before this split, so none of them changed: the
+// halving buys the jog its responsiveness without making a destructive gesture
+// one millisecond easier to trigger by resting a finger. Clear-both is the one
+// that matters most - it leaves syncPositionState with no anchor at all, so the
+// thread cannot be picked up for a second cut - and UiState draws a confirm bar
+// across exactly this interval (kStopsConfirmMs).
+//
+// Between the two, a press is a recognised Hold that has not yet earned the
+// destructive action. Releasing there does nothing at all, which is the escape
+// hatch the bar exists to offer.
+static const unsigned long kKeyHoldMs = 500;
+static const unsigned long kKeyLongHoldMs = 1000;
 
 // The most events one update() can produce. The worst case is a roll from one
 // key straight to another without passing through zero, which retires the old
@@ -125,6 +153,9 @@ class KeyScanner {
   // a press held across a millis() wrap cannot produce both.
   unsigned long m_stableSinceMs;
   bool m_holdFired;
+  // Same once-per-press latch as m_holdFired, for the later threshold. Two
+  // flags rather than a counter so neither can be reached by the other's path.
+  bool m_longHoldFired;
 
   unsigned long m_bounceRejects;
 };
