@@ -564,7 +564,7 @@ void publishOutcome(Rig& r, const OtaOutcome& o, unsigned long nowMs = 0) {
   // way, and anything a scene wants in the byte counters has to be set after.
   r.gs->setOTA();
   r.gs->setOtaText(o.headline(), o.detail());
-  r.gs->setOtaVersionLine(o.versionTransition());
+  r.gs->setOtaContextLine(o.contextLine());
   r.gs->setOtaProgressMs(nowMs);
   switch (o.result()) {
   case OtaResult::InProgress:

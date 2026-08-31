@@ -271,6 +271,25 @@ class OtaOutcome {
   // screen alike ("held through the download").
   const char* versionTransition() const { return m_versionTransition; }
 
+  // WHAT THE TOP LINE OF THE OTA SCREEN SHOWS. One line, two jobs, because
+  // they never overlap in time: the Wi-Fi signal while connecting and
+  // checking, when the release tag is not known yet and a marginal link is
+  // the thing worth seeing before the download commits; then the version
+  // pair from the moment noteVersion() supplies the tag, held through the
+  // download and the settled screen.
+  //
+  // THIS EXISTS BECAUSE THE SIGNAL MUST NOT GO IN THE DETAIL. It did, and
+  // the rendered screenshot showed why that is wrong: drawOTA() runs the
+  // detail through otaFittedLine(), which PROMOTES a detail that fits into
+  // the 26pt headline slot - right for a full sentence like "No Wi-Fi -
+  // check network settings", and wrong for a short supplementary reading,
+  // which replaced "CONNECTING" and left the screen saying only
+  // "Wi-Fi -61 dBm" with no indication of what the machine was doing.
+  const char* contextLine() const {
+    return m_versionTransition[0] != 0 ? m_versionTransition
+                                       : m_signalDetail;
+  }
+
   // See "RATE SMOOTHING" above.
   unsigned long bytesPerSec(unsigned long nowMs) const;
 

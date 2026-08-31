@@ -326,7 +326,7 @@ void ESPCommsManager::publishOutcome() {
     // colour under the new text, rather than a red UPDATE FAILED colour applied
     // to the text of whatever was happening before it.
     gs->setOtaText(m_outcome.headline(), m_outcome.detail());
-    gs->setOtaVersionLine(m_outcome.versionTransition());
+    gs->setOtaContextLine(m_outcome.contextLine());
 
     switch (m_outcome.result()) {
     case OtaResult::InProgress:

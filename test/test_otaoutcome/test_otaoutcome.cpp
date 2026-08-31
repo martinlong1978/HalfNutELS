@@ -1148,6 +1148,62 @@ TEST(OtaOutcome, SignalIsVisibleBeforeTheDownloadCommits) {
   EXPECT_FALSE(o.settled());
 }
 
+// --- The context line: one slot, two jobs -----------------------------------
+//
+// The top line of the OTA screen. The signal while connecting and checking,
+// when the release tag is not known yet; the version pair from the moment it
+// is, held through the download.
+//
+// It exists because the signal MUST NOT live in the detail. It did, and the
+// rendered screenshot showed why: drawOTA() runs the detail through
+// otaFittedLine(), which promotes a detail that FITS into the 26pt headline
+// slot. Right for "No Wi-Fi - check network settings"; wrong for a short
+// reading, which replaced "CONNECTING" outright and left the screen saying
+// only "Wi-Fi -61 dBm" with no indication of what the machine was doing.
+// Every static_assert in the display passed the whole time.
+
+TEST(OtaOutcome, ContextLineIsEmptyBeforeAnythingIsKnown) {
+  OtaOutcome o;
+  o.begin(kT0);
+  EXPECT_EQ(std::string(o.contextLine()), "");
+}
+
+TEST(OtaOutcome, ContextLineCarriesTheSignalBeforeTheVersionIsKnown) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.notePhase(OtaPhase::Connecting, kT0);
+  o.noteSignal(-61);
+  EXPECT_EQ(std::string(o.contextLine()), "Wi-Fi -61 dBm");
+}
+
+TEST(OtaOutcome, TheVersionPairTakesOverTheContextLineOnceKnown) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.5");
+  o.notePhase(OtaPhase::Connecting, kT0);
+  o.noteSignal(-61);
+  ASSERT_EQ(std::string(o.contextLine()), "Wi-Fi -61 dBm");
+  o.noteVersion("v1.0.6");
+  EXPECT_EQ(std::string(o.contextLine()), "v1.0.5 -> v1.0.6")
+      << "the version pair is the more useful of the two once it exists";
+}
+
+TEST(OtaOutcome, TheHeadlineSurvivesAKnownSignalWhileConnecting) {
+  // THE REGRESSION FENCE for the defect above: the phase word must still be
+  // the headline, and the detail must still be the phase detail, however
+  // short and however well the signal would have fitted.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.notePhase(OtaPhase::Connecting, kT0);
+  o.noteSignal(-61);
+  EXPECT_EQ(std::string(o.headline()), "CONNECTING");
+  EXPECT_EQ(std::string(o.detail()), "Joining Wi-Fi");
+
+  o.notePhase(OtaPhase::Checking, kT0 + 100);
+  EXPECT_EQ(std::string(o.headline()), "CHECKING");
+  EXPECT_EQ(std::string(o.detail()), "Looking for a newer release");
+}
+
 // --- Restarting vs. Now running: the success-wording bug ---------------------
 //
 // OtaResult::Success has always rendered "Now running %s" - correct for a

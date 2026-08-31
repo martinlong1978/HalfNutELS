@@ -2943,7 +2943,7 @@ void Display::drawOTA() {
   // label -- not gated by anything below, because it never goes stale
   // (versionTransition() is held unchanged from the moment it is known
   // through Downloading, Finishing and the settled screen alike).
-  lv_label_set_text(updateVersionLabel, state->getOtaVersionLine());
+  lv_label_set_text(updateVersionLabel, state->getOtaContextLine());
 
   // Update.writeStream() BLOCKS the OTA task, so a stalled transfer stops
   // Update.onProgress() firing entirely -- and with it the throttled

@@ -490,18 +490,16 @@ void OtaOutcome::render(unsigned long nowMs) {
       switch (m_phase) {
         case OtaPhase::Connecting:
           copyInto(m_headline, kHeadlineLen, "CONNECTING");
-          // Wi-Fi signal is visible as soon as it is known, from Connecting
-          // through Checking - "a marginal signal is visible before the
-          // download commits" (owner's wording) - and falls back to the
-          // static phase word before the radio has answered at all.
-          copyInto(m_detail, kDetailLen,
-                   m_signalKnown ? m_signalDetail : "Joining Wi-Fi");
+          // The PHASE WORD, not the signal. The signal is on the context
+          // line (contextLine()) because a short detail gets promoted into
+          // the headline slot by otaFittedLine() and would replace
+          // "CONNECTING" entirely - the rendered screenshot is what caught
+          // that; every static_assert in the display passed regardless.
+          copyInto(m_detail, kDetailLen, "Joining Wi-Fi");
           break;
         case OtaPhase::Checking:
           copyInto(m_headline, kHeadlineLen, "CHECKING");
-          copyInto(m_detail, kDetailLen, m_signalKnown
-                                              ? m_signalDetail
-                                              : "Looking for a newer release");
+          copyInto(m_detail, kDetailLen, "Looking for a newer release");
           break;
         case OtaPhase::Downloading: {
           copyInto(m_headline, kHeadlineLen, "UPDATING");

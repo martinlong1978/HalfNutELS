@@ -162,7 +162,7 @@ private:
   // OtaOutcome::kVersionTransitionLen (56 = kVersionLen*2 + 8); not
   // #include <otaoutcome.h> for the same reason m_otaHeadline/m_otaDetail
   // above are not either.
-  char m_otaVersionLine[56];
+  char m_otaContextLine[56];
 
   // millis() at the last live progress callback (Update.onProgress), i.e. the
   // last time m_otaHeadline/m_otaDetail's rate+ETA content was actually
@@ -416,8 +416,8 @@ public:
   // The version-transition line ("v1.0.5 -> v1.0.6"), straight off
   // OtaOutcome::versionTransition(). "" until known, same convention as
   // m_otaHeadline/m_otaDetail.
-  void setOtaVersionLine(const char* line);
-  const char* getOtaVersionLine();
+  void setOtaContextLine(const char* line);
+  const char* getOtaContextLine();
 
   // millis() at the last live Update.onProgress() callback - see
   // m_otaProgressAtMs's comment for why drawOTA() needs this rather than
