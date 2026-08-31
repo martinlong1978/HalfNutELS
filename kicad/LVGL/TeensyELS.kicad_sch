@@ -5189,6 +5189,16 @@
 	)
 	(wire
 		(pts
+			(xy 299.72 59.69) (xy 299.72 60.96)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6008d738-3683-4933-a9fd-351cb45193cd")
+	)
+	(wire
+		(pts
 			(xy 91.44 226.06) (xy 97.79 226.06)
 		)
 		(stroke
@@ -5919,6 +5929,16 @@
 	)
 	(wire
 		(pts
+			(xy 299.72 52.07) (xy 303.53 52.07)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b9a4e673-0ba6-4465-afd2-43f6b8cc61ce")
+	)
+	(wire
+		(pts
 			(xy 361.95 95.25) (xy 369.57 95.25)
 		)
 		(stroke
@@ -6407,7 +6427,7 @@
 		)
 		(uuid "05f4ff9d-47bd-4e3b-b3de-f16936426dd3")
 	)
-	(label "BOOT"
+	(label "KnobSw"
 		(at 284.48 41.91 0)
 		(effects
 			(font
@@ -6626,6 +6646,16 @@
 			(justify left bottom)
 		)
 		(uuid "7902a782-28fc-495a-b567-3a6ac7a2b0c5")
+	)
+	(label "KnobSw"
+		(at 300.99 52.07 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "7b058af0-06e2-4afb-8d74-1c513aa8ade8")
 	)
 	(label "Dir"
 		(at 394.97 55.88 0)
@@ -6886,6 +6916,16 @@
 			(justify right bottom)
 		)
 		(uuid "f7e595ed-10b4-49d6-a85f-98e9cd655507")
+	)
+	(label "BOOT"
+		(at 311.15 46.99 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "fa1a3ffd-42a7-48cc-b16f-a11d0ad0ea76")
 	)
 	(label "LCD_CS"
 		(at 231.14 129.54 0)
@@ -7336,6 +7376,76 @@
 			(project "TeensyELS"
 				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
 					(reference "#PWR09")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 299.72 55.88 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "0b7b1290-c560-485e-8d19-e830e33a30f4")
+		(property "Reference" "R23"
+			(at 302.26 54.6099 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10K"
+			(at 302.26 57.1499 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 297.942 55.88 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 299.72 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 299.72 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "f3b8b180-566e-455d-a545-2f7f7c1a1ec0")
+		)
+		(pin "1"
+			(uuid "0519f9f3-3120-4a5c-9f4d-f35864ab503b")
+		)
+		(instances
+			(project "TeensyELS"
+				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
+					(reference "R23")
 					(unit 1)
 				)
 			)
@@ -8094,6 +8204,71 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 299.72 60.96 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "3171943b-57df-49c8-91d9-0dba93de79c0")
+		(property "Reference" "#PWR042"
+			(at 299.72 67.31 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 302.514 60.96 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 299.72 60.96 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 299.72 60.96 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 299.72 60.96 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "6692952f-7bb8-406e-9aa1-90513c9628bb")
+		)
+		(instances
+			(project "TeensyELS"
+				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
+					(reference "#PWR042")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:+3.3V")
 		(at 283.21 198.12 0)
 		(unit 1)
@@ -8310,7 +8485,7 @@
 			)
 		)
 		(property "Value" "+5V"
-			(at 291.592 55.88 0)
+			(at 291.084 54.61 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9338,6 +9513,81 @@
 			(project "TeensyELS"
 				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
 					(reference "#PWR018")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Transistor_FET:BSS138")
+		(at 308.61 52.07 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "700df842-7647-49b9-8029-4529d9a500d0")
+		(property "Reference" "Q10"
+			(at 314.96 50.7999 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "BSS138"
+			(at 314.96 53.3399 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23"
+			(at 313.69 53.975 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.onsemi.com/pub/Collateral/BSS138-D.PDF"
+			(at 313.69 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Description" "50V Vds, 0.22A Id, N-Channel MOSFET, SOT-23"
+			(at 308.61 52.07 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "2ecb705b-7106-4e48-8198-f52edfd43545")
+		)
+		(pin "3"
+			(uuid "f77e2939-9b5e-453d-b2b2-a0a3c7a93c5e")
+		)
+		(pin "2"
+			(uuid "56e29e96-013c-43db-b1dc-7a2d45baefb0")
+		)
+		(instances
+			(project ""
+				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
+					(reference "Q10")
 					(unit 1)
 				)
 			)
@@ -11144,10 +11394,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "b7bcd9ff-b3fc-4549-897b-1830918ce80d")
 		(property "Reference" "R11"
-			(at 294.64 66.04 90)
+			(at 294.64 69.85 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -11155,7 +11404,7 @@
 			)
 		)
 		(property "Value" "10K"
-			(at 294.64 68.58 90)
+			(at 294.64 75.184 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -12181,10 +12430,9 @@
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
-		(fields_autoplaced yes)
 		(uuid "d48be137-45c8-442f-b7e4-bb75f37e4970")
 		(property "Reference" "E1"
-			(at 290.83 65.4432 0)
+			(at 283.718 63.754 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -12193,12 +12441,13 @@
 			)
 		)
 		(property "Value" "~"
-			(at 290.83 67.3483 0)
+			(at 295.91 63.5383 0)
 			(effects
 				(font
 					(size 1.27 1.27)
 				)
 				(justify left)
+				(hide yes)
 			)
 		)
 		(property "Footprint" "Rotary:Sparkfun"
@@ -13346,6 +13595,72 @@
 			(project "TeensyELS"
 				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
 					(reference "R19")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 311.15 57.15 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "ffb7788f-a1c6-4710-881f-939a3ee642e8")
+		(property "Reference" "#PWR043"
+			(at 311.15 63.5 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 311.15 62.23 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 311.15 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 311.15 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 311.15 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "d23945fa-9717-43ea-878e-d2b56f2fcd91")
+		)
+		(instances
+			(project "TeensyELS"
+				(path "/b63e3b93-0f97-4c9b-9898-4ea21212bbeb"
+					(reference "#PWR043")
 					(unit 1)
 				)
 			)

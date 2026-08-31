@@ -31,6 +31,13 @@ kicad/LVGL/jlcpcb/project.db
 
 kicad/LVGL/TeensyELS-backups/
 
+# KiCad writes ~<file>.lck beside a board or schematic while an editor has
+# it open, and removes it on close - per-session state, never content. Two
+# were committed by accident and lingered for months; this keeps them out
+# for every project here, which makes the two kicad/4Layer/ lines above
+# redundant rather than wrong.
+~*.lck
+
 # Python bytecode from scripts/ (make_logo.py imports make_glyphs.py)
 __pycache__/
 *.pyc
