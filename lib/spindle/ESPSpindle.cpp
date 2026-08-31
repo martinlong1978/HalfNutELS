@@ -1,5 +1,5 @@
 #include <config.h>
-#include "Spindle.h"
+#include "spindle.h"
 #include "latheconfig.h"
 
 #include <math.h>
