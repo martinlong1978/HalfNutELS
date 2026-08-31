@@ -1148,6 +1148,50 @@ TEST(OtaOutcome, SignalIsVisibleBeforeTheDownloadCommits) {
   EXPECT_FALSE(o.settled());
 }
 
+// --- An arrow to itself is not a transition ---------------------------------
+//
+// Found on the machine, not in a test: a bench build of the v1.0.6 commit was
+// USB-flashed and offered the published v1.0.6, and the screen read
+// "v1.0.6 -> v1.0.6" - updating to the version it claimed to already be.
+//
+// Two causes, both real. A non-release build takes its FIRMWARE_VERSION from
+// the NEAREST TAG, so it reported v1.0.6 when its honest identity is its SHA
+// (ESPCommsManager now passes FIRMWARE_VERSION_ABOUT, the same identity the
+// About screen shows). And updateVersionTransition() rendered "X -> Y"
+// whenever both sides were known, without ever asking whether they differed -
+// which is also what a release build sitting up to date would have shown.
+
+TEST(OtaOutcome, EqualVersionsRenderOnceNotAsAnArrowToThemselves) {
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.6");
+  o.noteVersion("v1.0.6");
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.6")
+      << "not \"v1.0.6 -> v1.0.6\" - there is no transition to describe";
+}
+
+TEST(OtaOutcome, ASubsequentDifferentTagRestoresTheArrow) {
+  // The equality case must not latch: a device that checked while up to date
+  // and later saw a newer release still needs the pair.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("v1.0.6");
+  o.noteVersion("v1.0.6");
+  ASSERT_EQ(std::string(o.versionTransition()), "v1.0.6");
+  o.noteVersion("v1.0.7");
+  EXPECT_EQ(std::string(o.versionTransition()), "v1.0.6 -> v1.0.7");
+}
+
+TEST(OtaOutcome, ABenchBuildIdentifiedByShaStillShowsARealTransition) {
+  // What the machine will now show for the case that exposed this: the SHA is
+  // never equal to a tag, so the arrow is meaningful again.
+  OtaOutcome o;
+  o.begin(kT0);
+  o.noteCurrentVersion("c7a4cd1*");
+  o.noteVersion("v1.0.6");
+  EXPECT_EQ(std::string(o.versionTransition()), "c7a4cd1* -> v1.0.6");
+}
+
 // --- The context line: one slot, two jobs -----------------------------------
 //
 // The top line of the OTA screen. The signal while connecting and checking,

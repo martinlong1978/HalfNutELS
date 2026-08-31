@@ -195,6 +195,16 @@ void OtaOutcome::noteCurrentVersion(const char* version) {
 
 void OtaOutcome::updateVersionTransition() {
   if (m_currentVersionKnown && m_versionKnown) {
+    // AN ARROW TO ITSELF IS NOT A TRANSITION. Seen on the bench: the
+    // screen read "v1.0.6 -> v1.0.6" - updating to the version it claimed
+    // to already be. It happens whenever the two sides agree: a release
+    // build that is up to date, or any build whose reported version equals
+    // the published tag. In both cases the honest thing is to say where
+    // the machine is, once.
+    if (strcmp(m_currentVersion, m_version) == 0) {
+      copyInto(m_versionTransition, kVersionTransitionLen, m_version);
+      return;
+    }
     snprintf(m_versionTransition, kVersionTransitionLen, "%s -> %s",
              m_currentVersion, m_version);
   } else {

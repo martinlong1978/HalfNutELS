@@ -408,7 +408,13 @@ void ESPCommsManager::runOta() {
     // The version this device is running BEFORE the attempt - the other half
     // of the "v1.0.5 -> v1.0.6" transition line, once noteVersion() supplies
     // the release tag during the Checking phase below.
-    m_outcome.noteCurrentVersion(FIRMWARE_VERSION);
+    // FIRMWARE_VERSION_ABOUT, not FIRMWARE_VERSION: the same identity the
+    // About screen shows, which is the SHA on a build that is not a release.
+    // A bench build takes its FIRMWARE_VERSION from the NEAREST TAG, so
+    // passing the raw version made the screen read "v1.0.6 -> v1.0.6" while
+    // downloading the real v1.0.6 over an unofficial build of the same commit.
+    // "c7a4cd1* -> v1.0.6" is what actually happened.
+    m_outcome.noteCurrentVersion(FIRMWARE_VERSION_ABOUT);
     publishOutcome();
 
     WebSettings* webSettings = getWebSettings();
