@@ -77,6 +77,25 @@ sha = _git("rev-parse", "--short", "HEAD")
 if ci_ref_type == "branch" and ci_ref_name:
     branch = ci_ref_name
 
+# THE VERSION IS THE TAG. Nothing hand-edits it, so a release cannot ship
+# naming a version other than the one it was tagged with - which was previously
+# a real failure mode standing between a commit and a tag.
+#
+#   tag build  -> the tag itself. This is the string the OTA check compares
+#                 against the release's tag_name, so it must be exact.
+#   otherwise  -> the most recent tag reachable from HEAD, which says what this
+#                 build is BASED ON. ELS_BUILD_SUFFIX already carries the branch
+#                 and commit, so the two together read "v1.0.5-master@abc1234*"
+#                 and there is no need to make the version itself long.
+#
+# `--abbrev=0` is what keeps it to the bare tag rather than describe's
+# "v1.0.5-3-gabc1234"; the splash renders version + suffix on one 320px line.
+version = None
+if ci_ref_type == "tag" and ci_ref_name:
+    version = ci_ref_name
+else:
+    version = _git("describe", "--tags", "--abbrev=0")
+
 # `git status --porcelain` is empty exactly when the tree is clean. An untracked
 # file counts: it may well be the thing that changed behaviour.
 status = _git("status", "--porcelain")
@@ -104,16 +123,26 @@ else:
         short_branch = branch if len(branch) <= 16 else branch[:15] + "~"
         suffix = "-{}@{}".format(short_branch, sha_label)
 
-env.Append(
-    CPPDEFINES=[
-        ("ELS_BUILD_IS_RELEASE", "1" if is_release else "0"),
-        ("ELS_BUILD_SHA", env.StringifyMacro(sha_label)),
-        ("ELS_BUILD_SUFFIX", env.StringifyMacro(suffix)),
-    ]
-)
+defines = [
+    ("ELS_BUILD_IS_RELEASE", "1" if is_release else "0"),
+    ("ELS_BUILD_SHA", env.StringifyMacro(sha_label)),
+    ("ELS_BUILD_SUFFIX", env.StringifyMacro(suffix)),
+]
+
+# Only override when git actually answered. A repo with no tags yet, or a build
+# from a tarball, falls through to include/version.h's fallback rather than
+# being stamped with an empty string.
+if version:
+    defines.append(("FIRMWARE_VERSION", env.StringifyMacro(version)))
+
+env.Append(CPPDEFINES=defines)
 
 print(
-    "build provenance: {} (branch={} sha={} dirty={})".format(
-        "RELEASE" if is_release else "not a release", branch, sha, dirty
+    "build provenance: {} version={} (branch={} sha={} dirty={})".format(
+        "RELEASE" if is_release else "not a release",
+        version if version else "<version.h fallback>",
+        branch,
+        sha,
+        dirty,
     )
 )

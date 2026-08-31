@@ -1,10 +1,26 @@
 #ifndef ELS_VERSION_H
 #define ELS_VERSION_H
 
-// Firmware version. Must match the git tag used for the GitHub release
-// (leading "v"), because the OTA version check compares this string against the
-// release's `tag_name` verbatim. Bump this before publishing a new release.
-#define FIRMWARE_VERSION "v1.0.5"
+// Firmware version. DERIVED FROM THE GIT TAG, not typed here.
+//
+// scripts/build_provenance.py injects it: the tag itself on a tag build, and
+// the most recent tag on any other build (where ELS_BUILD_SUFFIX already says
+// which branch and commit it really is). It has to match the release tag
+// verbatim, because the OTA check compares this string against the release's
+// `tag_name` with strcmp - and it now does so by construction rather than by
+// somebody remembering.
+//
+// This used to be a hand-edited constant, which meant cutting a release was
+// "edit this line, commit, then tag" and left a whole failure mode where the
+// two disagreed. There is nothing to bump any more: tag the commit you want to
+// release and the firmware names itself after it.
+//
+// The fallback below is what the `native` env, the screenshot harness, and a
+// build from a tarball with no git see. It is deliberately not a real-looking
+// version: nothing should mistake one of those for a release.
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "v0.0.0-dev"
+#endif
 
 // ---------------------------------------------------------------------------
 // BUILD PROVENANCE (GitHub issue #4)

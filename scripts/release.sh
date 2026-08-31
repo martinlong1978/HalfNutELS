@@ -16,43 +16,36 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION_H="$REPO_ROOT/include/version.h"
 BUILD_DIR="$REPO_ROOT/.pio/build/esp32dev_publish"
 FIRMWARE="$BUILD_DIR/firmware.bin"
 # The OTA permalink downloads an asset literally named elstft.bin, so the upload
 # must have that filename. Copy the build output to that name before uploading.
 ASSET="$BUILD_DIR/elstft.bin"
 
-# Pull FIRMWARE_VERSION ("v0.1.0") out of version.h.
-VERSION="$(grep -oE '#define[[:space:]]+FIRMWARE_VERSION[[:space:]]+"[^"]+"' "$VERSION_H" \
-  | grep -oE '"[^"]+"' | tr -d '"')"
-
-if [ -z "${VERSION:-}" ]; then
-  echo "ERROR: could not read FIRMWARE_VERSION from $VERSION_H" >&2
-  exit 1
+# THE VERSION IS THE TAG. It is no longer read from include/version.h, which
+# no longer holds one: scripts/build_provenance.py injects FIRMWARE_VERSION
+# into the build from this same tag, so the string the device reports and the
+# string the release is named after come from ONE place and cannot disagree.
+# That removes the failure this script used to have to guard against.
+if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+  VERSION="${GITHUB_REF_NAME:-}"
+else
+  # A bench publish. HEAD must be exactly on a tag - without one there is
+  # nothing to name the release after, and whatever got built was stamped with
+  # the PREVIOUS tag, so publishing it would be a lie.
+  VERSION="$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null || true)"
+  if [ -z "$VERSION" ]; then
+    echo "ERROR: HEAD is not on a tag, so there is no version to publish." >&2
+    echo "       Tag the commit first:  git tag v1.0.6 && git push <remote> v1.0.6" >&2
+    echo "       (pushing the tag is normally enough - CI publishes it for you)" >&2
+    exit 1
+  fi
 fi
 
 if [ ! -f "$FIRMWARE" ]; then
   echo "ERROR: firmware not found at $FIRMWARE" >&2
   echo "Build it first:  pio run -e esp32dev_publish" >&2
   exit 1
-fi
-
-# THE GUARD THAT MATTERS. When CI runs this from a tag push, the tag and
-# FIRMWARE_VERSION must agree, because the device compares the release's
-# tag_name against FIRMWARE_VERSION VERBATIM (src/ESPCommsManager.cpp). If they
-# disagree the update is silently broken in one of two directions: a device on
-# the new firmware keeps being offered it, or one on the old firmware is never
-# told. Neither surfaces until someone tries to update a real lathe.
-if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-  TAG="${GITHUB_REF_NAME:-}"
-  if [ "$TAG" != "$VERSION" ]; then
-    echo "ERROR: tag $TAG does not match FIRMWARE_VERSION $VERSION." >&2
-    echo "       The OTA check compares these verbatim, so publishing this" >&2
-    echo "       would break the update path. Bump include/version.h to match" >&2
-    echo "       the tag (or retag), then push again." >&2
-    exit 1
-  fi
 fi
 
 cp "$FIRMWARE" "$ASSET"
